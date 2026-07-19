@@ -22,10 +22,17 @@ pub fn app(state: AppState) -> Router {
         .route("/companies/{company_id}/projects", post(create_project))
         .route("/projects/{project_id}/goals", post(create_goal))
         .route(
+            "/projects/{project_id}/workspaces",
+            post(create_workspace).get(list_workspaces),
+        )
+        .route(
             "/companies/{company_id}/tasks",
             post(create_task).get(list_tasks),
         )
         .route("/tasks/{task_id}/transition", post(transition_task))
+        .route("/tasks/{task_id}/start", post(start_task))
+        .route("/sessions/{session_id}", get(get_session))
+        .route("/sessions/{session_id}/diff", get(get_session_diff))
         .route("/audit/events", get(list_events))
         .route("/audit/verify", get(verify_chain))
         .with_state(state)
@@ -37,8 +44,23 @@ pub enum ApiError {
     NotFound(&'static str),
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    Conflict(String),
     #[error("internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<crate::runner::RunnerError> for ApiError {
+    fn from(e: crate::runner::RunnerError) -> Self {
+        use crate::runner::RunnerError;
+        match e {
+            RunnerError::NotFound(what) => ApiError::NotFound(what),
+            RunnerError::Invalid(msg) => ApiError::Invalid(msg),
+            RunnerError::Conflict => ApiError::Conflict(e.to_string()),
+            RunnerError::Git(msg) => ApiError::Internal(msg.into()),
+            RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
+        }
+    }
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -58,6 +80,7 @@ impl IntoResponse for ApiError {
         let status = match &self {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Invalid(_) => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Internal(source) => {
                 // The client gets an opaque error; the operator gets the cause.
                 eprintln!("internal error: {source}");
@@ -583,6 +606,211 @@ async fn transition_task(
         "status": to.as_str(),
         "assignee_agent_id": assignee,
     })))
+}
+
+// ---------- workspaces & execution ----------
+
+#[derive(Deserialize)]
+struct CreateWorkspace {
+    name: String,
+    /// Path of the git repository agents will work on.
+    cwd: String,
+    default_ref: Option<String>,
+    /// Defaults to true: the primary workspace is the one task sessions use.
+    is_primary: Option<bool>,
+}
+
+async fn create_workspace(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    Json(req): Json<CreateWorkspace>,
+) -> Result<impl IntoResponse, ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::Invalid("workspace name must not be empty".into()));
+    }
+    if !std::path::Path::new(&req.cwd).is_dir() {
+        return Err(ApiError::Invalid(format!(
+            "cwd '{}' is not a directory",
+            req.cwd
+        )));
+    }
+    let is_primary = req.is_primary.unwrap_or(true);
+    let mut tx = state.pool.begin().await?;
+    let project: Option<(String,)> = sqlx::query_as("SELECT company_id FROM projects WHERE id = ?")
+        .bind(&project_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((company_id,)) = project else {
+        return Err(ApiError::NotFound("project"));
+    };
+    if is_primary {
+        sqlx::query("UPDATE project_workspaces SET is_primary = 0 WHERE project_id = ?")
+            .bind(&project_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let (id, created_at) = (new_id(), now());
+    sqlx::query(
+        "INSERT INTO project_workspaces (id, project_id, name, source_type, cwd, default_ref, is_primary, created_at)
+         VALUES (?, ?, ?, 'local_path', ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&project_id)
+    .bind(req.name.trim())
+    .bind(&req.cwd)
+    .bind(&req.default_ref)
+    .bind(is_primary)
+    .bind(&created_at)
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::WORKSPACE_CREATED,
+        &json!({ "workspace_id": id, "project_id": project_id, "cwd": req.cwd, "is_primary": is_primary }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "project_id": project_id,
+            "name": req.name.trim(),
+            "cwd": req.cwd,
+            "default_ref": req.default_ref,
+            "is_primary": is_primary,
+            "created_at": created_at,
+        })),
+    ))
+}
+
+async fn list_workspaces(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, Option<String>, bool, String)> = sqlx::query_as(
+        "SELECT id, name, cwd, default_ref, is_primary, created_at
+         FROM project_workspaces WHERE project_id = ? ORDER BY created_at",
+    )
+    .bind(&project_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let workspaces: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, name, cwd, default_ref, is_primary, created_at)| {
+            json!({
+                "id": id,
+                "name": name,
+                "cwd": cwd,
+                "default_ref": default_ref,
+                "is_primary": is_primary,
+                "created_at": created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "workspaces": workspaces })))
+}
+
+#[derive(Deserialize)]
+struct StartTask {
+    agent_id: String,
+}
+
+async fn start_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(req): Json<StartTask>,
+) -> Result<impl IntoResponse, ApiError> {
+    let outcome = crate::runner::start_task(&state, &task_id, &req.agent_id).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "session_id": outcome.session_id,
+            "branch": outcome.branch,
+            "workspace_path": outcome.workspace_path,
+        })),
+    ))
+}
+
+/// (task_id, agent_id, adapter_type, status, branch, workspace_path, base_sha,
+///  output, exit_code, last_error, created_at, started_at, finished_at)
+type SessionRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+async fn get_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row: Option<SessionRow> = sqlx::query_as(
+        "SELECT task_id, agent_id, adapter_type, status, branch, workspace_path, base_sha,
+                output, exit_code, last_error, created_at, started_at, finished_at
+         FROM agent_task_sessions WHERE id = ?",
+    )
+    .bind(&session_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((
+        task_id,
+        agent_id,
+        adapter_type,
+        status,
+        branch,
+        workspace_path,
+        base_sha,
+        output,
+        exit_code,
+        last_error,
+        created_at,
+        started_at,
+        finished_at,
+    )) = row
+    else {
+        return Err(ApiError::NotFound("session"));
+    };
+    let cost: Option<(i64,)> =
+        sqlx::query_as("SELECT COALESCE(SUM(cost_cents), 0) FROM cost_events WHERE session_id = ?")
+            .bind(&session_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    Ok(Json(json!({
+        "id": session_id,
+        "task_id": task_id,
+        "agent_id": agent_id,
+        "adapter_type": adapter_type,
+        "status": status,
+        "branch": branch,
+        "workspace_path": workspace_path,
+        "base_sha": base_sha,
+        "output": output,
+        "exit_code": exit_code,
+        "last_error": last_error,
+        "cost_cents": cost.map(|(c,)| c).unwrap_or(0),
+        "created_at": created_at,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    })))
+}
+
+async fn get_session_diff(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<String, ApiError> {
+    Ok(crate::runner::session_diff(&state, &session_id).await?)
 }
 
 // ---------- audit ----------

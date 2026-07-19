@@ -1,4 +1,6 @@
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -8,6 +10,28 @@ use crate::domain::{AgentTraits, Autonomy, ReviewStrictness};
 #[derive(Clone)]
 pub struct AppState {
     pub pool: SqlitePool,
+    pub config: Arc<Config>,
+}
+
+/// Server configuration (env-driven; tests inject their own via `init_with`).
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// Override for the agent adapter command (`OVERMIND_AGENT_CMD`).
+    /// `None` uses the default Claude Code CLI invocation.
+    pub agent_cmd: Option<String>,
+    /// Where worktrees and other runtime data live (`OVERMIND_DATA_DIR`).
+    pub data_dir: PathBuf,
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        Config {
+            agent_cmd: std::env::var("OVERMIND_AGENT_CMD").ok(),
+            data_dir: std::env::var("OVERMIND_DATA_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("./overmind-data")),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -22,8 +46,14 @@ pub enum InitError {
     Url(String),
 }
 
-/// Open (creating if missing), migrate and seed the database.
+/// Open (creating if missing), migrate and seed the database, with
+/// configuration from the environment.
 pub async fn init(database_url: &str) -> Result<AppState, InitError> {
+    init_with(database_url, Config::from_env()).await
+}
+
+/// Like [`init`] but with explicit configuration (used by tests).
+pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, InitError> {
     let options = SqliteConnectOptions::from_str(database_url)
         .map_err(|e| InitError::Url(e.to_string()))?
         .create_if_missing(true)
@@ -44,7 +74,10 @@ pub async fn init(database_url: &str) -> Result<AppState, InitError> {
 
     sqlx::migrate!("./migrations").run(&pool).await?;
     seed_archetypes(&pool).await?;
-    Ok(AppState { pool })
+    Ok(AppState {
+        pool,
+        config: Arc::new(config),
+    })
 }
 
 /// The built-in archetype catalog (UX.md: "the catalog is a product surface").

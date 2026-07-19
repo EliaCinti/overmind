@@ -163,6 +163,9 @@ pub mod event_kind {
     pub const GOAL_CREATED: &str = "goal.created";
     pub const TASK_CREATED: &str = "task.created";
     pub const TASK_TRANSITIONED: &str = "task.transitioned";
+    pub const WORKSPACE_CREATED: &str = "workspace.created";
+    pub const SESSION_STARTED: &str = "session.started";
+    pub const SESSION_FINISHED: &str = "session.finished";
 }
 
 #[cfg(test)]

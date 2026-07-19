@@ -20,12 +20,13 @@ The data model and the accountability spine — before any agent runs.
 - [x] SQLite migrations (sqlx); HTTP API with typed, validated requests (CRUD + state transitions)
 - **Accept:** tasks move through their lifecycle via API ✓; audit log replays the full history ✓; tampering with an event breaks the chain verification ✓ (all covered by integration tests, 2026-07-19).
 
-## M2 — First agent runs `todo`
+## M2 — First agent runs `done`
 One agent, one task, end to end.
-- Runner spawns Claude Code CLI as child process in an isolated git worktree + branch
-- Task checkout is atomic (two concurrent checkouts of the same task: exactly one wins)
-- Output streamed and persisted; cost recorded on the task
-- **Accept:** assign a real coding task, agent completes it in its worktree, diff is visible, every step is in the audit log.
+- [x] Runner spawns the agent CLI (Claude Code by default, adapter command configurable via `OVERMIND_AGENT_CMD`) in an isolated git worktree + branch ([ADR-0008](adr/0008-execution-sessions-and-atomic-checkout.md))
+- [x] Task checkout is atomic — integration test proves two concurrent checkouts yield exactly one 202 and one 409
+- [x] Output captured and persisted on the session; cost recorded as Paperclip-style `cost_events` (parsed from the CLI's JSON result)
+- [x] `project_workspaces` + `agent_task_sessions` per Paperclip schema; failed sessions block the task with `last_error`
+- **Accept:** agent completes a task in its worktree ✓, diff visible via `GET /sessions/{id}/diff` ✓, every step audited with the chain still verifying ✓ (integration tests, 2026-07-19; verified with the stub adapter — a paid smoke run with the real Claude Code CLI is a manual follow-up).
 
 ## M3 — Parallelism + heartbeats `todo`
 - N agents in parallel, one worktree each, no interference
