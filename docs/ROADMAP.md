@@ -14,7 +14,8 @@ Repo, docs, decisions.
 
 ## M1 — Domain core + audit log `todo` ← next
 The data model and the accountability spine — before any agent runs.
-- Entities: Organization, Role, Agent, Mission, Goal, Ticket, Event
+- Entities: Organization, Role, Agent, Mission, Goal, Ticket, Event, Archetype
+- Agent characterization structured per [ADR-0005](adr/0005-structured-agent-characterization.md): archetype + typed traits + additive `custom_brief`
 - Append-only, hash-chained audit log; every ticket state change is an event
 - SQLite migrations; typed HTTP API (CRUD + state transitions)
 - **Accept:** tickets move through their lifecycle via API; audit log replays the full history; tampering with an event breaks the chain verification.
@@ -42,7 +43,8 @@ First real UI (React SPA).
 The company layer.
 - Org chart (roles, reporting lines), missions → goals → tickets cascade
 - Org chart UI
-- **Accept:** a mission created at the top produces goal-linked tickets assigned per role.
+- Guided agent hiring ([UX.md](UX.md) reference flow): archetype gallery → structured tuning → expert mode, with live "what this agent will do" preview
+- **Accept:** a mission created at the top produces goal-linked tickets assigned per role; a non-expert hires a working Security Engineer agent in under a minute without typing free text.
 
 ## M6 — Budgets + governance `todo`
 - Per-agent monthly budgets; **budget reservation atomic with ticket checkout**

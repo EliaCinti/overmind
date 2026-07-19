@@ -33,7 +33,7 @@ The coupling is MCP plus process management; neither repo imports or vendors the
 1. **Accountability** — immutable audit log, atomic task checkout, atomic budget enforcement. If we can't prove what an agent did and what it cost, the feature doesn't ship.
 2. **Security** — agents run sandboxed with least privilege; secrets never enter agent context; every approval gate is enforced server-side, not by prompt.
 3. **Memory** — the differentiator. The memory interface is designed first-class, not bolted on.
-4. **Craft** — the UI and the docs are part of the product. "Fatto bene" is a requirement, not an aspiration.
+4. **Craft** — the UI and the docs are part of the product. UX is governed by its own principles document ([UX.md](UX.md)): zero-to-working defaults, progressive disclosure (pick → tune → expert), click-first interaction, and the rule that structured choices map to server-enforced config. "Fatto bene" is a requirement, not an aspiration.
 
 ## Non-goals (for now)
 

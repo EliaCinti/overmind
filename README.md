@@ -11,6 +11,7 @@ What makes Overmind different: it is **memory-native**. Through a pluggable memo
 | Document | Purpose |
 |---|---|
 | [docs/VISION.md](docs/VISION.md) | What we're building, why, and what we're *not* building |
+| [docs/UX.md](docs/UX.md) | UX principles: progressive disclosure, click-first, enforceable choices |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design (living draft) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones — the single source of truth for "what's next" |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — every significant choice, with rationale |
