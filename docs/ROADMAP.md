@@ -4,15 +4,15 @@
 >
 > Status legend: `todo` · `in-progress` · `done`
 
-## M0 — Foundations `in-progress`
+## M0 — Foundations `done`
 Repo, docs, decisions.
 - [x] Repo + git init
 - [x] VISION / ARCHITECTURE / ROADMAP / ADRs 0001–0004
 - [x] Rust workspace skeleton (`overmind-server`), CI workflow (fmt, clippy, test), `cargo run` serves `/health` — verified locally (fmt+clippy+test green, endpoint answers)
-- [ ] First commit; GitHub repo + first green CI run
-- **Accept:** a fresh clone builds, tests pass in CI, docs explain the project to a stranger.
+- [x] First commit; public GitHub repo ([EliaCinti/overmind](https://github.com/EliaCinti/overmind)) + first green CI run (2026-07-19)
+- **Accept:** a fresh clone builds, tests pass in CI, docs explain the project to a stranger. ✓
 
-## M1 — Domain core + audit log `todo`
+## M1 — Domain core + audit log `todo` ← next
 The data model and the accountability spine — before any agent runs.
 - Entities: Organization, Role, Agent, Mission, Goal, Ticket, Event
 - Append-only, hash-chained audit log; every ticket state change is an event
