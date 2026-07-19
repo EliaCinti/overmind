@@ -1,15 +1,7 @@
-use axum::{Json, Router, routing::get};
-use serde_json::{Value, json};
+pub mod api;
+pub mod audit;
+pub mod db;
+pub mod domain;
 
-/// Build the Overmind HTTP router.
-pub fn app() -> Router {
-    Router::new().route("/health", get(health))
-}
-
-async fn health() -> Json<Value> {
-    Json(json!({
-        "status": "ok",
-        "name": env!("CARGO_PKG_NAME"),
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
-}
+pub use api::app;
+pub use db::{AppState, init};

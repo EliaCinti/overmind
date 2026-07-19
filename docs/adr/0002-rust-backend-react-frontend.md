@@ -5,7 +5,7 @@
 
 ## Context
 
-The server's core jobs are concurrency-heavy and correctness-critical: spawning and supervising many agent processes, managing git worktrees, atomic ticket checkout + budget reservation, an append-only audit log, WebSocket streaming. Elia asked to optimize for the language that *performs best for this domain*, not for learning-curve convenience (Claude writes the code).
+The server's core jobs are concurrency-heavy and correctness-critical: spawning and supervising many agent processes, managing git worktrees, atomic task checkout + budget reservation, an append-only audit log, WebSocket streaming. Elia asked to optimize for the language that *performs best for this domain*, not for learning-curve convenience (Claude writes the code).
 
 ## Decision
 

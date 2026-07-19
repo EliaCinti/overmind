@@ -16,7 +16,7 @@
 │                     Rust (axum + SQLite)                    │
 │                                                             │
 │  ┌────────────┐ ┌────────────┐ ┌───────────┐ ┌───────────┐  │
-│  │ org model  │ │  tickets & │ │ scheduler │ │ governance│  │
+│  │ org model  │ │  tasks &   │ │ scheduler │ │ governance│  │
 │  │ roles/goals│ │ audit log  │ │(heartbeat)│ │ & budgets │  │
 │  └────────────┘ └────────────┘ └───────────┘ └───────────┘  │
 │  ┌────────────────────────┐  ┌────────────────────────────┐ │
@@ -35,18 +35,18 @@
 
 ### overmind-server (Rust)
 
-- **Org model** — `Organization`, `Role`, `Agent`, `Mission`, `Goal`. Missions cascade into goals, goals into tickets. Reporting lines form a DAG (an agent has one manager; the root is the human owner).
-- **Tickets & audit** — `Ticket` is the unit of assigned work; every state change, tool call and decision appends an `Event` to an **append-only audit log**. Events are never updated or deleted.
-- **Scheduler** — heartbeat wake-ups per agent; an agent resumes its checked-out ticket with persisted context rather than restarting.
-- **Governance & budgets** — per-agent monthly budgets. **Invariant: ticket checkout and budget reservation are a single atomic transaction** (this is the hard problem Paperclip solved; we adopt the same guarantee). Approval gates (hiring, spend over threshold, protected actions) are enforced server-side.
+- **Company model** — `Company`, `Role`, `Agent`, `Project`, `Goal`. Projects cascade into goals, goals into tasks. Reporting lines form a DAG (an agent has one manager; the root is the human owner).
+- **Tasks & audit** — `Task` is the unit of assigned work; every state change, tool call and decision appends an `Event` to an **append-only audit log**. Events are never updated or deleted.
+- **Scheduler** — heartbeat wake-ups per agent; an agent resumes its checked-out task with persisted context rather than restarting.
+- **Governance & budgets** — per-agent monthly budgets. **Invariant: task checkout and budget reservation are a single atomic transaction** (this is the hard problem Paperclip solved; we adopt the same guarantee). Approval gates (hiring, spend over threshold, protected actions) are enforced server-side.
 - **Agent runners** — spawn external agent CLIs as child processes, each in **its own git worktree on its own branch** (Vibe Kanban's model). Runner captures stdout/stderr, streams progress, enforces timeouts, and reports cost.
 - **MCP layer** —
   - *client*: connects to configured MCP servers and exposes them to agents; the `MemoryProvider` is just a distinguished MCP connection.
-  - *server*: exposes Overmind itself over MCP (create ticket, read board, query audit), so external agents can participate.
+  - *server*: exposes Overmind itself over MCP (create task, read board, query audit), so external agents can participate.
 
 ### overmind-web (React + TypeScript)
 
-Kanban board (tickets by state), org chart view, diff review with inline comments, audit log browser, budget dashboards, approval inbox. Talks to the server over a typed API (OpenAPI-generated client); live updates over WebSocket.
+Kanban board (tasks by status), org chart view, diff review with inline comments, audit log browser, budget dashboards, approval inbox. Talks to the server over a typed API (OpenAPI-generated client); live updates over WebSocket.
 
 ### MemoryProvider contract
 
@@ -61,7 +61,7 @@ store_decision(decision)   → choices with rationale
 
 Rules: if no provider is configured, all calls are no-ops and Overmind is fully functional. Provider failures are logged, never fatal. Wadachi already implements a superset of this surface.
 
-**Wadachi as first-party managed brain** ([ADR-0004](adr/0004-wadachi-first-party-managed-brain.md)): beyond the generic contract, Overmind can provision, launch and supervise a dedicated Wadachi instance per organization (brain dir at `<data-dir>/orgs/<org>/brain/` — never the user's personal brain). The server manages its lifecycle like any supervised child process; the web UI surfaces organizational memory first-class: memory browser, decisions linked to the tickets that produced them, provenance tracing ("which memory guided this action"). No Wadachi code is vendored into this repo — integration is MCP + process management only.
+**Wadachi as first-party managed brain** ([ADR-0004](adr/0004-wadachi-first-party-managed-brain.md)): beyond the generic contract, Overmind can provision, launch and supervise a dedicated Wadachi instance per company (brain dir at `<data-dir>/companies/<company>/brain/` — never the user's personal brain). The server manages its lifecycle like any supervised child process; the web UI surfaces organizational memory first-class: memory browser, decisions linked to the tasks that produced them, provenance tracing ("which memory guided this action"). No Wadachi code is vendored into this repo — integration is MCP + process management only.
 
 ## Data & storage
 

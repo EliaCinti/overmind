@@ -2,7 +2,7 @@
 
 > The mind that runs your agent company.
 
-Overmind is an open-source orchestrator for **teams of AI agents**. It organizes agents into a company — org chart, missions, budgets, governance — and gives each agent real execution tooling: isolated git worktrees, a kanban board, diff review, full audit trails.
+Overmind is an open-source orchestrator for **teams of AI agents**. It organizes agents into a company — org chart, projects, budgets, governance — and gives each agent real execution tooling: isolated git worktrees, a kanban board, diff review, full audit trails.
 
 What makes Overmind different: it is **memory-native**. Through a pluggable memory interface (MCP), the whole organization shares a persistent brain — decisions with their *why*, discovered patterns, past mistakes — that survives across sessions. Overmind ships with first-party integration for [Wadachi](https://github.com/EliaCinti/wadachi): one click and the organization has its own managed brain. The interface stays open (any MCP memory server works) and Overmind works fully without one.
 
@@ -12,6 +12,7 @@ What makes Overmind different: it is **memory-native**. Through a pluggable memo
 |---|---|
 | [docs/VISION.md](docs/VISION.md) | What we're building, why, and what we're *not* building |
 | [docs/UX.md](docs/UX.md) | UX principles: progressive disclosure, click-first, enforceable choices |
+| [docs/PAPERCLIP-ALIGNMENT.md](docs/PAPERCLIP-ALIGNMENT.md) | Vocabulary canon and recorded deviations from Paperclip |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design (living draft) |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones — the single source of truth for "what's next" |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — every significant choice, with rationale |

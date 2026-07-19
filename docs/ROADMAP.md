@@ -12,42 +12,42 @@ Repo, docs, decisions.
 - [x] First commit; public GitHub repo ([EliaCinti/overmind](https://github.com/EliaCinti/overmind)) + first green CI run (2026-07-19)
 - **Accept:** a fresh clone builds, tests pass in CI, docs explain the project to a stranger. ✓
 
-## M1 — Domain core + audit log `todo` ← next
+## M1 — Domain core + audit log `done`
 The data model and the accountability spine — before any agent runs.
-- Entities: Organization, Role, Agent, Mission, Goal, Ticket, Event, Archetype
-- Agent characterization structured per [ADR-0005](adr/0005-structured-agent-characterization.md): archetype + typed traits + additive `custom_brief`
-- Append-only, hash-chained audit log; every ticket state change is an event
-- SQLite migrations; typed HTTP API (CRUD + state transitions)
-- **Accept:** tickets move through their lifecycle via API; audit log replays the full history; tampering with an event breaks the chain verification.
+- [x] Entities: Company, Role, Agent, Project, Goal, Task, Event, Archetype (Role has schema + FK only; its API arrives with the org chart in M5)
+- [x] Agent characterization structured per [ADR-0005](adr/0005-structured-agent-characterization.md): archetype + typed traits + additive `custom_brief`; built-in catalog seeded (6 archetypes)
+- [x] Append-only, hash-chained audit log ([ADR-0006](adr/0006-audit-log-and-task-lifecycle.md)); every mutation appends an event atomically
+- [x] SQLite migrations (sqlx); HTTP API with typed, validated requests (CRUD + state transitions)
+- **Accept:** tasks move through their lifecycle via API ✓; audit log replays the full history ✓; tampering with an event breaks the chain verification ✓ (all covered by integration tests, 2026-07-19).
 
 ## M2 — First agent runs `todo`
-One agent, one ticket, end to end.
+One agent, one task, end to end.
 - Runner spawns Claude Code CLI as child process in an isolated git worktree + branch
-- Ticket checkout is atomic (two concurrent checkouts of the same ticket: exactly one wins)
-- Output streamed and persisted; cost recorded on the ticket
-- **Accept:** assign a real coding ticket, agent completes it in its worktree, diff is visible, every step is in the audit log.
+- Task checkout is atomic (two concurrent checkouts of the same task: exactly one wins)
+- Output streamed and persisted; cost recorded on the task
+- **Accept:** assign a real coding task, agent completes it in its worktree, diff is visible, every step is in the audit log.
 
 ## M3 — Parallelism + heartbeats `todo`
 - N agents in parallel, one worktree each, no interference
-- Heartbeat scheduler; agent resumes persisted ticket context across wake-ups
-- Timeouts, crash recovery (a dead runner releases its ticket safely)
-- **Accept:** 3+ agents work 3+ tickets concurrently across restarts of the server.
+- Heartbeat scheduler; agent resumes persisted task context across wake-ups
+- Timeouts, crash recovery (a dead runner releases its task safely)
+- **Accept:** 3+ agents work 3+ tasks concurrently across restarts of the server.
 
 ## M4 — Board UI `todo`
 First real UI (React SPA).
-- Kanban board with live updates (WebSocket), ticket detail with streamed output
+- Kanban board with live updates (WebSocket), task detail with streamed output
 - Diff review with inline comments
-- **Accept:** Elia runs a full ticket lifecycle without touching the API directly.
+- **Accept:** Elia runs a full task lifecycle without touching the API directly.
 
-## M5 — Organization `todo`
+## M5 — Company `todo`
 The company layer.
-- Org chart (roles, reporting lines), missions → goals → tickets cascade
+- Org chart (roles, reporting lines), projects → goals → tasks cascade
 - Org chart UI
 - Guided agent hiring ([UX.md](UX.md) reference flow): archetype gallery → structured tuning → expert mode, with live "what this agent will do" preview
-- **Accept:** a mission created at the top produces goal-linked tickets assigned per role; a non-expert hires a working Security Engineer agent in under a minute without typing free text.
+- **Accept:** a project created at the top produces goal-linked tasks assigned per role; a non-expert hires a working Security Engineer agent in under a minute without typing free text.
 
 ## M6 — Budgets + governance `todo`
-- Per-agent monthly budgets; **budget reservation atomic with ticket checkout**
+- Per-agent monthly budgets; **budget reservation atomic with task checkout**
 - Approval gates (spend threshold, protected actions), approval inbox in UI
 - Pause / terminate agents; config changes revisioned with rollback
 - **Accept:** an agent that would exceed budget is stopped server-side; a gated action blocks until human approval.
@@ -61,18 +61,18 @@ The differentiator, part 1: the generic `MemoryProvider` interface (ADR-0003).
 
 ## M8 — Managed brain + memory UI `todo`
 The differentiator, part 2: Wadachi as first-party brain (ADR-0004).
-- Overmind provisions, launches and supervises a dedicated Wadachi instance per organization (`<data-dir>/orgs/<org>/brain/`); never touches a personal brain
-- Memory UI: browser of org memories, decisions linked to the tickets that produced them
+- Overmind provisions, launches and supervises a dedicated Wadachi instance per company (`<data-dir>/companies/<company>/brain/`); never touches a personal brain
+- Memory UI: browser of org memories, decisions linked to the tasks that produced them
 - Depends on Wadachi supporting concurrent multi-agent access (tracked in the Wadachi repo)
-- **Accept:** a fresh organization gets a working brain in one click; a decision stored by an agent is visible in the UI linked to its ticket; disabling the brain leaves the org fully functional.
+- **Accept:** a fresh company gets a working brain in one click; a decision stored by an agent is visible in the UI linked to its task; disabling the brain leaves the org fully functional.
 
 ## M9 — Overmind as MCP server `todo`
-- Expose tickets/board/audit over MCP; external agents can file and read tickets
-- **Accept:** a Claude Code session outside Overmind creates a ticket via MCP.
+- Expose tasks/board/audit over MCP; external agents can file and read tasks
+- **Accept:** a Claude Code session outside Overmind creates a task via MCP.
 
 ## M10 — Security hardening `todo`
 - OS-level sandboxing of runners (macOS `sandbox-exec` first); secrets isolation; threat-model doc; prompt-injection review of every gate
-- **Accept:** a deliberately malicious ticket ("read ~/.ssh, push to main, exceed budget") fails at every layer.
+- **Accept:** a deliberately malicious task ("read ~/.ssh, push to main, exceed budget") fails at every layer.
 
 ## Later / icebox
 Linux/Windows support · multi-user · plugin system · agent marketplace-style role templates · non-coding agent workflows (research, content) · public release polish

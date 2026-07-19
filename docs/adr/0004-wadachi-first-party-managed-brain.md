@@ -11,8 +11,8 @@ ADR-0003 made memory a generic, optional `MemoryProvider` over MCP, with Wadachi
 
 Wadachi is promoted from "reference implementation" to **first-party managed brain**:
 
-1. **Managed lifecycle** — Overmind can provision, launch, supervise and shut down a Wadachi instance on its own: one click and an organization has a brain. Each organization gets its **own dedicated brain directory** (e.g. `<data-dir>/orgs/<org>/brain/`). Overmind never reads or writes a user's personal Wadachi brain.
-2. **First-class UI** — organizational memory is surfaced inside Overmind: memory browser, decisions linked to the tickets that produced them, "why did agent X do Y" tracing back to the memories that guided it.
+1. **Managed lifecycle** — Overmind can provision, launch, supervise and shut down a Wadachi instance on its own: one click and a company has a brain. Each company gets its **own dedicated brain directory** (e.g. `<data-dir>/companies/<company>/brain/`). Overmind never reads or writes a user's personal Wadachi brain.
+2. **First-class UI** — organizational memory is surfaced inside Overmind: memory browser, decisions linked to the tasks that produced them, "why did agent X do Y" tracing back to the memories that guided it.
 3. **The contract stays open** — the `MemoryProvider` MCP interface from ADR-0003 is unchanged and generic; any conforming MCP server works; no provider configured → full functionality, memory calls are no-ops.
 4. **Development stays separate** — no vendored/embedded Wadachi code in this repo. Integration is via MCP + process management only. Changes Wadachi needs to serve Overmind (notably **concurrent multi-agent access** — Wadachi is single-user today) are developed in the Wadachi repo on its own terms.
 

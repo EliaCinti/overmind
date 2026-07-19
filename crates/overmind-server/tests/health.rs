@@ -3,9 +3,16 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+async fn test_app() -> axum::Router {
+    let state = overmind_server::init("sqlite::memory:")
+        .await
+        .expect("init in-memory db");
+    overmind_server::app(state)
+}
+
 #[tokio::test]
 async fn health_returns_ok_with_name_and_version() {
-    let app = overmind_server::app();
+    let app = test_app().await;
 
     let request = Request::builder()
         .uri("/health")
@@ -30,7 +37,7 @@ async fn health_returns_ok_with_name_and_version() {
 
 #[tokio::test]
 async fn unknown_route_returns_404() {
-    let app = overmind_server::app();
+    let app = test_app().await;
 
     let request = Request::builder()
         .uri("/does-not-exist")
