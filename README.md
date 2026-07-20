@@ -23,7 +23,7 @@ Open-source orchestration for teams of AI agents — **with a memory.**
 
 Overmind is a Rust server and a React UI that organizes AI agents into a company: org chart, budgets, governance, isolated git worktrees, and a tamper-evident audit trail. Bring your own agents, assign work, and watch it happen from one board.
 
-What makes it different: Overmind is **memory-native**. Through a pluggable interface (MCP), the whole organization shares a persistent brain — decisions with their _why_, patterns discovered, mistakes already made — that survives across sessions. The reference brain is [Wadachi](https://github.com/EliaCinti/wadachi); the interface stays open, and Overmind runs perfectly without one.
+What makes it different: Overmind is **memory-native**, and its brain is **[Wadachi](https://github.com/EliaCinti/wadachi) (轍)** — a persistent, semantically-searchable memory built for AI agents. Wadachi stores decisions with their _why_, the patterns your agents discover, and the mistakes already made, as a linked knowledge graph (a real Obsidian vault) that survives across every session and even proposes its own consolidations. Overmind ships with Wadachi as its **first-party brain**; the interface stays open (any MCP memory server works) and Overmind runs perfectly without one — but plug Wadachi in and your organization genuinely _learns_.
 
 **Manage the work, not the terminals.**
 
@@ -54,7 +54,7 @@ What makes it different: Overmind is **memory-native**. Through a pluggable inte
 <tr>
 <td align="center" width="33%">
 <h3>🧠 Organizational Memory</h3>
-The whole org shares a persistent brain over MCP (Wadachi). Agents load context before working and record what they learned. <em>Nobody else has this.</em>
+The whole org shares a persistent brain — <strong>Wadachi</strong> — over MCP. Agents load relevant past context before working and record what they learned. Your company accumulates judgment. <em>Nobody else has this.</em>
 </td>
 <td align="center" width="33%">
 <h3>🔌 Bring Your Own Agent</h3>
@@ -160,7 +160,23 @@ Progressive disclosure: pick an archetype, tune with clicks, drop into expert mo
 
 **Audit (hash-chained)** — Every mutation appends an immutable, SHA-256-chained event, committed in the same transaction as the change it records.
 
-**Memory (MCP)** — Overmind speaks MCP to a memory server (Wadachi is first-party) so the org remembers — and exposes itself over MCP so external agents can file and read tasks.
+**Memory (MCP)** — Overmind speaks MCP to **Wadachi**, its first-party brain, so the org remembers — and exposes itself over MCP so external agents can file and read tasks.
+
+<br/>
+
+## Powered by Wadachi
+
+<img align="right" width="30%" src="https://img.shields.io/badge/%E8%BD%A4-Wadachi-7c5cff?labelColor=1a1523" alt="Wadachi" />
+
+Overmind's memory isn't a bolt-on cache — it's **[Wadachi](https://github.com/EliaCinti/wadachi) (轍**, the ruts a wheel leaves in the road**)**, a persistent-memory engine for AI agents that Overmind adopts as its first-party brain.
+
+- **Semantic recall.** Agents ask "what do we know about this?" and get the relevant past — decisions, patterns, prior fixes — ranked by relevance, not keyword-matched.
+- **Decisions with their _why_.** Wadachi records not just what was chosen but the rationale and the alternatives rejected — the context future agents actually need.
+- **A living knowledge graph.** Memories link to each other (an Obsidian-compatible vault); Wadachi even runs a "sleep" pass that proposes consolidations of what the org has learned.
+- **Concurrency-safe.** Wadachi ≥ 0.14 handles many agents reading and writing at once, so Overmind's parallel runners share one brain without stepping on each other.
+- **Separate, by design.** Wadachi is its own project — use it without Overmind, or Overmind without it. The only coupling is the open MCP protocol; neither vendors the other's code.
+
+The result: an organization of agents that doesn't start from zero every morning.
 
 <br/>
 
@@ -224,7 +240,7 @@ The design is documented before the code: see [VISION](docs/VISION.md), [ARCHITE
 
 ## Prior art & credits
 
-Overmind's org layer is inspired by [Paperclip](https://github.com/paperclipai/paperclip) (MIT) and its execution layer by [Vibe Kanban](https://github.com/BloopAI/vibe-kanban). It adopts Paperclip's vocabulary and semantics where they serve (see [PAPERCLIP-ALIGNMENT](docs/PAPERCLIP-ALIGNMENT.md)) and contains **no AGPL code**. The organizational-memory layer and the tamper-evident audit chain are Overmind's own.
+Overmind's org layer is inspired by [Paperclip](https://github.com/paperclipai/paperclip) (MIT) and its execution layer by [Vibe Kanban](https://github.com/BloopAI/vibe-kanban). It adopts Paperclip's vocabulary and semantics where they serve (see [PAPERCLIP-ALIGNMENT](docs/PAPERCLIP-ALIGNMENT.md)) and contains **no AGPL code**. The organizational memory is powered by **[Wadachi](https://github.com/EliaCinti/wadachi)** — a sibling project, not a sub-component — integrated over MCP; the tamper-evident audit chain is Overmind's own.
 
 ## License
 
