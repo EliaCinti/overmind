@@ -470,15 +470,34 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         ctx.state.config.agent_cmd.clone().unwrap_or_else(|| {
             "claude -p \"$OVERMIND_TASK_PROMPT\" --output-format json".to_string()
         });
+    // Load what the organization remembers about this kind of work, and put
+    // it in front of the agent (and in an env var). A no-op when memory is off.
+    let memory_context = ctx
+        .state
+        .memory
+        .get_context(
+            &ctx.worktree_dir.to_string_lossy(),
+            &format!("{}\n{}", ctx.title, ctx.description),
+        )
+        .await;
+    let memory_block = memory_context
+        .as_deref()
+        .map(|m| {
+            format!(
+                "\n\nWhat the organization remembers (use it, don't repeat past mistakes):\n{m}"
+            )
+        })
+        .unwrap_or_default();
+
     let prompt = if resume {
         format!(
-            "You are resuming interrupted work on the task \"{}\".\n\n{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. Leave the changes uncommitted.",
-            ctx.title, ctx.description
+            "You are resuming interrupted work on the task \"{}\".\n\n{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. Leave the changes uncommitted.",
+            ctx.title, ctx.description, memory_block
         )
     } else {
         format!(
-            "You are working on the task \"{}\".\n\n{}\n\nWork in the current directory. When done, leave the changes uncommitted.",
-            ctx.title, ctx.description
+            "You are working on the task \"{}\".\n\n{}{}\n\nWork in the current directory. When done, leave the changes uncommitted.",
+            ctx.title, ctx.description, memory_block
         )
     };
 
@@ -504,6 +523,10 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         .env("OVERMIND_TASK_TITLE", &ctx.title)
         .env("OVERMIND_TASK_DESCRIPTION", &ctx.description)
         .env("OVERMIND_AGENT_TRAITS", &ctx.agent_traits)
+        .env(
+            "OVERMIND_MEMORY_CONTEXT",
+            memory_context.as_deref().unwrap_or(""),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -695,6 +718,24 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     }
     tx.commit().await?;
     ctx.state.notify(&ctx.company_id);
+
+    // Record what the organization just learned. Best-effort; never fatal.
+    if f.session_status == "completed" {
+        ctx.state
+            .memory
+            .store_memory(
+                &ctx.title,
+                &format!(
+                    "Task \"{}\" completed by an agent.\n\n{}",
+                    ctx.title, ctx.description
+                ),
+                &ctx.company_id,
+                &["task-completed"],
+                "note",
+            )
+            .await;
+    }
+
     Ok(())
 }
 

@@ -1,5 +1,15 @@
 import { useEffect, useState } from "react";
-import { Moon, Sun, Plus, UserPlus, ShieldCheck, ShieldAlert, Wifi, WifiOff } from "lucide-react";
+import {
+  Moon,
+  Sun,
+  Plus,
+  UserPlus,
+  ShieldCheck,
+  ShieldAlert,
+  Wifi,
+  WifiOff,
+  BrainCircuit,
+} from "lucide-react";
 import type { Company } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
@@ -80,6 +90,7 @@ export function TopBar({
         {companyId && (
           <ApprovalsInbox companyId={companyId} tick={tick} onDecided={onApprovalDecided} />
         )}
+        <MemoryIndicator />
         <AuditIndicator tick={tick} />
         <ConnectionDot connected={connected} />
         {companyId && (
@@ -123,6 +134,30 @@ function ConnectionDot({ connected }: { connected: boolean }) {
       title={connected ? "Live updates connected" : "Reconnecting…"}
     >
       {connected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+    </span>
+  );
+}
+
+/** Shows whether organizational memory (Wadachi/MCP) is connected. */
+function MemoryIndicator() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    api
+      .memoryStatus()
+      .then((r) => setEnabled(r.enabled))
+      .catch(() => setEnabled(null));
+  }, []);
+  if (enabled === null) return null;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
+        enabled ? "text-primary" : "text-muted-foreground/50",
+      )}
+      title={enabled ? "Organizational memory connected (Wadachi)" : "Memory not configured"}
+    >
+      <BrainCircuit className="h-3.5 w-3.5" />
+      memory
     </span>
   );
 }

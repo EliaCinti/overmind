@@ -76,6 +76,12 @@ fn api_router() -> Router<AppState> {
         .route("/sessions/{session_id}/diff", get(get_session_diff))
         .route("/audit/events", get(list_events))
         .route("/audit/verify", get(verify_chain))
+        .route("/memory/status", get(memory_status))
+}
+
+/// Whether organizational memory (Wadachi/MCP) is wired up — for the UI badge.
+async fn memory_status(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "enabled": state.memory.is_enabled() }))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -264,4 +264,6 @@ export const api = {
       "GET",
       "/audit/verify",
     ),
+
+  memoryStatus: () => req<{ enabled: boolean }>("GET", "/memory/status"),
 };

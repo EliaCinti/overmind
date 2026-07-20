@@ -30,7 +30,15 @@ cargo run                      # → http://127.0.0.1:7070
 cd web && npm run dev
 ```
 
-Key env vars: `OVERMIND_DB`, `OVERMIND_DATA_DIR`, `OVERMIND_AGENT_CMD` (agent adapter command), `OVERMIND_WEB_DIR`, `OVERMIND_ADDR`, `OVERMIND_HEARTBEAT_SECS`, `OVERMIND_SESSION_TIMEOUT_SECS`.
+Key env vars: `OVERMIND_DB`, `OVERMIND_DATA_DIR`, `OVERMIND_AGENT_CMD` (agent adapter command), `OVERMIND_WEB_DIR`, `OVERMIND_ADDR`, `OVERMIND_HEARTBEAT_SECS`, `OVERMIND_SESSION_TIMEOUT_SECS`, `OVERMIND_START_ESTIMATE_CENTS`.
+
+**Organizational memory (optional).** Set `OVERMIND_MEMORY_CMD` to a command that launches an [MCP](https://modelcontextprotocol.io) memory server exposing `get_context` / `store_memory` / `store_decision` — [Wadachi](https://github.com/EliaCinti/wadachi) is the reference:
+
+```sh
+OVERMIND_MEMORY_CMD="BRAIN_DIR=/path/to/brain wadachi" cargo run
+```
+
+Agents then load org context before working and record what they learned on completion. Unset it and Overmind runs identically, memoryless.
 
 ## Principles
 

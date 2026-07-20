@@ -21,6 +21,9 @@ pub struct AppState {
     /// Live change notifications for connected UI clients. Each message is a
     /// JSON string; the board refetches the affected scope (see ADR-0010).
     pub events: broadcast::Sender<String>,
+    /// Organizational memory over MCP (Wadachi reference). A no-op when no
+    /// memory server is configured — Overmind is fully functional without it.
+    pub memory: crate::mcp::Memory,
 }
 
 impl AppState {
@@ -50,6 +53,9 @@ pub struct Config {
     /// Cents reserved against an agent's budget at task start, before the real
     /// cost is known (`OVERMIND_START_ESTIMATE_CENTS`).
     pub start_estimate_cents: i64,
+    /// Command that launches the MCP memory server (`OVERMIND_MEMORY_CMD`);
+    /// `None` disables organizational memory entirely (graceful degradation).
+    pub memory_cmd: Option<String>,
     /// Built frontend directory (`OVERMIND_WEB_DIR`). Served at the root when
     /// it exists; absent in dev (Vite serves the UI and proxies to us).
     pub web_dir: PathBuf,
@@ -63,6 +69,7 @@ impl Default for Config {
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
             start_estimate_cents: 50,
+            memory_cmd: None,
             web_dir: PathBuf::from("./web/dist"),
         }
     }
@@ -89,6 +96,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.start_estimate_cents),
+            memory_cmd: std::env::var("OVERMIND_MEMORY_CMD")
+                .ok()
+                .filter(|s| !s.is_empty()),
             web_dir: std::env::var("OVERMIND_WEB_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.web_dir),
@@ -137,11 +147,13 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
     sqlx::migrate!("./migrations").run(&pool).await?;
     seed_archetypes(&pool).await?;
     let (events, _) = broadcast::channel(256);
+    let memory = crate::mcp::Memory::from_config(config.memory_cmd.clone());
     Ok(AppState {
         pool,
         config: Arc::new(config),
         running: Arc::new(Mutex::new(HashSet::new())),
         events,
+        memory,
     })
 }
 

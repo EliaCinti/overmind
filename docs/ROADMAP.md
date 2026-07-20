@@ -63,12 +63,13 @@ What makes Overmind safe to leave running ([ADR-0012](adr/0012-budgets-and-gover
 - [x] Config revisions on every hire/reassign; `POST /agents/{id}/rollback` restores a past revision and appends a new forward-only `rollback` revision
 - **Accept:** an over-budget start is stopped server-side (402, task never checked out) ✓; a gated start blocks until a human approves, then runs ✓; audit chain verifies throughout ✓ (4 governance integration tests + E2E, 2026-07-20). Config-revision UI and warn-threshold (80%) incidents deferred (see ADR-0012).
 
-## M7 — Memory contract `todo`
-The differentiator, part 1: the generic `MemoryProvider` interface (ADR-0003).
-- MCP client layer; `MemoryProvider` contract implemented against an externally-run Wadachi
-- Agents call get_context on wake, store memories/decisions on completion
-- Graceful degradation verified: everything works with no provider configured
-- **Accept:** demonstrate an agent avoiding a past mistake because the org remembered it; then unplug Wadachi and show identical (memoryless) behavior.
+## M7 — Memory contract `done`
+The differentiator, part 1: memory over MCP ([ADR-0013](adr/0013-memory-over-mcp.md)).
+- [x] MCP client (JSON-RPC over stdio, per-call sessions); memory server is configured via `OVERMIND_MEMORY_CMD` — Overmind never imports Wadachi
+- [x] The loop: `get_context` on start injected into the agent's prompt (+ `OVERMIND_MEMORY_CONTEXT`), `store_memory` on successful finish
+- [x] Best-effort everywhere: no server → no-ops; broken/slow server → logged and swallowed, never fatal (timeout 30s)
+- [x] `GET /memory/status` + a UI memory indicator
+- **Accept:** verified against **real Wadachi** (throwaway brain) — task 1's completion was stored, task 2's agent received it via real `get_context` (avoiding the "past mistake") ✓; with no provider and with a deliberately broken provider, tasks complete identically ✓ (3 memory integration tests + real-Wadachi E2E, 2026-07-20).
 
 ## M8 — Managed brain + memory UI `todo`
 The differentiator, part 2: Wadachi as first-party brain (ADR-0004).

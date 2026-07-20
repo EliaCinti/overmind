@@ -3,6 +3,7 @@ pub mod audit;
 pub mod db;
 pub mod domain;
 pub mod governance;
+pub mod mcp;
 pub mod runner;
 pub mod scheduler;
 pub mod ws;
