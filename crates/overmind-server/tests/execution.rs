@@ -97,6 +97,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let config = overmind_server::Config {
         agent_cmd: Some(format!("sh {}", script_path.display())),
         data_dir: root.join("data"),
+        ..overmind_server::Config::default()
     };
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
@@ -170,12 +171,17 @@ async fn setup(stub_script: &str) -> TestEnv {
 }
 
 fn uuid_like() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+    // A process-wide counter: two parallel test threads can read the same
+    // nanosecond, so the timestamp alone is not unique.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_nanos();
-    format!("{nanos}-{}", std::process::id())
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos}-{}-{n}", std::process::id())
 }
 
 async fn wait_for_session(app: &axum::Router, session_id: &str) -> Value {

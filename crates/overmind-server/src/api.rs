@@ -31,6 +31,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/tasks/{task_id}/transition", post(transition_task))
         .route("/tasks/{task_id}/start", post(start_task))
+        .route("/agents/{agent_id}/wakeup", post(request_wakeup))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/diff", get(get_session_diff))
         .route("/audit/events", get(list_events))
@@ -731,6 +732,56 @@ async fn start_task(
             "branch": outcome.branch,
             "workspace_path": outcome.workspace_path,
         })),
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct RequestWakeup {
+    reason: Option<String>,
+    source: Option<String>,
+}
+
+async fn request_wakeup(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    payload: Option<Json<RequestWakeup>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let req = payload.map(|Json(r)| r).unwrap_or_default();
+    let mut tx = state.pool.begin().await?;
+    let agent: Option<(String,)> = sqlx::query_as("SELECT company_id FROM agents WHERE id = ?")
+        .bind(&agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((company_id,)) = agent else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    let (id, requested_at) = (new_id(), now());
+    let source = req.source.as_deref().unwrap_or("manual");
+    sqlx::query(
+        "INSERT INTO agent_wakeup_requests (id, agent_id, source, reason, requested_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&agent_id)
+    .bind(source)
+    .bind(&req.reason)
+    .bind(&requested_at)
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::WAKEUP_REQUESTED,
+        &json!({ "request_id": id, "agent_id": agent_id, "source": source, "reason": req.reason }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            json!({ "id": id, "agent_id": agent_id, "status": "queued", "requested_at": requested_at }),
+        ),
     ))
 }
 

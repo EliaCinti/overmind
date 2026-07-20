@@ -166,6 +166,10 @@ pub mod event_kind {
     pub const WORKSPACE_CREATED: &str = "workspace.created";
     pub const SESSION_STARTED: &str = "session.started";
     pub const SESSION_FINISHED: &str = "session.finished";
+    pub const SESSION_RESUMED: &str = "session.resumed";
+    pub const TASK_RELEASED: &str = "task.released";
+    pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
+    pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";
 }
 
 #[cfg(test)]

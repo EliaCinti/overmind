@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -11,6 +12,10 @@ use crate::domain::{AgentTraits, Autonomy, ReviewStrictness};
 pub struct AppState {
     pub pool: SqlitePool,
     pub config: Arc<Config>,
+    /// Session ids with a live runner in *this* process. Sessions marked
+    /// running in the DB but absent here are orphans (e.g. after a server
+    /// restart) and get picked up by the heartbeat scheduler.
+    pub running: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Server configuration (env-driven; tests inject their own via `init_with`).
@@ -21,15 +26,40 @@ pub struct Config {
     pub agent_cmd: Option<String>,
     /// Where worktrees and other runtime data live (`OVERMIND_DATA_DIR`).
     pub data_dir: PathBuf,
+    /// Scheduler tick interval (`OVERMIND_HEARTBEAT_SECS`).
+    pub heartbeat_ms: u64,
+    /// Kill sessions running longer than this (`OVERMIND_SESSION_TIMEOUT_SECS`).
+    pub session_timeout_secs: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            agent_cmd: None,
+            data_dir: PathBuf::from("./overmind-data"),
+            heartbeat_ms: 30_000,
+            session_timeout_secs: 3_600,
+        }
+    }
 }
 
 impl Config {
     pub fn from_env() -> Self {
+        let defaults = Config::default();
         Config {
             agent_cmd: std::env::var("OVERMIND_AGENT_CMD").ok(),
             data_dir: std::env::var("OVERMIND_DATA_DIR")
                 .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("./overmind-data")),
+                .unwrap_or(defaults.data_dir),
+            heartbeat_ms: std::env::var("OVERMIND_HEARTBEAT_SECS")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|secs| (secs * 1000.0) as u64)
+                .unwrap_or(defaults.heartbeat_ms),
+            session_timeout_secs: std::env::var("OVERMIND_SESSION_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.session_timeout_secs),
         }
     }
 }
@@ -77,6 +107,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
     Ok(AppState {
         pool,
         config: Arc::new(config),
+        running: Arc::new(Mutex::new(HashSet::new())),
     })
 }
 

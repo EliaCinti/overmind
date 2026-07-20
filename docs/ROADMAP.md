@@ -28,11 +28,14 @@ One agent, one task, end to end.
 - [x] `project_workspaces` + `agent_task_sessions` per Paperclip schema; failed sessions block the task with `last_error`
 - **Accept:** agent completes a task in its worktree ✓, diff visible via `GET /sessions/{id}/diff` ✓, every step audited with the chain still verifying ✓ (integration tests, 2026-07-19; verified with the stub adapter — a paid smoke run with the real Claude Code CLI is a manual follow-up).
 
-## M3 — Parallelism + heartbeats `todo`
-- N agents in parallel, one worktree each, no interference
-- Heartbeat scheduler; agent resumes persisted task context across wake-ups
-- Timeouts, crash recovery (a dead runner releases its task safely)
-- **Accept:** 3+ agents work 3+ tasks concurrently across restarts of the server.
+## M3 — Parallelism + heartbeats `done`
+- [x] N agents in parallel, one worktree each, no interference (test: 3 agents × 3 tasks concurrently, distinct worktrees)
+- [x] Heartbeat scheduler ([ADR-0009](adr/0009-heartbeat-scheduler-and-recovery.md)); orphaned sessions resumed after a simulated server restart, `resumed_count` bumped
+- [x] Timeouts kill the session and **release** the task to `todo`; agent failures **block** it — distinct recovery semantics
+- [x] `agent_wakeup_requests` (Paperclip-shaped); wakeups auto-start work only for `act_within_budget` agents (autonomy enforced server-side per ADR-0005)
+- **Accept:** 3+ agents work 3+ tasks concurrently ✓; orphaned session recovered across a restart ✓; audit chain still verifies throughout ✓ (integration tests, 2026-07-20, stub adapter).
+
+**M3 bug caught by the parallelism test:** short UUIDv7 prefixes collided across same-millisecond sessions → duplicate branch names. Branch now uses the full session id.
 
 ## M4 — Board UI `todo`
 First real UI (React SPA).
