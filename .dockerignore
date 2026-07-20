@@ -1,0 +1,11 @@
+# Build artifacts and local state — never sent to the Docker build context.
+target/
+web/node_modules/
+web/dist/
+.git/
+overmind-data/
+*.sqlite
+*.sqlite-*
+.DS_Store
+docs/
+references/

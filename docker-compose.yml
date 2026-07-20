@@ -1,0 +1,28 @@
+# Quickstart: `docker compose up --build` → http://localhost:7070
+#
+# Persists the DB, worktrees and (optional) managed brains on a named volume.
+# To let agents work on your repos, mount them and point tasks' workspace cwd
+# at the in-container path (see the commented `volumes` entry).
+
+services:
+  overmind:
+    build: .
+    image: overmind:latest
+    ports:
+      - "7070:7070"
+    volumes:
+      - overmind-data:/data
+      # Mount host repositories agents will work on, e.g.:
+      # - ${HOME}/code:/repos:rw
+    environment:
+      # The agent adapter command. Configure to the CLI you installed/derived
+      # into the image, e.g. Claude Code:
+      # OVERMIND_AGENT_CMD: 'claude -p "$OVERMIND_TASK_PROMPT" --output-format json'
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional organizational memory (Wadachi or any MCP memory server):
+      # OVERMIND_MEMORY_CMD: 'BRAIN_DIR=/data/brain wadachi'
+      # OVERMIND_MEMORY_POOL: "4"
+    restart: unless-stopped
+
+volumes:
+  overmind-data:

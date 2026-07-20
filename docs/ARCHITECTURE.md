@@ -69,7 +69,7 @@ SQLite via `sqlx` (single-file DB fits self-hosted; WAL mode; migrations checked
 
 ## Security posture (v0 targets)
 
-- Agent processes run with least privilege; workspace = their worktree, nothing else, enforced by OS-level sandboxing (`sandbox-exec` on macOS first, Linux later).
+- Agent processes run with least privilege; workspace = their worktree, nothing else. Isolation via **containers** (Docker), the cross-platform home for the security pillar ([ADR-0014](adr/0014-docker-deployment.md)) — superseding the earlier `sandbox-exec` note; landing in M10.
 - Secrets live server-side and are injected into tools, never into agent prompt context.
 - All approval gates enforced by the server; a prompt-injected agent cannot skip them.
 
