@@ -8,11 +8,22 @@
 //! swallowed — memory never breaks a task (the graceful-degradation rule).
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
+
+/// A live MCP connection: the spawned server plus its stdio, reused across
+/// calls so we handshake once per server lifetime, not once per call.
+struct Conn {
+    _child: Child, // kept alive; kill_on_drop tears it down when the Conn drops
+    stdin: ChildStdin,
+    reader: Lines<BufReader<ChildStdout>>,
+    next_id: i64,
+}
 
 #[derive(Clone)]
 pub struct Memory {
@@ -20,25 +31,36 @@ pub struct Memory {
     cmd: Option<String>,
     /// Extra env for the spawned server (e.g. `BRAIN_DIR` for a managed
     /// per-company brain in M8). Empty for a plain externally-configured server.
-    env: Vec<(String, String)>,
+    env: Arc<Vec<(String, String)>>,
     timeout: Duration,
+    /// The persistent connection, lazily opened and re-opened after any error.
+    /// The mutex serializes calls — which also shields a single-user memory
+    /// server (Wadachi today) from concurrent access.
+    conn: Arc<Mutex<Option<Conn>>>,
 }
 
 impl Memory {
     pub fn from_config(cmd: Option<String>) -> Self {
         Memory {
             cmd,
-            env: Vec::new(),
+            env: Arc::new(Vec::new()),
             timeout: Duration::from_secs(30),
+            conn: Arc::new(Mutex::new(None)),
         }
     }
 
     /// A memory bound to a specific brain directory (used by the managed-brain
-    /// path in M8). Sets `BRAIN_DIR` for the spawned server.
-    pub fn with_brain_dir(mut self, brain_dir: &str) -> Self {
-        self.env
-            .push(("BRAIN_DIR".to_string(), brain_dir.to_string()));
-        self
+    /// path in M8). Sets `BRAIN_DIR` and gets its **own** connection cell (a
+    /// different brain needs a different server process).
+    pub fn with_brain_dir(&self, brain_dir: &str) -> Self {
+        let mut env = (*self.env).clone();
+        env.push(("BRAIN_DIR".to_string(), brain_dir.to_string()));
+        Memory {
+            cmd: self.cmd.clone(),
+            env: Arc::new(env),
+            timeout: self.timeout,
+            conn: Arc::new(Mutex::new(None)),
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -109,20 +131,52 @@ impl Memory {
         }
     }
 
-    /// One MCP session: spawn, handshake, call a single tool, return its
-    /// result. The whole thing is bounded by `self.timeout`.
+    /// Call a tool on the (persistent) memory server. Serialized by the
+    /// connection mutex and bounded by `self.timeout`. Any failure drops the
+    /// connection so the next call re-spawns and re-handshakes.
     async fn call(&self, tool: &str, args: Value) -> Result<Value, McpError> {
         let Some(cmd) = &self.cmd else {
             return Err(McpError::Disabled);
         };
-        let fut = self.call_inner(cmd, tool, args);
-        match tokio::time::timeout(self.timeout, fut).await {
-            Ok(r) => r,
-            Err(_) => Err(McpError::Timeout),
+        let mut guard = self.conn.lock().await;
+        let outcome =
+            tokio::time::timeout(self.timeout, self.call_locked(&mut guard, cmd, tool, args))
+                .await
+                .unwrap_or(Err(McpError::Timeout));
+        if outcome.is_err() {
+            *guard = None; // drop → kill_on_drop; next call reconnects cleanly
         }
+        outcome
     }
 
-    async fn call_inner(&self, cmd: &str, tool: &str, args: Value) -> Result<Value, McpError> {
+    async fn call_locked(
+        &self,
+        guard: &mut Option<Conn>,
+        cmd: &str,
+        tool: &str,
+        args: Value,
+    ) -> Result<Value, McpError> {
+        if guard.is_none() {
+            *guard = Some(self.connect(cmd).await?);
+        }
+        let conn = guard.as_mut().expect("just connected");
+        let id = conn.next_id;
+        conn.next_id += 1;
+        write_msg(
+            &mut conn.stdin,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": args }
+            }),
+        )
+        .await?;
+        read_result(&mut conn.reader, id).await
+    }
+
+    /// Spawn the server and complete the MCP handshake once.
+    async fn connect(&self, cmd: &str) -> Result<Conn, McpError> {
         let mut command = Command::new("sh");
         command
             .arg("-c")
@@ -140,7 +194,6 @@ impl Memory {
         let stdout = child.stdout.take().ok_or(McpError::Pipe)?;
         let mut reader = BufReader::new(stdout).lines();
 
-        // 1. initialize
         write_msg(
             &mut stdin,
             &json!({
@@ -156,30 +209,18 @@ impl Memory {
         )
         .await?;
         read_result(&mut reader, 1).await?;
-
-        // 2. initialized notification
         write_msg(
             &mut stdin,
             &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
         )
         .await?;
 
-        // 3. tools/call
-        write_msg(
-            &mut stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": { "name": tool, "arguments": args }
-            }),
-        )
-        .await?;
-        let result = read_result(&mut reader, 2).await?;
-
-        // Best-effort shutdown; kill_on_drop covers a stuck child.
-        let _ = child.start_kill();
-        Ok(result)
+        Ok(Conn {
+            _child: child,
+            stdin,
+            reader,
+            next_id: 2, // 1 was the initialize
+        })
     }
 }
 
