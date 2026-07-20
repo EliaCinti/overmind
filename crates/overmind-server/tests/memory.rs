@@ -319,3 +319,111 @@ async fn broken_memory_server_degrades_gracefully() {
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+#[tokio::test]
+async fn concurrent_tasks_use_memory_in_parallel() {
+    // Several agents finishing/starting at once all reach the memory server
+    // through the connection pool — proving concurrent memory access works
+    // (Wadachi >= 0.14 is concurrency-safe; here the stub stands in).
+    let py = python();
+    if py.is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let root = unique_root();
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let stub = root.join("stub_mcp.py");
+    std::fs::write(&stub, STUB_MCP).expect("write stub");
+    let store_log = root.join("store.log");
+    let memory_cmd = format!(
+        "STUB_STORE_LOG={} {py} {}",
+        store_log.display(),
+        stub.display()
+    );
+
+    let env = setup(Some(memory_cmd)).await;
+
+    // Hire N agents and queue N tasks (todo).
+    let n = 6;
+    let mut pairs = Vec::new();
+    for i in 0..n {
+        let (_, agent) = send(
+            &env.app,
+            "POST",
+            &format!("/api/companies/{}/agents", env.company),
+            Some(json!({ "name": format!("W{i}"), "archetype": "backend-developer" })),
+        )
+        .await;
+        let agent = agent["id"].as_str().expect("id").to_string();
+        let (_, task) = send(
+            &env.app,
+            "POST",
+            &format!("/api/companies/{}/tasks", env.company),
+            Some(json!({ "title": format!("Concurrent task {i}"), "goal_id": env.goal })),
+        )
+        .await;
+        let task = task["id"].as_str().expect("id").to_string();
+        send(
+            &env.app,
+            "POST",
+            &format!("/api/tasks/{task}/transition"),
+            Some(json!({ "to": "todo" })),
+        )
+        .await;
+        pairs.push((agent, task));
+    }
+
+    // Start them all at once.
+    let starts = pairs.iter().map(|(agent, task)| {
+        let app = env.app.clone();
+        let uri = format!("/api/tasks/{task}/start");
+        let body = json!({ "agent_id": agent });
+        async move { send(&app, "POST", &uri, Some(body)).await }
+    });
+    let sessions: Vec<String> = futures_join_all(starts)
+        .await
+        .into_iter()
+        .map(|(s, body)| {
+            assert_eq!(s, StatusCode::ACCEPTED, "start: {body}");
+            body["session_id"].as_str().expect("session id").to_string()
+        })
+        .collect();
+
+    for session in &sessions {
+        for _ in 0..100 {
+            let (_, sv) = send(&env.app, "GET", &format!("/api/sessions/{session}"), None).await;
+            if sv["status"] == "completed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let (_, sv) = send(&env.app, "GET", &format!("/api/sessions/{session}"), None).await;
+        assert_eq!(sv["status"], "completed", "session {session}: {sv}");
+    }
+
+    // Every completion stored a memory concurrently — all N landed.
+    let logged = std::fs::read_to_string(&store_log).unwrap_or_default();
+    let count = logged
+        .lines()
+        .filter(|l| l.contains("Concurrent task"))
+        .count();
+    assert_eq!(
+        count, n,
+        "expected {n} stored memories, got {count}: {logged:?}"
+    );
+}
+
+/// Minimal join_all so we don't pull in the `futures` crate for one test.
+async fn futures_join_all<F, T>(futs: impl IntoIterator<Item = F>) -> Vec<T>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    // Drive them concurrently by spawning onto the current runtime.
+    let joins: Vec<_> = futs.into_iter().map(tokio::spawn).collect();
+    let mut out = Vec::with_capacity(joins.len());
+    for j in joins {
+        out.push(j.await.expect("task panicked"));
+    }
+    out
+}
