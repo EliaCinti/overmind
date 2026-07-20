@@ -35,7 +35,7 @@
 
 ### overmind-server (Rust)
 
-- **Company model** — `Company`, `Role`, `Agent`, `Project`, `Goal`. Projects cascade into goals, goals into tasks. Reporting lines form a DAG (an agent has one manager; the root is the human owner).
+- **Company model** — `Company`, `Agent`, `Project`, `Goal`. Projects cascade into goals, goals into tasks. The org hierarchy lives on agents (`reports_to` → agent, plus `title`); reporting lines form a DAG (an agent has one manager; the root is the human owner), enforced server-side ([ADR-0011](adr/0011-org-hierarchy-on-agents.md)).
 - **Tasks & audit** — `Task` is the unit of assigned work; every state change, tool call and decision appends an `Event` to an **append-only audit log**. Events are never updated or deleted.
 - **Scheduler** — heartbeat wake-ups per agent; an agent resumes its checked-out task with persisted context rather than restarting.
 - **Governance & budgets** — per-agent monthly budgets. **Invariant: task checkout and budget reservation are a single atomic transaction** (this is the hard problem Paperclip solved; we adopt the same guarantee). Approval gates (hiring, spend over threshold, protected actions) are enforced server-side.

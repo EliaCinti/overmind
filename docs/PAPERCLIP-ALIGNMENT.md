@@ -22,6 +22,7 @@
 | Task statuses | `backlog, todo, in_progress, in_review, blocked, done, cancelled` | same | adopted verbatim, incl. default `backlog` |
 | Task priority | `low, medium, high, urgent` (default `medium`) | same | |
 | Work grouping | `projects` + `project_goals` | **Project** + **Goal** | was `Mission`/`Goal` |
+| Org hierarchy | on `agents`: `reports_to → agents.id`, `title` (no roles table) | same (ADR-0011) | adopted verbatim; dropped our speculative M1 `roles` table |
 | Audit trail | `activity_log` | **audit_events** | deliberate deviation: our name reflects the hash-chain guarantee Paperclip doesn't have (ADR-0006) |
 | Agent wake-ups | `routines`, `agent_wakeup_requests` | heartbeat scheduler (M3) | study their schema before building M3 |
 | Config revisioning | `agent_config_revisions` | planned (M6 governance) | study before building M6 |

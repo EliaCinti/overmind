@@ -42,6 +42,7 @@ fn api_router() -> Router<AppState> {
             "/companies/{company_id}/agents",
             post(hire_agent).get(list_agents),
         )
+        .route("/agents/{agent_id}/reassign", post(reassign_agent))
         .route(
             "/companies/{company_id}/projects",
             post(create_project).get(list_projects),
@@ -124,6 +125,17 @@ fn now() -> String {
 
 fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
+}
+
+/// Deserialize an optional field that also distinguishes explicit `null` from
+/// absence: absent → `None` (leave unchanged), `null` → `Some(None)` (clear),
+/// value → `Some(Some(v))`.
+fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(Option::deserialize(deserializer)?))
 }
 
 async fn health() -> Json<Value> {
@@ -220,7 +232,10 @@ struct HireAgent {
     traits: TraitsPatch,
     /// Free-form additions (UX Level 3 "expert") — additive only.
     custom_brief: Option<String>,
-    role_id: Option<String>,
+    /// Free-text job title, e.g. "Senior Backend Engineer" (org chart).
+    title: Option<String>,
+    /// The agent this one reports to (must be an agent in the same company).
+    reports_to: Option<String>,
 }
 
 async fn hire_agent(
@@ -254,18 +269,37 @@ async fn hire_agent(
     let traits = defaults.apply(req.traits);
     let traits_json = serde_json::to_string(&traits)?;
 
+    // A manager, if given, must be an existing agent in this company.
+    if let Some(mgr) = &req.reports_to {
+        let ok: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM agents WHERE id = ? AND company_id = ?")
+                .bind(mgr)
+                .bind(&company_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if ok.is_none() {
+            return Err(ApiError::NotFound("manager agent"));
+        }
+    }
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let (id, created_at) = (new_id(), now());
     sqlx::query(
-        "INSERT INTO agents (id, company_id, role_id, archetype_id, name, traits, custom_brief, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+        "INSERT INTO agents (id, company_id, archetype_id, name, traits, custom_brief, title, reports_to, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .bind(&id)
     .bind(&company_id)
-    .bind(&req.role_id)
     .bind(&archetype_id)
     .bind(req.name.trim())
     .bind(&traits_json)
     .bind(&req.custom_brief)
+    .bind(title)
+    .bind(&req.reports_to)
     .bind(&created_at)
     .execute(&mut *tx)
     .await?;
@@ -278,6 +312,8 @@ async fn hire_agent(
             "agent_id": id,
             "name": req.name.trim(),
             "archetype": req.archetype,
+            "title": title,
+            "reports_to": req.reports_to,
             "traits": serde_json::to_value(&traits)?,
         }),
     )
@@ -293,18 +329,32 @@ async fn hire_agent(
             "archetype": req.archetype,
             "traits": serde_json::to_value(&traits)?,
             "custom_brief": req.custom_brief,
+            "title": title,
+            "reports_to": req.reports_to,
             "status": "active",
             "created_at": created_at,
         })),
     ))
 }
 
+/// (id, name, traits, custom_brief, status, title, reports_to, archetype slug)
+type AgentRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
 async fn list_agents(
     State(state): State<AppState>,
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, ar.slug
+    let rows: Vec<AgentRow> = sqlx::query_as(
+        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, ar.slug
          FROM agents a JOIN archetypes ar ON ar.id = a.archetype_id
          WHERE a.company_id = ? ORDER BY a.created_at",
     )
@@ -313,19 +363,110 @@ async fn list_agents(
     .await?;
     let agents = rows
         .into_iter()
-        .map(|(id, name, traits, custom_brief, status, archetype)| {
-            let traits: Value = serde_json::from_str(&traits)?;
-            Ok(json!({
-                "id": id,
-                "name": name,
-                "archetype": archetype,
-                "traits": traits,
-                "custom_brief": custom_brief,
-                "status": status,
-            }))
-        })
+        .map(
+            |(id, name, traits, custom_brief, status, title, reports_to, archetype)| {
+                let traits: Value = serde_json::from_str(&traits)?;
+                Ok(json!({
+                    "id": id,
+                    "name": name,
+                    "archetype": archetype,
+                    "traits": traits,
+                    "custom_brief": custom_brief,
+                    "title": title,
+                    "reports_to": reports_to,
+                    "status": status,
+                }))
+            },
+        )
         .collect::<Result<Vec<Value>, serde_json::Error>>()?;
     Ok(Json(json!({ "agents": agents })))
+}
+
+#[derive(Deserialize)]
+struct ReassignAgent {
+    /// New manager agent id, or null to move the agent to the top (reports to
+    /// the human owner). Omitted → unchanged.
+    #[serde(default, deserialize_with = "double_option")]
+    reports_to: Option<Option<String>>,
+    title: Option<String>,
+}
+
+/// Set an agent's manager and/or title. Enforces the reporting DAG: a manager
+/// must be another agent in the same company, and the change must not create
+/// a cycle (an agent cannot end up reporting, directly or transitively, to
+/// itself).
+async fn reassign_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<ReassignAgent>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let agent: Option<(String,)> = sqlx::query_as("SELECT company_id FROM agents WHERE id = ?")
+        .bind(&agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((company_id,)) = agent else {
+        return Err(ApiError::NotFound("agent"));
+    };
+
+    if let Some(new_mgr) = &req.reports_to {
+        if let Some(mgr) = new_mgr {
+            if mgr == &agent_id {
+                return Err(ApiError::Invalid("an agent cannot report to itself".into()));
+            }
+            let ok: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM agents WHERE id = ? AND company_id = ?")
+                    .bind(mgr)
+                    .bind(&company_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if ok.is_none() {
+                return Err(ApiError::NotFound("manager agent"));
+            }
+            // Walk up from the proposed manager; if we reach this agent, the
+            // edge would close a cycle.
+            let mut cursor = Some(mgr.clone());
+            while let Some(cur) = cursor {
+                if cur == agent_id {
+                    return Err(ApiError::Invalid(
+                        "that change would create a reporting cycle".into(),
+                    ));
+                }
+                let next: Option<(Option<String>,)> =
+                    sqlx::query_as("SELECT reports_to FROM agents WHERE id = ?")
+                        .bind(&cur)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                cursor = next.and_then(|(r,)| r);
+            }
+        }
+        sqlx::query("UPDATE agents SET reports_to = ? WHERE id = ?")
+            .bind(new_mgr)
+            .bind(&agent_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if let Some(title) = &req.title {
+        let title = title.trim();
+        sqlx::query("UPDATE agents SET title = ? WHERE id = ?")
+            .bind(if title.is_empty() { None } else { Some(title) })
+            .bind(&agent_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::AGENT_REASSIGNED,
+        &json!({ "agent_id": agent_id, "reports_to": req.reports_to, "title": req.title }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": agent_id })))
 }
 
 // ---------- projects & goals ----------

@@ -45,6 +45,8 @@ export interface Agent {
   archetype: string;
   traits: AgentTraits;
   custom_brief: string | null;
+  title: string | null;
+  reports_to: string | null;
   status: string;
 }
 
@@ -149,6 +151,8 @@ export interface HireAgentBody {
   archetype: string;
   traits?: Partial<AgentTraits>;
   custom_brief?: string | null;
+  title?: string | null;
+  reports_to?: string | null;
 }
 
 export const api = {
@@ -162,6 +166,10 @@ export const api = {
     req<{ agents: Agent[] }>("GET", `/companies/${companyId}/agents`).then((r) => r.agents),
   hireAgent: (companyId: string, body: HireAgentBody) =>
     req<Agent>("POST", `/companies/${companyId}/agents`, body),
+  reassignAgent: (
+    agentId: string,
+    body: { reports_to?: string | null; title?: string },
+  ) => req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
 
   listProjects: (companyId: string) =>
     req<{ projects: ProjectDetail[] }>("GET", `/companies/${companyId}/projects`).then(

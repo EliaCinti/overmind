@@ -159,6 +159,7 @@ impl AgentTraits {
 pub mod event_kind {
     pub const COMPANY_CREATED: &str = "company.created";
     pub const AGENT_HIRED: &str = "agent.hired";
+    pub const AGENT_REASSIGNED: &str = "agent.reassigned";
     pub const PROJECT_CREATED: &str = "project.created";
     pub const GOAL_CREATED: &str = "goal.created";
     pub const TASK_CREATED: &str = "task.created";

@@ -5,11 +5,14 @@ import { useLive } from "./lib/live";
 import { useTheme } from "./lib/theme";
 import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
+import { OrgChart } from "./components/OrgChart";
 import { TaskDetail } from "./components/TaskDetail";
 import { HireAgentDialog } from "./components/HireAgentDialog";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Spinner } from "./components/ui/primitives";
+
+type View = "board" | "org";
 
 const LAST_COMPANY = "overmind-last-company";
 
@@ -25,10 +28,17 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectDetail[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const [view, setView] = useState<View>("board");
   const [openTask, setOpenTask] = useState<Task | null>(null);
   const [hireOpen, setHireOpen] = useState(false);
+  const [hireManager, setHireManager] = useState<string | null>(null);
   const [taskOpen, setTaskOpen] = useState(false);
   const [tick, setTick] = useState(0); // bumped on every live change → drives refetch
+
+  const openHire = (managerId: string | null = null) => {
+    setHireManager(managerId);
+    setHireOpen(true);
+  };
 
   // Bootstrap: companies + archetype catalog.
   useEffect(() => {
@@ -106,9 +116,12 @@ export default function App() {
         companyId={companyId}
         onSelectCompany={setCompanyId}
         onNewCompany={() => setCompanyId(null)}
-        onHire={() => setHireOpen(true)}
+        onHire={() => openHire(null)}
         onNewTask={() => setTaskOpen(true)}
         canCreateTask={runnableGoalId !== null}
+        view={view}
+        onViewChange={setView}
+        showViews={!!companyId && !needsWorkspace}
         connected={connected}
         tick={tick}
         theme={theme}
@@ -124,7 +137,11 @@ export default function App() {
         />
       ) : (
         <main className="flex flex-1 flex-col overflow-hidden pt-4">
-          <Board tasks={tasks} agents={agents} onOpenTask={setOpenTask} />
+          {view === "board" ? (
+            <Board tasks={tasks} agents={agents} onOpenTask={setOpenTask} />
+          ) : (
+            <OrgChart agents={agents} onChanged={bump} onHireUnder={openHire} />
+          )}
         </main>
       )}
 
@@ -143,6 +160,8 @@ export default function App() {
             onOpenChange={setHireOpen}
             companyId={companyId}
             archetypes={archetypes}
+            agents={agents}
+            defaultManager={hireManager}
             onHired={bump}
           />
           <CreateTaskDialog

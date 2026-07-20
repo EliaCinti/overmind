@@ -11,7 +11,7 @@ import {
   ChevronRight,
   Sparkles,
 } from "lucide-react";
-import type { Archetype, AgentTraits, Autonomy, ReviewStrictness } from "../lib/api";
+import type { Agent, Archetype, AgentTraits, Autonomy, ReviewStrictness } from "../lib/api";
 import { api } from "../lib/api";
 import { AUTONOMY_LABEL, STRICTNESS_LABEL, autonomySentence } from "../lib/status";
 import { Dialog } from "./ui/dialog";
@@ -38,17 +38,23 @@ export function HireAgentDialog({
   onOpenChange,
   companyId,
   archetypes,
+  agents,
+  defaultManager,
   onHired,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   companyId: string;
   archetypes: Archetype[];
+  agents: Agent[];
+  defaultManager: string | null;
   onHired: () => void;
 }) {
   const [level, setLevel] = useState<Level>("pick");
   const [picked, setPicked] = useState<Archetype | null>(null);
   const [name, setName] = useState("");
+  const [title, setTitle] = useState("");
+  const [manager, setManager] = useState<string>("");
   const [traits, setTraits] = useState<AgentTraits | null>(null);
   const [brief, setBrief] = useState("");
   const [busy, setBusy] = useState(false);
@@ -58,6 +64,8 @@ export function HireAgentDialog({
     setLevel("pick");
     setPicked(null);
     setName("");
+    setTitle("");
+    setManager(defaultManager ?? "");
     setTraits(null);
     setBrief("");
     setError(null);
@@ -67,8 +75,11 @@ export function HireAgentDialog({
     setPicked(a);
     setTraits({ ...a.default_traits, focus_areas: [...a.default_traits.focus_areas] });
     setName(a.name);
+    setManager(defaultManager ?? "");
     setLevel("tune");
   };
+
+  const managerOptions = agents.filter((a) => a.status !== "terminated");
 
   const toggleFocus = (f: string) => {
     if (!traits) return;
@@ -89,6 +100,8 @@ export function HireAgentDialog({
         archetype: picked.slug,
         traits,
         custom_brief: brief.trim() || null,
+        title: title.trim() || null,
+        reports_to: manager || null,
       });
       onHired();
       onOpenChange(false);
@@ -165,8 +178,33 @@ export function HireAgentDialog({
           >
             {level === "tune" ? (
               <>
-                <Field label="Name">
-                  <Input value={name} onChange={(e) => setName(e.target.value)} />
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                  <Field label="Name">
+                    <Input value={name} onChange={(e) => setName(e.target.value)} />
+                  </Field>
+                  <Field label="Title" hint="Optional job title.">
+                    <Input
+                      value={title}
+                      onChange={(e) => setTitle(e.target.value)}
+                      placeholder="e.g. Senior Engineer"
+                    />
+                  </Field>
+                </div>
+
+                <Field label="Reports to" hint="Where this agent sits in the org.">
+                  <select
+                    value={manager}
+                    onChange={(e) => setManager(e.target.value)}
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <option value="">You (owner)</option>
+                    {managerOptions.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                        {m.title ? ` · ${m.title}` : ""}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
 
                 <Field label="Focus areas" hint="What this agent pays attention to.">

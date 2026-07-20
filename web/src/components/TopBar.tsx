@@ -3,6 +3,7 @@ import { Moon, Sun, Plus, UserPlus, ShieldCheck, ShieldAlert, Wifi, WifiOff } fr
 import type { Company } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
+import { Segmented } from "./ui/controls";
 import { cn } from "../lib/utils";
 
 export function TopBar({
@@ -13,6 +14,9 @@ export function TopBar({
   onHire,
   onNewTask,
   canCreateTask,
+  view,
+  onViewChange,
+  showViews,
   connected,
   tick,
   theme,
@@ -25,6 +29,9 @@ export function TopBar({
   onHire: () => void;
   onNewTask: () => void;
   canCreateTask: boolean;
+  view: "board" | "org";
+  onViewChange: (v: "board" | "org") => void;
+  showViews: boolean;
   connected: boolean;
   tick: number;
   theme: string;
@@ -52,6 +59,19 @@ export function TopBar({
         ))}
         <option value="__new">+ New company…</option>
       </select>
+
+      {showViews && (
+        <div className="ml-2">
+          <Segmented<"board" | "org">
+            value={view}
+            onChange={onViewChange}
+            options={[
+              { value: "board", label: "Board" },
+              { value: "org", label: "Org" },
+            ]}
+          />
+        </div>
+      )}
 
       <div className="ml-auto flex items-center gap-2">
         <AuditIndicator tick={tick} />

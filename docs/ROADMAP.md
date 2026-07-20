@@ -46,12 +46,14 @@ First real UI (React SPA), best-in-class graphical stack ([ADR-0010](adr/0010-fr
 - [x] Server serves the built SPA at root with history fallback; API nested under `/api`; `/ws` live channel
 - **Accept:** full task lifecycle driven from the UI ✓ — verified end-to-end (server serves SPA + API, company→workspace→agent→task→start→session completed→diff→audit valid, stub adapter, 2026-07-20). Live diff review is read-only; inline diff *comments* deferred to review-milestone work.
 
-## M5 — Company `todo`
-The company layer.
-- Org chart (roles, reporting lines), projects → goals → tasks cascade
-- Org chart UI
-- Guided agent hiring ([UX.md](UX.md) reference flow): archetype gallery → structured tuning → expert mode, with live "what this agent will do" preview
-- **Accept:** a project created at the top produces goal-linked tasks assigned per role; a non-expert hires a working Security Engineer agent in under a minute without typing free text.
+## M5 — Company `done`
+The company layer — the people structure.
+- [x] Reporting hierarchy on agents (`reports_to` → agent, `title`), Paperclip-aligned ([ADR-0011](adr/0011-org-hierarchy-on-agents.md)); the M1 `roles` table dropped
+- [x] Reporting DAG enforced server-side: no self-reporting, cycle-creating reassignment rejected (400); `POST /agents/{id}/reassign`
+- [x] Org chart UI: reporting tree rooted at the human owner, inline manager/title editing, "hire a report" under any node; hire dialog gains title + "reports to"
+- [x] Board ↔ Org view switch
+- Projects → goals → tasks cascade already exists (M1/M2); guided hiring shipped in M4
+- **Accept:** agents assembled into a reporting hierarchy and re-organized from the UI ✓; the DAG invariant holds under a cycle attempt ✓; a non-expert hires a working Security Engineer in one click without free text ✓ (org integration tests + E2E, 2026-07-20). Auto-decomposition of a project into per-role tasks is agent behavior, deferred (see ADR-0011).
 
 ## M6 — Budgets + governance `todo`
 - Per-agent monthly budgets; **budget reservation atomic with task checkout**
