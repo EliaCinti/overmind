@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use serde_json::json;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use tokio::sync::broadcast;
 
 use crate::domain::{AgentTraits, Autonomy, ReviewStrictness};
 
@@ -16,6 +18,21 @@ pub struct AppState {
     /// running in the DB but absent here are orphans (e.g. after a server
     /// restart) and get picked up by the heartbeat scheduler.
     pub running: Arc<Mutex<HashSet<String>>>,
+    /// Live change notifications for connected UI clients. Each message is a
+    /// JSON string; the board refetches the affected scope (see ADR-0010).
+    pub events: broadcast::Sender<String>,
+}
+
+impl AppState {
+    /// Tell connected clients that `company_id`'s board changed. Coarse by
+    /// design: the client refetches rather than applying a delta, which keeps
+    /// the contract trivial and impossible to desync. A send error just means
+    /// no clients are listening — never fatal.
+    pub fn notify(&self, company_id: &str) {
+        let _ = self
+            .events
+            .send(json!({ "type": "changed", "company_id": company_id }).to_string());
+    }
 }
 
 /// Server configuration (env-driven; tests inject their own via `init_with`).
@@ -30,6 +47,9 @@ pub struct Config {
     pub heartbeat_ms: u64,
     /// Kill sessions running longer than this (`OVERMIND_SESSION_TIMEOUT_SECS`).
     pub session_timeout_secs: u64,
+    /// Built frontend directory (`OVERMIND_WEB_DIR`). Served at the root when
+    /// it exists; absent in dev (Vite serves the UI and proxies to us).
+    pub web_dir: PathBuf,
 }
 
 impl Default for Config {
@@ -39,6 +59,7 @@ impl Default for Config {
             data_dir: PathBuf::from("./overmind-data"),
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
+            web_dir: PathBuf::from("./web/dist"),
         }
     }
 }
@@ -60,6 +81,9 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.session_timeout_secs),
+            web_dir: std::env::var("OVERMIND_WEB_DIR")
+                .map(PathBuf::from)
+                .unwrap_or(defaults.web_dir),
         }
     }
 }
@@ -104,10 +128,12 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
 
     sqlx::migrate!("./migrations").run(&pool).await?;
     seed_archetypes(&pool).await?;
+    let (events, _) = broadcast::channel(256);
     Ok(AppState {
         pool,
         config: Arc::new(config),
         running: Arc::new(Mutex::new(HashSet::new())),
+        events,
     })
 }
 

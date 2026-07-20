@@ -106,6 +106,9 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
         )
         .await?;
         tx.commit().await?;
+        if let Some(company_id) = &company_id {
+            state.notify(company_id);
+        }
     }
     Ok(())
 }

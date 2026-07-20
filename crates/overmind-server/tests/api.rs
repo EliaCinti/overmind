@@ -51,12 +51,18 @@ async fn full_lifecycle_with_audit_trail() {
     let (app, _state) = setup().await;
 
     // Company
-    let (status, company) = send(&app, "POST", "/companies", Some(json!({ "name": "Acme" }))).await;
+    let (status, company) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Acme" })),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     let company_id = company["id"].as_str().expect("company id").to_string();
 
     // Archetype catalog is seeded
-    let (status, catalog) = send(&app, "GET", "/archetypes", None).await;
+    let (status, catalog) = send(&app, "GET", "/api/archetypes", None).await;
     assert_eq!(status, StatusCode::OK);
     let slugs: Vec<&str> = catalog["archetypes"]
         .as_array()
@@ -70,7 +76,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, agent) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/agents"),
+        &format!("/api/companies/{company_id}/agents"),
         Some(json!({
             "name": "Sentinel",
             "archetype": "security-engineer",
@@ -93,7 +99,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, _) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/agents"),
+        &format!("/api/companies/{company_id}/agents"),
         Some(json!({ "name": "X", "archetype": "does-not-exist" })),
     )
     .await;
@@ -103,7 +109,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, project) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/projects"),
+        &format!("/api/companies/{company_id}/projects"),
         Some(json!({ "title": "Ship M1" })),
     )
     .await;
@@ -113,7 +119,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, goal) = send(
         &app,
         "POST",
-        &format!("/projects/{project_id}/goals"),
+        &format!("/api/projects/{project_id}/goals"),
         Some(json!({ "title": "Audit log shipped" })),
     )
     .await;
@@ -123,7 +129,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, task) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/tasks"),
+        &format!("/api/companies/{company_id}/tasks"),
         Some(json!({ "title": "Implement hash chain", "goal_id": goal_id, "priority": "high" })),
     )
     .await;
@@ -136,7 +142,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, _) = send(
         &app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "todo" })),
     )
     .await;
@@ -145,7 +151,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, t) = send(
         &app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "in_progress", "agent_id": agent_id })),
     )
     .await;
@@ -156,7 +162,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, err) = send(
         &app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "done" })),
     )
     .await;
@@ -173,7 +179,7 @@ async fn full_lifecycle_with_audit_trail() {
         let (status, _) = send(
             &app,
             "POST",
-            &format!("/tasks/{task_id}/transition"),
+            &format!("/api/tasks/{task_id}/transition"),
             Some(json!({ "to": to })),
         )
         .await;
@@ -184,7 +190,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, _) = send(
         &app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "in_progress" })),
     )
     .await;
@@ -194,7 +200,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, events) = send(
         &app,
         "GET",
-        &format!("/audit/events?company_id={company_id}"),
+        &format!("/api/audit/events?company_id={company_id}"),
         None,
     )
     .await;
@@ -221,7 +227,7 @@ async fn full_lifecycle_with_audit_trail() {
     );
 
     // Chain verifies end to end
-    let (status, report) = send(&app, "GET", "/audit/verify", None).await;
+    let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["valid"], json!(true), "report: {report}");
     assert_eq!(report["events_checked"], json!(9));
@@ -234,7 +240,7 @@ async fn blocked_path_roundtrip() {
     let (_, company) = send(
         &app,
         "POST",
-        "/companies",
+        "/api/companies",
         Some(json!({ "name": "Blockers" })),
     )
     .await;
@@ -242,7 +248,7 @@ async fn blocked_path_roundtrip() {
     let (_, task) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/tasks"),
+        &format!("/api/companies/{company_id}/tasks"),
         Some(json!({ "title": "Waits on upstream" })),
     )
     .await;
@@ -253,7 +259,7 @@ async fn blocked_path_roundtrip() {
         let (status, body) = send(
             &app,
             "POST",
-            &format!("/tasks/{task_id}/transition"),
+            &format!("/api/tasks/{task_id}/transition"),
             Some(json!({ "to": to })),
         )
         .await;
@@ -264,7 +270,7 @@ async fn blocked_path_roundtrip() {
     let (status, _) = send(
         &app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "done" })),
     )
     .await;
@@ -278,7 +284,7 @@ async fn tampering_with_an_event_breaks_the_chain() {
     let (_, company) = send(
         &app,
         "POST",
-        "/companies",
+        "/api/companies",
         Some(json!({ "name": "Tamperproof Inc" })),
     )
     .await;
@@ -286,13 +292,13 @@ async fn tampering_with_an_event_breaks_the_chain() {
     let (_, _) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/projects"),
+        &format!("/api/companies/{company_id}/projects"),
         Some(json!({ "title": "Real project" })),
     )
     .await;
 
     // Sane before tampering
-    let (_, report) = send(&app, "GET", "/audit/verify", None).await;
+    let (_, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 
     // The append-only triggers block mutation through the SQL surface...
@@ -312,7 +318,7 @@ async fn tampering_with_an_event_breaks_the_chain() {
         .expect("tamper with event");
 
     // The hash chain catches it, pointing at the exact event
-    let (status, report) = send(&app, "GET", "/audit/verify", None).await;
+    let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["valid"], json!(false));
     assert_eq!(report["first_invalid_seq"], json!(1));

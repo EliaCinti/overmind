@@ -37,11 +37,14 @@ One agent, one task, end to end.
 
 **M3 bug caught by the parallelism test:** short UUIDv7 prefixes collided across same-millisecond sessions → duplicate branch names. Branch now uses the full session id.
 
-## M4 — Board UI `todo`
-First real UI (React SPA).
-- Kanban board with live updates (WebSocket), task detail with streamed output
-- Diff review with inline comments
-- **Accept:** Elia runs a full task lifecycle without touching the API directly.
+## M4 — Board UI `done`
+First real UI (React SPA), best-in-class graphical stack ([ADR-0010](adr/0010-frontend-stack-and-live-updates.md)).
+- [x] Stack: Vite + React + TypeScript + Tailwind v4 + Radix + Motion + Lucide, self-hosted Inter/JetBrains fonts, OKLCH light/dark design tokens
+- [x] Kanban board (tasks by status) with live updates over WebSocket (coarse "company changed" → refetch); task detail drawer with session output + git diff
+- [x] Guided agent hiring with progressive disclosure (archetype gallery → structured tune → expert mode) and a live "what this agent will do" preview — the UX.md signature flow, shipped early here
+- [x] First-run onboarding (name company → connect git repo), audit-chain trust indicator, theme toggle
+- [x] Server serves the built SPA at root with history fallback; API nested under `/api`; `/ws` live channel
+- **Accept:** full task lifecycle driven from the UI ✓ — verified end-to-end (server serves SPA + API, company→workspace→agent→task→start→session completed→diff→audit valid, stub adapter, 2026-07-20). Live diff review is read-only; inline diff *comments* deferred to review-milestone work.
 
 ## M5 — Company `todo`
 The company layer.

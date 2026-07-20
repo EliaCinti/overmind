@@ -175,6 +175,7 @@ pub async fn start_task(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
 
     let ctx = SessionContext {
         state: state.clone(),
@@ -270,6 +271,7 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
 
     register(state, session_id);
     tokio::spawn(async move {
@@ -593,6 +595,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         }
     }
     tx.commit().await?;
+    ctx.state.notify(&ctx.company_id);
     Ok(())
 }
 

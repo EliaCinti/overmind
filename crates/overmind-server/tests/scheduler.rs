@@ -116,7 +116,7 @@ async fn build_env(
     let (_, company) = send(
         &app,
         "POST",
-        "/companies",
+        "/api/companies",
         Some(json!({ "name": "Sched Co" })),
     )
     .await;
@@ -124,7 +124,7 @@ async fn build_env(
     let (_, project) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/projects"),
+        &format!("/api/companies/{company_id}/projects"),
         Some(json!({ "title": "Demo" })),
     )
     .await;
@@ -132,7 +132,7 @@ async fn build_env(
     let (status, ws) = send(
         &app,
         "POST",
-        &format!("/projects/{project_id}/workspaces"),
+        &format!("/api/projects/{project_id}/workspaces"),
         Some(json!({ "name": "main", "cwd": repo.to_string_lossy() })),
     )
     .await;
@@ -140,7 +140,7 @@ async fn build_env(
     let (_, goal) = send(
         &app,
         "POST",
-        &format!("/projects/{project_id}/goals"),
+        &format!("/api/projects/{project_id}/goals"),
         Some(json!({ "title": "Goal" })),
     )
     .await;
@@ -159,7 +159,7 @@ async fn hire(env: &Env, name: &str, archetype: &str) -> String {
     let (status, agent) = send(
         &env.app,
         "POST",
-        &format!("/companies/{}/agents", env.company_id),
+        &format!("/api/companies/{}/agents", env.company_id),
         Some(json!({ "name": name, "archetype": archetype })),
     )
     .await;
@@ -171,7 +171,7 @@ async fn make_todo_task(env: &Env, title: &str) -> String {
     let (_, task) = send(
         &env.app,
         "POST",
-        &format!("/companies/{}/tasks", env.company_id),
+        &format!("/api/companies/{}/tasks", env.company_id),
         Some(json!({ "title": title, "goal_id": env.goal_id })),
     )
     .await;
@@ -179,7 +179,7 @@ async fn make_todo_task(env: &Env, title: &str) -> String {
     let (status, _) = send(
         &env.app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "todo" })),
     )
     .await;
@@ -191,7 +191,7 @@ async fn task_status(env: &Env, task_id: &str) -> String {
     let (_, tasks) = send(
         &env.app,
         "GET",
-        &format!("/companies/{}/tasks", env.company_id),
+        &format!("/api/companies/{}/tasks", env.company_id),
         None,
     )
     .await;
@@ -220,7 +220,7 @@ async fn wait_for_task_status(env: &Env, task_id: &str, wanted: &str) {
 
 async fn wait_for_session(app: &axum::Router, session_id: &str) -> Value {
     for _ in 0..100 {
-        let (_, session) = send(app, "GET", &format!("/sessions/{session_id}"), None).await;
+        let (_, session) = send(app, "GET", &format!("/api/sessions/{session_id}"), None).await;
         let status = session["status"].as_str().unwrap_or("");
         if status == "completed" || status == "failed" {
             return session;
@@ -242,7 +242,7 @@ async fn three_agents_work_three_tasks_in_parallel() {
 
     let start = |i: usize| {
         let app = env.app.clone();
-        let uri = format!("/tasks/{}/start", tasks[i]);
+        let uri = format!("/api/tasks/{}/start", tasks[i]);
         let body = json!({ "agent_id": agents[i] });
         async move { send(&app, "POST", &uri, Some(body)).await }
     };
@@ -267,7 +267,7 @@ async fn three_agents_work_three_tasks_in_parallel() {
     for task_id in &tasks {
         assert_eq!(task_status(&env, task_id).await, "in_review");
     }
-    let (_, report) = send(&env.app, "GET", "/audit/verify", None).await;
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
 
@@ -283,7 +283,7 @@ async fn timeout_kills_session_and_releases_task() {
     let (status, started) = send(
         &env.app,
         "POST",
-        &format!("/tasks/{task_id}/start"),
+        &format!("/api/tasks/{task_id}/start"),
         Some(json!({ "agent_id": agent_id })),
     )
     .await;
@@ -301,7 +301,7 @@ async fn timeout_kills_session_and_releases_task() {
     );
     // The task is released safely: back to todo, unassigned, startable again
     assert_eq!(task_status(&env, &task_id).await, "todo");
-    let (_, report) = send(&env.app, "GET", "/audit/verify", None).await;
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
 
@@ -398,7 +398,7 @@ async fn wakeup_enforces_agent_autonomy() {
     let (status, wakeup) = send(
         &env.app,
         "POST",
-        &format!("/agents/{agent_id}/wakeup"),
+        &format!("/api/agents/{agent_id}/wakeup"),
         Some(json!({ "reason": "heartbeat test" })),
     )
     .await;
@@ -423,7 +423,13 @@ async fn wakeup_enforces_agent_autonomy() {
     let env2 = build_env(HAPPY_STUB, None, |_| {}).await;
     let agent2 = hire(&env2, "Waitsforhumans", "backend-developer").await;
     let task2 = make_todo_task(&env2, "Needs a human").await;
-    let (_, wakeup2) = send(&env2.app, "POST", &format!("/agents/{agent2}/wakeup"), None).await;
+    let (_, wakeup2) = send(
+        &env2.app,
+        "POST",
+        &format!("/api/agents/{agent2}/wakeup"),
+        None,
+    )
+    .await;
     overmind_server::scheduler::beat(&env2.state)
         .await
         .expect("beat");

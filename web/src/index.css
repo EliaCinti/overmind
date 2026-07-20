@@ -1,0 +1,152 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/* Dark mode driven by a `.dark` class on <html> (toggled in JS, see theme.ts). */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * The single token source (Paperclip DESIGN.md principle 2). Semantic tokens
+ * map to raw values defined per-theme below; components consume the semantic
+ * names only — never raw colors. OKLCH throughout for perceptual consistency.
+ */
+@theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Task-status tier: one hue per lifecycle state, used everywhere a status
+     appears (column headers, card rails, badges) so the vocabulary is learned
+     once (DESIGN.md principle 5). */
+  --color-status-backlog: var(--status-backlog);
+  --color-status-todo: var(--status-todo);
+  --color-status-in_progress: var(--status-in-progress);
+  --color-status-in_review: var(--status-in-review);
+  --color-status-blocked: var(--status-blocked);
+  --color-status-done: var(--status-done);
+  --color-status-cancelled: var(--status-cancelled);
+
+  --radius-lg: 0.75rem;
+  --radius-md: 0.5rem;
+  --radius-sm: 0.375rem;
+
+  --shadow-soft: 0 1px 2px oklch(0 0 0 / 0.04), 0 4px 12px oklch(0 0 0 / 0.06);
+  --shadow-pop: 0 8px 30px oklch(0 0 0 / 0.12);
+}
+
+:root {
+  --background: oklch(0.995 0.002 275);
+  --foreground: oklch(0.22 0.02 275);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 275);
+  --muted: oklch(0.968 0.004 275);
+  --muted-foreground: oklch(0.53 0.02 275);
+  --primary: oklch(0.53 0.2 285);
+  --primary-foreground: oklch(0.99 0.003 285);
+  --accent: oklch(0.955 0.02 285);
+  --accent-foreground: oklch(0.44 0.18 285);
+  --destructive: oklch(0.58 0.22 25);
+  --destructive-foreground: oklch(0.99 0.003 25);
+  --border: oklch(0.92 0.005 275);
+  --input: oklch(0.9 0.006 275);
+  --ring: oklch(0.53 0.2 285);
+
+  --status-backlog: oklch(0.62 0.02 275);
+  --status-todo: oklch(0.58 0.13 250);
+  --status-in-progress: oklch(0.62 0.15 285);
+  --status-in-review: oklch(0.68 0.15 65);
+  --status-blocked: oklch(0.6 0.2 25);
+  --status-done: oklch(0.62 0.15 155);
+  --status-cancelled: oklch(0.6 0.015 275);
+
+  color-scheme: light;
+}
+
+.dark {
+  --background: oklch(0.17 0.012 275);
+  --foreground: oklch(0.93 0.01 275);
+  --card: oklch(0.205 0.014 275);
+  --card-foreground: oklch(0.93 0.01 275);
+  --muted: oklch(0.25 0.014 275);
+  --muted-foreground: oklch(0.68 0.015 275);
+  --primary: oklch(0.7 0.16 285);
+  --primary-foreground: oklch(0.17 0.02 285);
+  --accent: oklch(0.28 0.03 285);
+  --accent-foreground: oklch(0.85 0.08 285);
+  --destructive: oklch(0.62 0.2 25);
+  --destructive-foreground: oklch(0.98 0.005 25);
+  --border: oklch(0.29 0.012 275);
+  --input: oklch(0.32 0.014 275);
+  --ring: oklch(0.7 0.16 285);
+
+  --status-backlog: oklch(0.68 0.02 275);
+  --status-todo: oklch(0.7 0.13 250);
+  --status-in-progress: oklch(0.74 0.14 285);
+  --status-in-review: oklch(0.78 0.14 70);
+  --status-blocked: oklch(0.7 0.18 25);
+  --status-done: oklch(0.74 0.14 155);
+  --status-cancelled: oklch(0.6 0.015 275);
+
+  color-scheme: dark;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Machine values (ids, costs, timestamps) always monospace (DESIGN.md #6). */
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+}
+
+::selection {
+  background: var(--color-primary);
+  color: var(--color-primary-foreground);
+}
+
+/* Refined, unobtrusive scrollbars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted-foreground);
+  background-clip: content-box;
+}

@@ -107,7 +107,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (_, company) = send(
         &app,
         "POST",
-        "/companies",
+        "/api/companies",
         Some(json!({ "name": "Exec Co" })),
     )
     .await;
@@ -115,7 +115,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (_, agent) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/agents"),
+        &format!("/api/companies/{company_id}/agents"),
         Some(json!({ "name": "Builder", "archetype": "backend-developer" })),
     )
     .await;
@@ -123,7 +123,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (_, project) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/projects"),
+        &format!("/api/companies/{company_id}/projects"),
         Some(json!({ "title": "Demo repo" })),
     )
     .await;
@@ -131,7 +131,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (status, ws) = send(
         &app,
         "POST",
-        &format!("/projects/{project_id}/workspaces"),
+        &format!("/api/projects/{project_id}/workspaces"),
         Some(json!({ "name": "main", "cwd": repo.to_string_lossy() })),
     )
     .await;
@@ -139,7 +139,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (_, goal) = send(
         &app,
         "POST",
-        &format!("/projects/{project_id}/goals"),
+        &format!("/api/projects/{project_id}/goals"),
         Some(json!({ "title": "Working code" })),
     )
     .await;
@@ -147,7 +147,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (_, task) = send(
         &app,
         "POST",
-        &format!("/companies/{company_id}/tasks"),
+        &format!("/api/companies/{company_id}/tasks"),
         Some(json!({ "title": "Add greeting file", "description": "Create hello.txt saying hi.", "goal_id": goal_id })),
     )
     .await;
@@ -155,7 +155,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let (status, _) = send(
         &app,
         "POST",
-        &format!("/tasks/{task_id}/transition"),
+        &format!("/api/tasks/{task_id}/transition"),
         Some(json!({ "to": "todo" })),
     )
     .await;
@@ -186,7 +186,7 @@ fn uuid_like() -> String {
 
 async fn wait_for_session(app: &axum::Router, session_id: &str) -> Value {
     for _ in 0..100 {
-        let (_, session) = send(app, "GET", &format!("/sessions/{session_id}"), None).await;
+        let (_, session) = send(app, "GET", &format!("/api/sessions/{session_id}"), None).await;
         let status = session["status"].as_str().unwrap_or("");
         if status == "completed" || status == "failed" {
             return session;
@@ -209,7 +209,7 @@ async fn agent_completes_task_in_isolated_worktree() {
     let (status, started) = send(
         &env.app,
         "POST",
-        &format!("/tasks/{}/start", env.task_id),
+        &format!("/api/tasks/{}/start", env.task_id),
         Some(json!({ "agent_id": env.agent_id })),
     )
     .await;
@@ -240,7 +240,7 @@ async fn agent_completes_task_in_isolated_worktree() {
     assert!(PathBuf::from(workspace_path).join("hello.txt").exists());
 
     // The diff shows the change against the base commit
-    let (status, diff) = send_text(&env.app, &format!("/sessions/{session_id}/diff")).await;
+    let (status, diff) = send_text(&env.app, &format!("/api/sessions/{session_id}/diff")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(diff.contains("hello.txt"), "diff: {diff}");
     assert!(diff.contains("+hi from the agent"), "diff: {diff}");
@@ -249,7 +249,7 @@ async fn agent_completes_task_in_isolated_worktree() {
     let (_, tasks) = send(
         &env.app,
         "GET",
-        &format!("/companies/{}/tasks", env.company_id),
+        &format!("/api/companies/{}/tasks", env.company_id),
         None,
     )
     .await;
@@ -259,7 +259,7 @@ async fn agent_completes_task_in_isolated_worktree() {
     let (_, events) = send(
         &env.app,
         "GET",
-        &format!("/audit/events?company_id={}", env.company_id),
+        &format!("/api/audit/events?company_id={}", env.company_id),
         None,
     )
     .await;
@@ -272,14 +272,14 @@ async fn agent_completes_task_in_isolated_worktree() {
     for expected in ["workspace.created", "session.started", "session.finished"] {
         assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
     }
-    let (_, report) = send(&env.app, "GET", "/audit/verify", None).await;
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
 
 #[tokio::test]
 async fn concurrent_checkouts_exactly_one_wins() {
     let env = setup(HAPPY_STUB).await;
-    let uri = format!("/tasks/{}/start", env.task_id);
+    let uri = format!("/api/tasks/{}/start", env.task_id);
     let body = json!({ "agent_id": env.agent_id });
 
     let (a, b) = tokio::join!(
@@ -316,7 +316,7 @@ async fn failed_session_blocks_task_with_error() {
     let (status, started) = send(
         &env.app,
         "POST",
-        &format!("/tasks/{}/start", env.task_id),
+        &format!("/api/tasks/{}/start", env.task_id),
         Some(json!({ "agent_id": env.agent_id })),
     )
     .await;
@@ -332,12 +332,12 @@ async fn failed_session_blocks_task_with_error() {
     let (_, tasks) = send(
         &env.app,
         "GET",
-        &format!("/companies/{}/tasks", env.company_id),
+        &format!("/api/companies/{}/tasks", env.company_id),
         None,
     )
     .await;
     assert_eq!(tasks["tasks"][0]["status"], "blocked");
 
-    let (_, report) = send(&env.app, "GET", "/audit/verify", None).await;
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }

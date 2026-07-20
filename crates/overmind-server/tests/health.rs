@@ -15,7 +15,7 @@ async fn health_returns_ok_with_name_and_version() {
     let app = test_app().await;
 
     let request = Request::builder()
-        .uri("/health")
+        .uri("/api/health")
         .body(Body::empty())
         .expect("build request");
     let response = app.oneshot(request).await.expect("router responds");

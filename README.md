@@ -17,6 +17,21 @@ What makes Overmind different: it is **memory-native**. Through a pluggable memo
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Milestones — the single source of truth for "what's next" |
 | [docs/adr/](docs/adr/) | Architecture Decision Records — every significant choice, with rationale |
 
+## Running it
+
+```sh
+# 1. Build the UI (once, or after frontend changes)
+cd web && npm install && npm run build && cd ..
+
+# 2. Run the server — it serves the API, the live socket, and the built UI
+cargo run                      # → http://127.0.0.1:7070
+
+# Frontend dev with hot reload (proxies /api and /ws to the server on :7070):
+cd web && npm run dev
+```
+
+Key env vars: `OVERMIND_DB`, `OVERMIND_DATA_DIR`, `OVERMIND_AGENT_CMD` (agent adapter command), `OVERMIND_WEB_DIR`, `OVERMIND_ADDR`, `OVERMIND_HEARTBEAT_SECS`, `OVERMIND_SESSION_TIMEOUT_SECS`.
+
 ## Principles
 
 1. **Self-hosted, no account, yours.** Your agents, your data, your machine.

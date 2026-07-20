@@ -10,7 +10,30 @@ use crate::audit;
 use crate::db::AppState;
 use crate::domain::{AgentTraits, TaskStatus, TraitsPatch, event_kind};
 
+/// The full application: JSON API under `/api`, the live-update WebSocket at
+/// `/ws`, and (when built) the SPA served at the root with history fallback.
 pub fn app(state: AppState) -> Router {
+    let mut router = Router::new()
+        .nest("/api", api_router())
+        .route("/ws", get(crate::ws::handler));
+
+    // Serve the built frontend if present; unknown paths fall back to
+    // index.html so client-side routing works. Absent in API-only/dev mode
+    // (Vite's dev server proxies /api and /ws to us instead).
+    if state.config.web_dir.is_dir() {
+        let index = state.config.web_dir.join("index.html");
+        router = router.fallback_service(
+            tower_http::services::ServeDir::new(&state.config.web_dir)
+                .fallback(tower_http::services::ServeFile::new(index)),
+        );
+    }
+
+    router
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .with_state(state)
+}
+
+fn api_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/companies", post(create_company).get(list_companies))
@@ -19,7 +42,10 @@ pub fn app(state: AppState) -> Router {
             "/companies/{company_id}/agents",
             post(hire_agent).get(list_agents),
         )
-        .route("/companies/{company_id}/projects", post(create_project))
+        .route(
+            "/companies/{company_id}/projects",
+            post(create_project).get(list_projects),
+        )
         .route("/projects/{project_id}/goals", post(create_goal))
         .route(
             "/projects/{project_id}/workspaces",
@@ -31,12 +57,12 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/tasks/{task_id}/transition", post(transition_task))
         .route("/tasks/{task_id}/start", post(start_task))
+        .route("/tasks/{task_id}/sessions", get(list_task_sessions))
         .route("/agents/{agent_id}/wakeup", post(request_wakeup))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/diff", get(get_session_diff))
         .route("/audit/events", get(list_events))
         .route("/audit/verify", get(verify_chain))
-        .with_state(state)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -139,6 +165,7 @@ async fn create_company(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&id);
     Ok((
         StatusCode::CREATED,
         Json(json!({ "id": id, "name": req.name.trim(), "created_at": created_at })),
@@ -256,6 +283,7 @@ async fn hire_agent(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -345,12 +373,50 @@ async fn create_project(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok((
         StatusCode::CREATED,
         Json(
             json!({ "id": id, "company_id": company_id, "title": req.title.trim(), "created_at": created_at }),
         ),
     ))
+}
+
+/// A company's projects, each with its goals and workspaces nested — enough
+/// for the UI to attach tasks to a goal and know a runnable workspace exists,
+/// without a fistful of round-trips.
+async fn list_projects(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let projects: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, title, created_at FROM projects WHERE company_id = ? ORDER BY created_at",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut out = Vec::with_capacity(projects.len());
+    for (id, title, created_at) in projects {
+        let goals: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, title FROM goals WHERE project_id = ? ORDER BY created_at")
+                .bind(&id)
+                .fetch_all(&state.pool)
+                .await?;
+        let workspaces: Vec<(String, String, String, bool)> = sqlx::query_as(
+            "SELECT id, name, cwd, is_primary FROM project_workspaces WHERE project_id = ? ORDER BY created_at",
+        )
+        .bind(&id)
+        .fetch_all(&state.pool)
+        .await?;
+        out.push(json!({
+            "id": id,
+            "title": title,
+            "created_at": created_at,
+            "goals": goals.into_iter().map(|(gid, gt)| json!({ "id": gid, "title": gt })).collect::<Vec<_>>(),
+            "workspaces": workspaces.into_iter().map(|(wid, wn, cwd, primary)| json!({ "id": wid, "name": wn, "cwd": cwd, "is_primary": primary })).collect::<Vec<_>>(),
+        }));
+    }
+    Ok(Json(json!({ "projects": out })))
 }
 
 #[derive(Deserialize)]
@@ -396,6 +462,7 @@ async fn create_goal(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok((
         StatusCode::CREATED,
         Json(
@@ -471,6 +538,7 @@ async fn create_task(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -602,6 +670,7 @@ async fn transition_task(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok(Json(json!({
         "id": task_id,
         "status": to.as_str(),
@@ -673,6 +742,7 @@ async fn create_workspace(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -777,6 +847,7 @@ async fn request_wakeup(
     )
     .await?;
     tx.commit().await?;
+    state.notify(&company_id);
     Ok((
         StatusCode::ACCEPTED,
         Json(
@@ -862,6 +933,40 @@ async fn get_session_diff(
     Path(session_id): Path<String>,
 ) -> Result<String, ApiError> {
     Ok(crate::runner::session_diff(&state, &session_id).await?)
+}
+
+/// (id, agent_id, status, exit_code, last_error, created_at)
+type TaskSessionRow = (String, String, String, Option<i64>, Option<String>, String);
+
+/// Sessions for a task, newest first — lets the UI find a task's run(s) after
+/// a reload without the client having to remember session ids.
+async fn list_task_sessions(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<TaskSessionRow> = sqlx::query_as(
+        "SELECT id, agent_id, status, exit_code, last_error, created_at
+         FROM agent_task_sessions WHERE task_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&task_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let sessions: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, agent_id, status, exit_code, last_error, created_at)| {
+                json!({
+                    "id": id,
+                    "agent_id": agent_id,
+                    "status": status,
+                    "exit_code": exit_code,
+                    "last_error": last_error,
+                    "created_at": created_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({ "sessions": sessions })))
 }
 
 // ---------- audit ----------
