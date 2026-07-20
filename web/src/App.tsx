@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Agent, Archetype, Company, ProjectDetail, Task } from "./lib/api";
+import type { Agent, AgentBudget, Archetype, Company, ProjectDetail, Task } from "./lib/api";
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
 import { useTheme } from "./lib/theme";
@@ -26,6 +26,7 @@ export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<ProjectDetail[]>([]);
+  const [budgets, setBudgets] = useState<AgentBudget[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("board");
@@ -58,14 +59,16 @@ export default function App() {
 
   // Load everything for the selected company.
   const loadCompany = useCallback(async (id: string) => {
-    const [a, t, p] = await Promise.all([
+    const [a, t, p, b] = await Promise.all([
       api.listAgents(id),
       api.listTasks(id),
       api.listProjects(id),
+      api.budgetSummary(id),
     ]);
     setAgents(a);
     setTasks(t);
     setProjects(p);
+    setBudgets(b);
   }, []);
 
   useEffect(() => {
@@ -122,6 +125,7 @@ export default function App() {
         view={view}
         onViewChange={setView}
         showViews={!!companyId && !needsWorkspace}
+        onApprovalDecided={bump}
         connected={connected}
         tick={tick}
         theme={theme}
@@ -140,7 +144,12 @@ export default function App() {
           {view === "board" ? (
             <Board tasks={tasks} agents={agents} onOpenTask={setOpenTask} />
           ) : (
-            <OrgChart agents={agents} onChanged={bump} onHireUnder={openHire} />
+            <OrgChart
+              agents={agents}
+              budgets={budgets}
+              onChanged={bump}
+              onHireUnder={openHire}
+            />
           )}
         </main>
       )}

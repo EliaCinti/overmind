@@ -4,6 +4,7 @@ import type { Company } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Segmented } from "./ui/controls";
+import { ApprovalsInbox } from "./ApprovalsInbox";
 import { cn } from "../lib/utils";
 
 export function TopBar({
@@ -17,6 +18,7 @@ export function TopBar({
   view,
   onViewChange,
   showViews,
+  onApprovalDecided,
   connected,
   tick,
   theme,
@@ -32,6 +34,7 @@ export function TopBar({
   view: "board" | "org";
   onViewChange: (v: "board" | "org") => void;
   showViews: boolean;
+  onApprovalDecided: () => void;
   connected: boolean;
   tick: number;
   theme: string;
@@ -74,6 +77,9 @@ export function TopBar({
       )}
 
       <div className="ml-auto flex items-center gap-2">
+        {companyId && (
+          <ApprovalsInbox companyId={companyId} tick={tick} onDecided={onApprovalDecided} />
+        )}
         <AuditIndicator tick={tick} />
         <ConnectionDot connected={connected} />
         {companyId && (

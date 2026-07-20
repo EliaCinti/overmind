@@ -55,11 +55,13 @@ The company layer — the people structure.
 - Projects → goals → tasks cascade already exists (M1/M2); guided hiring shipped in M4
 - **Accept:** agents assembled into a reporting hierarchy and re-organized from the UI ✓; the DAG invariant holds under a cycle attempt ✓; a non-expert hires a working Security Engineer in one click without free text ✓ (org integration tests + E2E, 2026-07-20). Auto-decomposition of a project into per-role tasks is agent behavior, deferred (see ADR-0011).
 
-## M6 — Budgets + governance `todo`
-- Per-agent monthly budgets; **budget reservation atomic with task checkout**
-- Approval gates (spend threshold, protected actions), approval inbox in UI
-- Pause / terminate agents; config changes revisioned with rollback
-- **Accept:** an agent that would exceed budget is stopped server-side; a gated action blocks until human approval.
+## M6 — Budgets + governance `done`
+What makes Overmind safe to leave running ([ADR-0012](adr/0012-budgets-and-governance.md)).
+- [x] Per-agent monthly budgets (the `monthly_budget_cents` trait is the cap); **enforcement atomic with task checkout** — spent + reserved + estimate must fit, else the start is refused (402) and a `budget_incidents` row is written. Per-session reservation released on finish.
+- [x] Approval gate: a `requires_approval` agent files a pending approval on start and launches nothing; approving it runs the start (bypassing the gate once), rejecting leaves the task. Approvals inbox in the UI.
+- [x] Agent lifecycle: pause / resume / terminate (paused/terminated can't start; terminate permanent)
+- [x] Config revisions on every hire/reassign; `POST /agents/{id}/rollback` restores a past revision and appends a new forward-only `rollback` revision
+- **Accept:** an over-budget start is stopped server-side (402, task never checked out) ✓; a gated start blocks until a human approves, then runs ✓; audit chain verifies throughout ✓ (4 governance integration tests + E2E, 2026-07-20). Config-revision UI and warn-threshold (80%) incidents deferred (see ADR-0012).
 
 ## M7 — Memory contract `todo`
 The differentiator, part 1: the generic `MemoryProvider` interface (ADR-0003).

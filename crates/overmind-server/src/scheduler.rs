@@ -170,14 +170,22 @@ async fn wakeup_outcome(
     let Some((task_id,)) = next else {
         return Ok((Some(company_id), "no todo tasks".to_string()));
     };
-    match runner::start_task(state, &task_id, agent_id).await {
-        Ok(outcome) => Ok((
+    match runner::start_task(state, &task_id, agent_id, false).await {
+        Ok(runner::StartResult::Started(outcome)) => Ok((
             Some(company_id),
             format!("started task {task_id} (session {})", outcome.session_id),
+        )),
+        Ok(runner::StartResult::ApprovalRequired { approval_id }) => Ok((
+            Some(company_id),
+            format!("task {task_id} needs approval ({approval_id})"),
         )),
         Err(RunnerError::Conflict) => Ok((
             Some(company_id),
             format!("task {task_id} was taken by someone else"),
+        )),
+        Err(RunnerError::OverBudget) => Ok((
+            Some(company_id),
+            format!("task {task_id} blocked: over budget"),
         )),
         Err(RunnerError::Invalid(msg)) => Ok((Some(company_id), format!("cannot start: {msg}"))),
         Err(e) => Err(e),

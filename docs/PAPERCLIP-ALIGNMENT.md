@@ -25,9 +25,9 @@
 | Org hierarchy | on `agents`: `reports_to → agents.id`, `title` (no roles table) | same (ADR-0011) | adopted verbatim; dropped our speculative M1 `roles` table |
 | Audit trail | `activity_log` | **audit_events** | deliberate deviation: our name reflects the hash-chain guarantee Paperclip doesn't have (ADR-0006) |
 | Agent wake-ups | `routines`, `agent_wakeup_requests` | heartbeat scheduler (M3) | study their schema before building M3 |
-| Config revisioning | `agent_config_revisions` | planned (M6 governance) | study before building M6 |
-| Budgets | `budget_policies`, `budget_incidents`, `cost_events` | planned (M6) | study before building M6 |
-| Approvals | `approvals`, `approval_comments` | planned (M6) | study before building M6 |
+| Config revisioning | `agent_config_revisions` | same (before/after JSON, forward-only) | ADR-0012 |
+| Budgets | `budget_policies`, `budget_incidents`, `cost_events` | `budget_incidents` + `cost_events`; **cap = agent trait, no `budget_policies` table** | deviation, ADR-0012 |
+| Approvals | `approvals`, `approval_comments` | `approvals` (type/status/payload); no comments table yet | ADR-0012 |
 
 ## Recorded deviations
 

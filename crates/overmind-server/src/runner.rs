@@ -16,6 +16,7 @@ use tokio::process::Command;
 use crate::audit;
 use crate::db::AppState;
 use crate::domain::event_kind;
+use crate::governance;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -25,10 +26,21 @@ pub enum RunnerError {
     Invalid(String),
     #[error("task is not available for checkout")]
     Conflict,
+    #[error("{0}")]
+    Blocked(String),
+    #[error("agent is over its monthly budget")]
+    OverBudget,
     #[error("git error: {0}")]
     Git(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+/// What a start attempt did: actually launched a session, or (when the agent
+/// is governance-gated) filed an approval and launched nothing.
+pub enum StartResult {
+    Started(StartOutcome),
+    ApprovalRequired { approval_id: String },
 }
 
 pub struct StartOutcome {
@@ -71,14 +83,20 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
 ///
 /// The checkout is a single conditional UPDATE (`status = 'todo'` →
 /// `in_progress`): of N concurrent attempts exactly one affects a row and
-/// wins; the others get `Conflict`. Checkout, session creation and audit
-/// events commit in one transaction; the process itself runs afterwards in a
-/// background task that finalizes the session.
+/// wins; the others get `Conflict`. Budget enforcement, checkout, session
+/// creation and audit events commit in one transaction; the process itself
+/// runs afterwards in a background task that finalizes the session.
+///
+/// Governance (ADR-0012): a `requires_approval` agent files an approval and
+/// launches nothing unless `bypass_approval` (i.e. the approval was granted);
+/// a start that would push the agent past its monthly budget is stopped here,
+/// atomically, and recorded as a budget incident.
 pub async fn start_task(
     state: &AppState,
     task_id: &str,
     agent_id: &str,
-) -> Result<StartOutcome, RunnerError> {
+    bypass_approval: bool,
+) -> Result<StartResult, RunnerError> {
     // Resolve task -> goal -> project -> primary workspace.
     let task: Option<(String, Option<String>, String, String, String)> = sqlx::query_as(
         "SELECT company_id, goal_id, title, description, status FROM tasks WHERE id = ?",
@@ -111,16 +129,50 @@ pub async fn start_task(
         ));
     };
 
-    let agent: Option<(String,)> = sqlx::query_as(
-        "SELECT traits FROM agents WHERE id = ? AND company_id = ? AND status = 'active'",
+    let agent: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT traits, status, requires_approval FROM agents WHERE id = ? AND company_id = ?",
     )
     .bind(agent_id)
     .bind(&company_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((agent_traits,)) = agent else {
+    let Some((agent_traits, agent_status, requires_approval)) = agent else {
         return Err(RunnerError::NotFound("agent"));
     };
+    if agent_status != "active" {
+        return Err(RunnerError::Blocked(format!("agent is {agent_status}")));
+    }
+
+    // Governance gate: file an approval and launch nothing.
+    if requires_approval != 0 && !bypass_approval {
+        let approval_id = uuid::Uuid::now_v7().to_string();
+        let mut tx = state.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
+             VALUES (?, ?, 'task_start', 'pending', ?, ?, ?)",
+        )
+        .bind(&approval_id)
+        .bind(&company_id)
+        .bind(json!({ "task_id": task_id, "agent_id": agent_id }).to_string())
+        .bind(format!("Start \"{title}\""))
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+        audit::append(
+            &mut tx,
+            Some(&company_id),
+            Some(task_id),
+            event_kind::APPROVAL_REQUESTED,
+            &json!({ "approval_id": approval_id, "agent_id": agent_id, "type": "task_start" }),
+        )
+        .await?;
+        tx.commit().await?;
+        state.notify(&company_id);
+        return Ok(StartResult::ApprovalRequired { approval_id });
+    }
+
+    let budget = trait_budget_cents(&agent_traits);
+    let estimate = state.config.start_estimate_cents;
 
     let session_id = uuid::Uuid::now_v7().to_string();
     // Branch uniqueness comes from the full session id (globally unique); the
@@ -134,8 +186,44 @@ pub async fn start_task(
         .to_string_lossy()
         .into_owned();
 
-    // Atomic checkout: exactly one concurrent caller wins this UPDATE.
     let mut tx = state.pool.begin().await?;
+
+    // Budget check, atomic with checkout. spent (this month) + reserved
+    // (in-flight) + this run's estimate must fit under the cap.
+    if budget > 0 {
+        let window = governance::month_window_start();
+        let spent = governance::spent_cents(&mut tx, agent_id, &window).await?;
+        let reserved = governance::reserved_cents(&mut tx, agent_id).await?;
+        if spent + reserved + estimate > budget {
+            // Record the incident and commit that alone; the task is untouched.
+            sqlx::query(
+                "INSERT INTO budget_incidents (id, company_id, agent_id, window_start, threshold_type, amount_limit, amount_observed, status, created_at)
+                 VALUES (?, ?, ?, ?, 'hard', ?, ?, 'open', ?)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&company_id)
+            .bind(agent_id)
+            .bind(&window)
+            .bind(budget)
+            .bind(spent + reserved + estimate)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            audit::append(
+                &mut tx,
+                Some(&company_id),
+                Some(task_id),
+                event_kind::BUDGET_BLOCKED,
+                &json!({ "agent_id": agent_id, "limit_cents": budget, "observed_cents": spent + reserved + estimate }),
+            )
+            .await?;
+            tx.commit().await?;
+            state.notify(&company_id);
+            return Err(RunnerError::OverBudget);
+        }
+    }
+
+    // Atomic checkout: exactly one concurrent caller wins this UPDATE.
     let checked_out =
         sqlx::query("UPDATE tasks SET status = 'in_progress', assignee_agent_id = ?, updated_at = ? WHERE id = ? AND status = 'todo'")
             .bind(agent_id)
@@ -147,14 +235,15 @@ pub async fn start_task(
         return Err(RunnerError::Conflict);
     }
     sqlx::query(
-        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, created_at)
-         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?)",
+        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, created_at)
+         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?)",
     )
     .bind(&session_id)
     .bind(task_id)
     .bind(agent_id)
     .bind(&branch)
     .bind(&worktree_dir)
+    .bind(estimate)
     .bind(now())
     .execute(&mut *tx)
     .await?;
@@ -197,11 +286,19 @@ pub async fn start_task(
         run_session(ctx, Mode::Fresh(spec)).await;
     });
 
-    Ok(StartOutcome {
+    Ok(StartResult::Started(StartOutcome {
         session_id,
         branch,
         workspace_path: worktree_dir,
-    })
+    }))
+}
+
+/// The monthly budget cap from an agent's serialized traits (0 = uncapped).
+fn trait_budget_cents(traits_json: &str) -> i64 {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
+        .unwrap_or(0)
 }
 
 /// Resume a session that is marked queued/running in the DB but has no live
@@ -496,8 +593,10 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     };
 
     let mut tx = ctx.state.pool.begin().await?;
+    // Releasing the reservation (→ 0): once the run is over, its actual cost
+    // is a cost_event and counts as spent; the in-flight reservation is gone.
     sqlx::query(
-        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, finished_at = ? WHERE id = ?",
+        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
     )
     .bind(f.session_status)
     .bind(&f.output)

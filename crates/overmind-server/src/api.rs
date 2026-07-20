@@ -43,6 +43,18 @@ fn api_router() -> Router<AppState> {
             post(hire_agent).get(list_agents),
         )
         .route("/agents/{agent_id}/reassign", post(reassign_agent))
+        .route("/agents/{agent_id}/pause", post(pause_agent))
+        .route("/agents/{agent_id}/resume", post(resume_agent))
+        .route("/agents/{agent_id}/terminate", post(terminate_agent))
+        .route(
+            "/agents/{agent_id}/approval-gate",
+            post(set_requires_approval),
+        )
+        .route("/agents/{agent_id}/revisions", get(list_revisions))
+        .route("/agents/{agent_id}/rollback", post(rollback_agent))
+        .route("/companies/{company_id}/approvals", get(list_approvals))
+        .route("/approvals/{approval_id}/decision", post(decide_approval))
+        .route("/companies/{company_id}/budget", get(budget_summary))
         .route(
             "/companies/{company_id}/projects",
             post(create_project).get(list_projects),
@@ -74,6 +86,9 @@ pub enum ApiError {
     Invalid(String),
     #[error("{0}")]
     Conflict(String),
+    /// Refused by a governance policy (e.g. over budget). Maps to 402.
+    #[error("{0}")]
+    Blocked(String),
     #[error("internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -84,7 +99,11 @@ impl From<crate::runner::RunnerError> for ApiError {
         match e {
             RunnerError::NotFound(what) => ApiError::NotFound(what),
             RunnerError::Invalid(msg) => ApiError::Invalid(msg),
-            RunnerError::Conflict => ApiError::Conflict(e.to_string()),
+            RunnerError::Conflict => {
+                ApiError::Conflict("task is not available for checkout".into())
+            }
+            RunnerError::Blocked(msg) => ApiError::Conflict(msg),
+            RunnerError::OverBudget => ApiError::Blocked("agent is over its monthly budget".into()),
             RunnerError::Git(msg) => ApiError::Internal(msg.into()),
             RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
         }
@@ -109,6 +128,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Invalid(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Blocked(_) => StatusCode::PAYMENT_REQUIRED,
             ApiError::Internal(source) => {
                 // The client gets an opaque error; the operator gets the cause.
                 eprintln!("internal error: {source}");
@@ -303,6 +323,17 @@ async fn hire_agent(
     .bind(&created_at)
     .execute(&mut *tx)
     .await?;
+    // First config revision: from nothing to the hired configuration.
+    let snapshot = crate::governance::agent_snapshot(
+        req.name.trim(),
+        title,
+        req.reports_to.as_deref(),
+        &serde_json::to_value(&traits)?,
+        req.custom_brief.as_deref(),
+        false,
+    );
+    crate::governance::record_revision(&mut tx, &company_id, &id, "hire", &json!({}), &snapshot)
+        .await?;
     audit::append(
         &mut tx,
         Some(&company_id),
@@ -337,7 +368,7 @@ async fn hire_agent(
     ))
 }
 
-/// (id, name, traits, custom_brief, status, title, reports_to, archetype slug)
+/// (id, name, traits, custom_brief, status, title, reports_to, requires_approval, archetype slug)
 type AgentRow = (
     String,
     String,
@@ -346,6 +377,7 @@ type AgentRow = (
     String,
     Option<String>,
     Option<String>,
+    i64,
     String,
 );
 
@@ -354,7 +386,7 @@ async fn list_agents(
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<AgentRow> = sqlx::query_as(
-        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, ar.slug
+        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, a.requires_approval, ar.slug
          FROM agents a JOIN archetypes ar ON ar.id = a.archetype_id
          WHERE a.company_id = ? ORDER BY a.created_at",
     )
@@ -364,7 +396,17 @@ async fn list_agents(
     let agents = rows
         .into_iter()
         .map(
-            |(id, name, traits, custom_brief, status, title, reports_to, archetype)| {
+            |(
+                id,
+                name,
+                traits,
+                custom_brief,
+                status,
+                title,
+                reports_to,
+                requires_approval,
+                archetype,
+            )| {
                 let traits: Value = serde_json::from_str(&traits)?;
                 Ok(json!({
                     "id": id,
@@ -374,6 +416,7 @@ async fn list_agents(
                     "custom_brief": custom_brief,
                     "title": title,
                     "reports_to": reports_to,
+                    "requires_approval": requires_approval != 0,
                     "status": status,
                 }))
             },
@@ -401,11 +444,7 @@ async fn reassign_agent(
     Json(req): Json<ReassignAgent>,
 ) -> Result<Json<Value>, ApiError> {
     let mut tx = state.pool.begin().await?;
-    let agent: Option<(String,)> = sqlx::query_as("SELECT company_id FROM agents WHERE id = ?")
-        .bind(&agent_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some((company_id,)) = agent else {
+    let Some((company_id, before)) = agent_snapshot_by_id(&mut tx, &agent_id).await? else {
         return Err(ApiError::NotFound("agent"));
     };
 
@@ -456,6 +495,18 @@ async fn reassign_agent(
             .await?;
     }
 
+    // Snapshot the new config as a revision (forward-only history).
+    if let Some((_, after)) = agent_snapshot_by_id(&mut tx, &agent_id).await? {
+        crate::governance::record_revision(
+            &mut tx,
+            &company_id,
+            &agent_id,
+            "patch",
+            &before,
+            &after,
+        )
+        .await?;
+    }
     audit::append(
         &mut tx,
         Some(&company_id),
@@ -935,15 +986,21 @@ async fn start_task(
     Path(task_id): Path<String>,
     Json(req): Json<StartTask>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let outcome = crate::runner::start_task(&state, &task_id, &req.agent_id).await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "session_id": outcome.session_id,
-            "branch": outcome.branch,
-            "workspace_path": outcome.workspace_path,
-        })),
-    ))
+    match crate::runner::start_task(&state, &task_id, &req.agent_id, false).await? {
+        crate::runner::StartResult::Started(outcome) => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "status": "started",
+                "session_id": outcome.session_id,
+                "branch": outcome.branch,
+                "workspace_path": outcome.workspace_path,
+            })),
+        )),
+        crate::runner::StartResult::ApprovalRequired { approval_id } => Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "status": "approval_required", "approval_id": approval_id })),
+        )),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -1108,6 +1165,396 @@ async fn list_task_sessions(
         )
         .collect();
     Ok(Json(json!({ "sessions": sessions })))
+}
+
+// ---------- governance: lifecycle, approvals, budgets, config revisions ----------
+
+/// (company_id, name, title, reports_to, traits, custom_brief, requires_approval)
+type AgentConfigRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    i64,
+);
+
+/// The full config snapshot of an agent as stored in a revision.
+async fn agent_snapshot_by_id(
+    conn: &mut sqlx::sqlite::SqliteConnection,
+    agent_id: &str,
+) -> Result<Option<(String, Value)>, ApiError> {
+    let row: Option<AgentConfigRow> = sqlx::query_as(
+        "SELECT company_id, name, title, reports_to, traits, custom_brief, requires_approval
+             FROM agents WHERE id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((company_id, name, title, reports_to, traits, custom_brief, requires_approval)) = row
+    else {
+        return Ok(None);
+    };
+    let traits: Value = serde_json::from_str(&traits)?;
+    let snap = crate::governance::agent_snapshot(
+        &name,
+        title.as_deref(),
+        reports_to.as_deref(),
+        &traits,
+        custom_brief.as_deref(),
+        requires_approval != 0,
+    );
+    Ok(Some((company_id, snap)))
+}
+
+/// Change an agent's lifecycle status. `paused`/`terminated` stop it from
+/// taking new work; `terminated` is permanent.
+async fn set_agent_status(
+    state: &AppState,
+    agent_id: &str,
+    to: &str,
+    event: &'static str,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT company_id, status FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((company_id, current)) = row else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    if current == "terminated" {
+        return Err(ApiError::Conflict("agent is terminated".into()));
+    }
+    sqlx::query("UPDATE agents SET status = ? WHERE id = ?")
+        .bind(to)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event,
+        &json!({ "agent_id": agent_id }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": agent_id, "status": to })))
+}
+
+async fn pause_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    set_agent_status(&state, &agent_id, "paused", event_kind::AGENT_PAUSED).await
+}
+
+async fn resume_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    set_agent_status(&state, &agent_id, "active", event_kind::AGENT_RESUMED).await
+}
+
+async fn terminate_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    set_agent_status(
+        &state,
+        &agent_id,
+        "terminated",
+        event_kind::AGENT_TERMINATED,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct SetApproval {
+    requires_approval: bool,
+}
+
+/// Toggle the governance gate: whether starting this agent's tasks needs a
+/// human approval.
+async fn set_requires_approval(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<SetApproval>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let agent: Option<(String,)> = sqlx::query_as("SELECT company_id FROM agents WHERE id = ?")
+        .bind(&agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((company_id,)) = agent else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    sqlx::query("UPDATE agents SET requires_approval = ? WHERE id = ?")
+        .bind(req.requires_approval as i64)
+        .bind(&agent_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_REVISED,
+        &json!({ "agent_id": agent_id, "requires_approval": req.requires_approval }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(
+        json!({ "id": agent_id, "requires_approval": req.requires_approval }),
+    ))
+}
+
+/// (id, type, status, summary, decision_note, created_at, decided_at)
+type ApprovalRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+);
+
+async fn list_approvals(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<ApprovalRow> = sqlx::query_as(
+        "SELECT id, type, status, summary, decision_note, created_at, decided_at
+             FROM approvals WHERE company_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let approvals: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, kind, status, summary, note, created_at, decided_at)| {
+                json!({
+                    "id": id,
+                    "type": kind,
+                    "status": status,
+                    "summary": summary,
+                    "decision_note": note,
+                    "created_at": created_at,
+                    "decided_at": decided_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({ "approvals": approvals })))
+}
+
+#[derive(Deserialize)]
+struct DecideApproval {
+    /// "approve" or "reject".
+    decision: String,
+    note: Option<String>,
+}
+
+/// Decide a pending approval. Approving a `task_start` runs the gated start
+/// (bypassing the gate this time); rejecting leaves the task untouched.
+async fn decide_approval(
+    State(state): State<AppState>,
+    Path(approval_id): Path<String>,
+    Json(req): Json<DecideApproval>,
+) -> Result<Json<Value>, ApiError> {
+    let approve = match req.decision.as_str() {
+        "approve" => true,
+        "reject" => false,
+        _ => {
+            return Err(ApiError::Invalid(
+                "decision must be approve or reject".into(),
+            ));
+        }
+    };
+    let row: Option<(String, String, String, String)> =
+        sqlx::query_as("SELECT company_id, type, status, payload FROM approvals WHERE id = ?")
+            .bind(&approval_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((company_id, kind, status, payload)) = row else {
+        return Err(ApiError::NotFound("approval"));
+    };
+    if status != "pending" {
+        return Err(ApiError::Conflict(format!("approval already {status}")));
+    }
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("UPDATE approvals SET status = ?, decision_note = ?, decided_at = ? WHERE id = ?")
+        .bind(if approve { "approved" } else { "rejected" })
+        .bind(&req.note)
+        .bind(now())
+        .bind(&approval_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::APPROVAL_DECIDED,
+        &json!({ "approval_id": approval_id, "decision": req.decision }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+
+    // Carry out an approved task_start.
+    let mut result =
+        json!({ "id": approval_id, "status": if approve { "approved" } else { "rejected" } });
+    if approve && kind == "task_start" {
+        let p: Value = serde_json::from_str(&payload)?;
+        if let (Some(task_id), Some(agent_id)) = (p["task_id"].as_str(), p["agent_id"].as_str()) {
+            match crate::runner::start_task(&state, task_id, agent_id, true).await? {
+                crate::runner::StartResult::Started(o) => {
+                    result["session_id"] = json!(o.session_id);
+                }
+                crate::runner::StartResult::ApprovalRequired { .. } => {}
+            }
+        }
+    }
+    Ok(Json(result))
+}
+
+async fn list_revisions(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, source, changed_keys, after_config, created_at
+         FROM agent_config_revisions WHERE agent_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&agent_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let revisions = rows
+        .into_iter()
+        .map(|(id, source, changed, after, created_at)| {
+            Ok(json!({
+                "id": id,
+                "source": source,
+                "changed_keys": serde_json::from_str::<Value>(&changed).unwrap_or(json!([])),
+                "config": serde_json::from_str::<Value>(&after)?,
+                "created_at": created_at,
+            }))
+        })
+        .collect::<Result<Vec<Value>, serde_json::Error>>()?;
+    Ok(Json(json!({ "revisions": revisions })))
+}
+
+#[derive(Deserialize)]
+struct Rollback {
+    revision_id: String,
+}
+
+/// Roll an agent's config back to the state a past revision produced. Appends
+/// a new `rollback` revision — history is never rewritten.
+async fn rollback_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<Rollback>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let target: Option<(String, String)> = sqlx::query_as(
+        "SELECT company_id, after_config FROM agent_config_revisions WHERE id = ? AND agent_id = ?",
+    )
+    .bind(&req.revision_id)
+    .bind(&agent_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((company_id, after_config)) = target else {
+        return Err(ApiError::NotFound("revision"));
+    };
+    let cfg: Value = serde_json::from_str(&after_config)?;
+
+    let before = match agent_snapshot_by_id(&mut tx, &agent_id).await? {
+        Some((_, snap)) => snap,
+        None => return Err(ApiError::NotFound("agent")),
+    };
+
+    let name = cfg["name"].as_str().unwrap_or("");
+    let title = cfg["title"].as_str();
+    let reports_to = cfg["reports_to"].as_str();
+    let traits = serde_json::to_string(&cfg["traits"])?;
+    let custom_brief = cfg["custom_brief"].as_str();
+    let requires_approval = cfg["requires_approval"].as_bool().unwrap_or(false);
+    sqlx::query(
+        "UPDATE agents SET name = ?, title = ?, reports_to = ?, traits = ?, custom_brief = ?, requires_approval = ? WHERE id = ?",
+    )
+    .bind(name)
+    .bind(title)
+    .bind(reports_to)
+    .bind(&traits)
+    .bind(custom_brief)
+    .bind(requires_approval as i64)
+    .bind(&agent_id)
+    .execute(&mut *tx)
+    .await?;
+    crate::governance::record_revision(&mut tx, &company_id, &agent_id, "rollback", &before, &cfg)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_ROLLED_BACK,
+        &json!({ "agent_id": agent_id, "to_revision": req.revision_id }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(
+        json!({ "id": agent_id, "rolled_back_to": req.revision_id }),
+    ))
+}
+
+/// Per-agent month-to-date budget usage for the company (for the UI).
+async fn budget_summary(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let window = crate::governance::month_window_start();
+    let agents: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, name, traits FROM agents WHERE company_id = ? AND status != 'terminated' ORDER BY created_at")
+            .bind(&company_id)
+            .fetch_all(&state.pool)
+            .await?;
+    let mut out = Vec::with_capacity(agents.len());
+    for (id, name, traits) in agents {
+        let budget = serde_json::from_str::<Value>(&traits)
+            .ok()
+            .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
+            .unwrap_or(0);
+        let spent: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(cost_cents), 0) FROM cost_events WHERE agent_id = ? AND occurred_at >= ?",
+        )
+        .bind(&id)
+        .bind(&window)
+        .fetch_one(&state.pool)
+        .await?;
+        let reserved: (i64,) = sqlx::query_as(
+            "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_task_sessions WHERE agent_id = ? AND status IN ('queued','running')",
+        )
+        .bind(&id)
+        .fetch_one(&state.pool)
+        .await?;
+        out.push(json!({
+            "agent_id": id,
+            "name": name,
+            "budget_cents": budget,
+            "spent_cents": spent.0,
+            "reserved_cents": reserved.0,
+        }));
+    }
+    Ok(Json(json!({ "budgets": out, "window_start": window })))
 }
 
 // ---------- audit ----------

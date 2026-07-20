@@ -47,6 +47,9 @@ pub struct Config {
     pub heartbeat_ms: u64,
     /// Kill sessions running longer than this (`OVERMIND_SESSION_TIMEOUT_SECS`).
     pub session_timeout_secs: u64,
+    /// Cents reserved against an agent's budget at task start, before the real
+    /// cost is known (`OVERMIND_START_ESTIMATE_CENTS`).
+    pub start_estimate_cents: i64,
     /// Built frontend directory (`OVERMIND_WEB_DIR`). Served at the root when
     /// it exists; absent in dev (Vite serves the UI and proxies to us).
     pub web_dir: PathBuf,
@@ -59,6 +62,7 @@ impl Default for Config {
             data_dir: PathBuf::from("./overmind-data"),
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
+            start_estimate_cents: 50,
             web_dir: PathBuf::from("./web/dist"),
         }
     }
@@ -81,6 +85,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.session_timeout_secs),
+            start_estimate_cents: std::env::var("OVERMIND_START_ESTIMATE_CENTS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.start_estimate_cents),
             web_dir: std::env::var("OVERMIND_WEB_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.web_dir),

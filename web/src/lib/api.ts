@@ -47,7 +47,26 @@ export interface Agent {
   custom_brief: string | null;
   title: string | null;
   reports_to: string | null;
+  requires_approval: boolean;
   status: string;
+}
+
+export interface Approval {
+  id: string;
+  type: string;
+  status: "pending" | "approved" | "rejected";
+  summary: string;
+  decision_note: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface AgentBudget {
+  agent_id: string;
+  name: string;
+  budget_cents: number;
+  spent_cents: number;
+  reserved_cents: number;
 }
 
 export interface Project {
@@ -170,6 +189,27 @@ export const api = {
     agentId: string,
     body: { reports_to?: string | null; title?: string },
   ) => req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
+  pauseAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/pause`),
+  resumeAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/resume`),
+  terminateAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/terminate`),
+  setApprovalGate: (agentId: string, requires_approval: boolean) =>
+    req<unknown>("POST", `/agents/${agentId}/approval-gate`, { requires_approval }),
+
+  listApprovals: (companyId: string) =>
+    req<{ approvals: Approval[] }>("GET", `/companies/${companyId}/approvals`).then(
+      (r) => r.approvals,
+    ),
+  decideApproval: (approvalId: string, decision: "approve" | "reject", note?: string) =>
+    req<{ id: string; status: string }>("POST", `/approvals/${approvalId}/decision`, {
+      decision,
+      note,
+    }),
+
+  budgetSummary: (companyId: string) =>
+    req<{ budgets: AgentBudget[]; window_start: string }>(
+      "GET",
+      `/companies/${companyId}/budget`,
+    ).then((r) => r.budgets),
 
   listProjects: (companyId: string) =>
     req<{ projects: ProjectDetail[] }>("GET", `/companies/${companyId}/projects`).then(

@@ -171,6 +171,14 @@ pub mod event_kind {
     pub const TASK_RELEASED: &str = "task.released";
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";
+    pub const BUDGET_BLOCKED: &str = "budget.blocked";
+    pub const APPROVAL_REQUESTED: &str = "approval.requested";
+    pub const APPROVAL_DECIDED: &str = "approval.decided";
+    pub const AGENT_PAUSED: &str = "agent.paused";
+    pub const AGENT_RESUMED: &str = "agent.resumed";
+    pub const AGENT_TERMINATED: &str = "agent.terminated";
+    pub const CONFIG_REVISED: &str = "agent.config_revised";
+    pub const CONFIG_ROLLED_BACK: &str = "agent.config_rolled_back";
 }
 
 #[cfg(test)]
