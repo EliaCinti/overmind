@@ -1,0 +1,86 @@
+<svg width="1200" height="360" viewBox="0 0 1200 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind — the mind that runs your agent company">
+  <defs>
+    <linearGradient id="h-bg" x1="0" y1="0" x2="1200" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1730"/>
+      <stop offset="0.55" stop-color="#1a1523"/>
+      <stop offset="1" stop-color="#150f1f"/>
+    </linearGradient>
+    <linearGradient id="h-violet" x1="80" y1="120" x2="200" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9d7bff"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+    <linearGradient id="h-title" x1="150" y1="150" x2="150" y2="205" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.96"/>
+      <stop offset="1" stop-color="#d9d1f5"/>
+    </linearGradient>
+    <radialGradient id="h-glow" cx="0.82" cy="0.28" r="0.6">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Self-contained dark card: renders identically in light and dark themes -->
+  <rect width="1200" height="360" rx="24" fill="url(#h-bg)"/>
+  <rect width="1200" height="360" rx="24" fill="url(#h-glow)"/>
+  <rect x="1" y="1" width="1198" height="358" rx="23" fill="none" stroke="#7c5cff" stroke-opacity="0.35" stroke-width="2"/>
+
+  <!-- Faint node lattice on the right: an org of agents -->
+  <g opacity="0.5">
+    <g stroke="#7c5cff" stroke-opacity="0.45" stroke-width="1.5" stroke-linecap="round">
+      <line x1="940" y1="110" x2="1030" y2="180"/>
+      <line x1="1030" y1="180" x2="960" y2="250"/>
+      <line x1="1030" y1="180" x2="1110" y2="130"/>
+      <line x1="1030" y1="180" x2="1105" y2="255"/>
+      <line x1="940" y1="110" x2="1110" y2="130"/>
+    </g>
+    <g fill="#b7a5ff">
+      <circle cx="940" cy="110" r="5.5"/>
+      <circle cx="1110" cy="130" r="5.5"/>
+      <circle cx="960" cy="250" r="5.5"/>
+      <circle cx="1105" cy="255" r="5.5"/>
+    </g>
+    <circle cx="1030" cy="180" r="11" fill="url(#h-violet)"/>
+    <circle cx="1030" cy="180" r="4.5" fill="#f2eeff"/>
+  </g>
+
+  <!-- Logomark -->
+  <g transform="translate(80,116)">
+    <rect x="0" y="0" width="96" height="96" rx="22" fill="#221a33" stroke="#7c5cff" stroke-opacity="0.6" stroke-width="2"/>
+    <g stroke="url(#h-violet)" stroke-width="3" stroke-linecap="round" transform="translate(0,0)">
+      <line x1="48" y1="48" x2="30" y2="29"/>
+      <line x1="48" y1="48" x2="68" y2="32"/>
+      <line x1="48" y1="48" x2="29" y2="66"/>
+      <line x1="48" y1="48" x2="68" y2="66"/>
+    </g>
+    <g fill="#c9bcff">
+      <circle cx="30" cy="29" r="5.5"/>
+      <circle cx="68" cy="32" r="5.5"/>
+      <circle cx="29" cy="66" r="5.5"/>
+      <circle cx="68" cy="66" r="5.5"/>
+    </g>
+    <circle cx="48" cy="48" r="11" fill="url(#h-violet)"/>
+    <circle cx="48" cy="48" r="4.5" fill="#f2eeff"/>
+  </g>
+
+  <!-- Wordmark + tagline -->
+  <text x="208" y="176" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="72" font-weight="700" letter-spacing="-1.5" fill="url(#h-title)">Overmind</text>
+  <text x="210" y="222" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="27" font-weight="500" fill="#c9bcff">the mind that runs your agent company</text>
+
+  <!-- Capability strip -->
+  <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="600" fill="#a99cd6">
+    <text x="212" y="272">Memory-native</text>
+    <text x="360" y="272" fill="#6d6386">&#8226;</text>
+    <text x="384" y="272">Isolated worktrees</text>
+    <text x="566" y="272" fill="#6d6386">&#8226;</text>
+    <text x="590" y="272">Atomic budgets</text>
+    <text x="742" y="272" fill="#6d6386">&#8226;</text>
+    <text x="766" y="272">Hash-chained audit</text>
+  </g>
+
+  <!-- Status pill -->
+  <g transform="translate(212,296)">
+    <rect x="0" y="0" width="150" height="30" rx="15" fill="#7c5cff" fill-opacity="0.16" stroke="#7c5cff" stroke-opacity="0.55" stroke-width="1.5"/>
+    <circle cx="20" cy="15" r="4" fill="#9d7bff"/>
+    <text x="34" y="20" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="14" font-weight="600" fill="#c9bcff">pre-alpha · MIT</text>
+  </g>
+</svg>

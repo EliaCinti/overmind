@@ -1,0 +1,35 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind logomark">
+  <defs>
+    <linearGradient id="lm-violet" x1="20" y1="14" x2="108" y2="114" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9d7bff"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+    <linearGradient id="lm-panel" x1="14" y1="14" x2="114" y2="114" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#221a33"/>
+      <stop offset="1" stop-color="#1a1523"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Self-contained panel: identical in light and dark GitHub themes -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#lm-panel)" stroke="#7c5cff" stroke-opacity="0.55" stroke-width="2"/>
+
+  <!-- Orchestration hub: a central mind wiring worker nodes together -->
+  <g stroke="url(#lm-violet)" stroke-width="3.5" stroke-linecap="round">
+    <line x1="64" y1="64" x2="40" y2="38"/>
+    <line x1="64" y1="64" x2="90" y2="42"/>
+    <line x1="64" y1="64" x2="38" y2="88"/>
+    <line x1="64" y1="64" x2="90" y2="88"/>
+  </g>
+
+  <!-- Satellite worker nodes -->
+  <g fill="#c9bcff">
+    <circle cx="40" cy="38" r="7.5"/>
+    <circle cx="90" cy="42" r="7.5"/>
+    <circle cx="38" cy="88" r="7.5"/>
+    <circle cx="90" cy="88" r="7.5"/>
+  </g>
+
+  <!-- Central node: the overmind -->
+  <circle cx="64" cy="64" r="15" fill="url(#lm-violet)"/>
+  <circle cx="64" cy="64" r="6" fill="#f2eeff"/>
+</svg>
