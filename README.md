@@ -151,7 +151,7 @@ Progressive disclosure: pick an archetype, tune with clicks, drop into expert mo
 
 ## Powered by Wadachi
 
-<img align="right" width="30%" src=".github/assets/logomark.svg" alt="Overmind logomark" />
+<img align="right" width="30%" src=".github/assets/wadachi-logomark.svg" alt="Wadachi logomark" />
 
 Overmind's memory isn't a bolt-on cache — it's **[Wadachi](https://github.com/EliaCinti/wadachi) (轍**, the ruts a wheel leaves in the road**)**, a persistent-memory engine for AI agents that Overmind adopts as its first-party brain.
 
