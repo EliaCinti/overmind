@@ -1,0 +1,98 @@
+<svg width="1200" height="680" viewBox="0 0 1200 680" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind system architecture">
+  <defs>
+    <linearGradient id="a-bg" x1="0" y1="0" x2="1200" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1730"/>
+      <stop offset="1" stop-color="#150f1f"/>
+    </linearGradient>
+    <linearGradient id="a-violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9d7bff"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Self-contained dark card: identical in light and dark GitHub themes -->
+  <rect width="1200" height="680" rx="24" fill="url(#a-bg)"/>
+  <rect x="1" y="1" width="1198" height="678" rx="23" fill="none" stroke="#7c5cff" stroke-opacity="0.32" stroke-width="2"/>
+
+  <text x="40" y="52" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="20" font-weight="700" fill="#e7e1f7">Overmind — system architecture</text>
+  <text x="40" y="76" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="14" font-weight="500" fill="#8f83b8">Rust server · React UI · MCP memory · one git worktree per run</text>
+
+  <!-- overmind-web -->
+  <g>
+    <rect x="360" y="100" width="480" height="76" rx="16" fill="#251d38" stroke="#7c5cff" stroke-opacity="0.55" stroke-width="1.75"/>
+    <text x="600" y="134" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="19" font-weight="700" fill="#efe9ff">overmind-web · React + TypeScript SPA</text>
+    <text x="600" y="158" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="13.5" font-weight="500" fill="#a99cd6">board · org chart · diff review · audit browser · governance</text>
+  </g>
+
+  <!-- UI <-> server link -->
+  <line x1="600" y1="182" x2="600" y2="214" stroke="#7c5cff" stroke-width="2.5"/>
+  <polygon points="594,186 606,186 600,178" fill="#9d7bff"/>
+  <polygon points="594,210 606,210 600,218" fill="#9d7bff"/>
+  <text x="614" y="203" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="600" fill="#b7a5ff">HTTP + WebSocket · typed API</text>
+
+  <!-- overmind-server panel -->
+  <rect x="80" y="222" width="1040" height="288" rx="20" fill="#1f1830" stroke="#7c5cff" stroke-opacity="0.45" stroke-width="2"/>
+  <text x="104" y="254" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="17" font-weight="700" fill="#e7e1f7">overmind-server</text>
+  <text x="1096" y="254" text-anchor="end" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="13.5" font-weight="600" fill="#8f83b8">Rust · axum · sqlx · tokio</text>
+
+  <!-- module cards row -->
+  <g font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+    <!-- card 1 -->
+    <rect x="104" y="270" width="228" height="66" rx="12" fill="#2a2140" stroke="#7c5cff" stroke-opacity="0.3" stroke-width="1.5"/>
+    <text x="218" y="300" text-anchor="middle" font-size="15" font-weight="700" fill="#e7e1f7">Org &amp; hierarchy</text>
+    <text x="218" y="320" text-anchor="middle" font-size="12" font-weight="500" fill="#a99cd6">companies · agents · DAG</text>
+    <!-- card 2 -->
+    <rect x="352" y="270" width="228" height="66" rx="12" fill="#2a2140" stroke="#7c5cff" stroke-opacity="0.3" stroke-width="1.5"/>
+    <text x="466" y="300" text-anchor="middle" font-size="15" font-weight="700" fill="#e7e1f7">Tasks &amp; board</text>
+    <text x="466" y="320" text-anchor="middle" font-size="12" font-weight="500" fill="#a99cd6">lifecycle · live updates</text>
+    <!-- card 3 -->
+    <rect x="620" y="270" width="228" height="66" rx="12" fill="#2a2140" stroke="#7c5cff" stroke-opacity="0.3" stroke-width="1.5"/>
+    <text x="734" y="300" text-anchor="middle" font-size="15" font-weight="700" fill="#e7e1f7">Scheduler</text>
+    <text x="734" y="320" text-anchor="middle" font-size="12" font-weight="500" fill="#a99cd6">heartbeats · recovery</text>
+    <!-- card 4 -->
+    <rect x="868" y="270" width="228" height="66" rx="12" fill="#2a2140" stroke="#7c5cff" stroke-opacity="0.3" stroke-width="1.5"/>
+    <text x="982" y="300" text-anchor="middle" font-size="15" font-weight="700" fill="#e7e1f7">Governance</text>
+    <text x="982" y="320" text-anchor="middle" font-size="12" font-weight="500" fill="#a99cd6">budgets · approvals</text>
+  </g>
+
+  <!-- runner + mcp cards -->
+  <g font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif">
+    <rect x="104" y="350" width="480" height="60" rx="12" fill="#2a2140" stroke="#7c5cff" stroke-opacity="0.3" stroke-width="1.5"/>
+    <text x="344" y="376" text-anchor="middle" font-size="15" font-weight="700" fill="#e7e1f7">Agent runners</text>
+    <text x="344" y="396" text-anchor="middle" font-size="12" font-weight="500" fill="#a99cd6">spawn CLIs in isolated git worktrees</text>
+
+    <rect x="616" y="350" width="480" height="60" rx="12" fill="#2a2140" stroke="#7c5cff" stroke-opacity="0.3" stroke-width="1.5"/>
+    <text x="856" y="376" text-anchor="middle" font-size="15" font-weight="700" fill="#e7e1f7">MCP layer</text>
+    <text x="856" y="396" text-anchor="middle" font-size="12" font-weight="500" fill="#a99cd6">client: tools + memory · server: expose Overmind</text>
+  </g>
+
+  <!-- SQLite storage strip -->
+  <rect x="104" y="424" width="992" height="66" rx="12" fill="#231a30" stroke="#7c5cff" stroke-opacity="0.5" stroke-width="1.75"/>
+  <circle cx="140" cy="457" r="6" fill="#9d7bff"/>
+  <text x="160" y="450" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="15" font-weight="700" fill="#efe9ff">SQLite (sqlx · WAL)</text>
+  <text x="160" y="472" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="500" fill="#b7a5ff">domain tables + append-only, SHA-256 hash-chained audit log — tampering is detectable</text>
+
+  <!-- server -> runner CLIs -->
+  <line x1="344" y1="512" x2="344" y2="560" stroke="#7c5cff" stroke-width="2.5"/>
+  <polygon points="338,516 350,516 344,508" fill="#9d7bff"/>
+  <polygon points="338,556 350,556 344,564" fill="#9d7bff"/>
+  <text x="356" y="540" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="600" fill="#b7a5ff">worktree per run</text>
+
+  <!-- server -> memory -->
+  <line x1="856" y1="512" x2="856" y2="560" stroke="#7c5cff" stroke-width="2.5"/>
+  <polygon points="850,516 862,516 856,508" fill="#9d7bff"/>
+  <polygon points="850,556 862,556 856,564" fill="#9d7bff"/>
+  <text x="868" y="540" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="600" fill="#b7a5ff">MCP (stdio) · optional</text>
+
+  <!-- bottom: agent CLIs -->
+  <rect x="80" y="566" width="528" height="90" rx="16" fill="#251d38" stroke="#7c5cff" stroke-opacity="0.4" stroke-width="1.75"/>
+  <text x="344" y="600" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="16" font-weight="700" fill="#efe9ff">Agent CLIs</text>
+  <text x="344" y="624" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="500" fill="#a99cd6">Claude Code / any adapter — one isolated</text>
+  <text x="344" y="643" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="500" fill="#a99cd6">git worktree + branch per run</text>
+
+  <!-- bottom: memory provider / Wadachi -->
+  <rect x="632" y="566" width="488" height="90" rx="16" fill="#251d38" stroke="#7c5cff" stroke-opacity="0.4" stroke-width="1.75"/>
+  <text x="876" y="600" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="16" font-weight="700" fill="#efe9ff">MemoryProvider (MCP)</text>
+  <text x="876" y="624" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="13" font-weight="500" fill="#a99cd6">Wadachi 轍 — first-party brain, optional</text>
+  <text x="876" y="643" text-anchor="middle" font-family="'Segoe UI','Helvetica Neue',Arial,sans-serif" font-size="12.5" font-weight="500" fill="#8f83b8">get_context · recall · store_memory · store_decision</text>
+</svg>

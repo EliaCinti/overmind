@@ -1,7 +1,13 @@
 <p align="center">
+  <a href="https://github.com/EliaCinti/overmind">
+    <img src=".github/assets/hero.svg" alt="Overmind — the mind that runs your agent company" width="100%" />
+  </a>
+</p>
+
+<p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
+  <a href="#architecture"><strong>Architecture</strong></a> &middot;
   <a href="docs/VISION.md"><strong>Vision</strong></a> &middot;
-  <a href="docs/ARCHITECTURE.md"><strong>Architecture</strong></a> &middot;
   <a href="docs/ROADMAP.md"><strong>Roadmap</strong></a> &middot;
   <a href="https://github.com/EliaCinti/overmind"><strong>GitHub</strong></a>
 </p>
@@ -10,12 +16,11 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/server-Rust-orange" alt="Rust" />
   <img src="https://img.shields.io/badge/ui-React%20%2B%20TS-06b6d4" alt="React + TypeScript" />
-  <img src="https://img.shields.io/badge/status-pre--alpha-yellow" alt="Status" />
+  <img src="https://img.shields.io/badge/memory-Wadachi%20(MCP)-7c5cff?labelColor=1a1523" alt="Memory: Wadachi over MCP" />
+  <img src="https://img.shields.io/badge/status-pre--alpha-yellow" alt="Status: pre-alpha" />
 </p>
 
 <br/>
-
-# Overmind — the mind that runs your agent company.
 
 Open-source orchestration for teams of AI agents — **with a memory.**
 
@@ -122,33 +127,11 @@ Progressive disclosure: pick an archetype, tune with clicks, drop into expert mo
 
 <br/>
 
-## What's under the hood
+## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                       OVERMIND SERVER (Rust)                  │
-│                                                              │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  │
-│  │ Company & │  │  Tasks &  │  │ Heartbeat │  │Governance │  │
-│  │ Org Chart │  │   Board   │  │ Scheduler │  │& Approvals│  │
-│  └───────────┘  └───────────┘  └───────────┘  └───────────┘  │
-│                                                              │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  │
-│  │  Agent    │  │ Worktrees │  │ Budgets & │  │  Audit    │  │
-│  │  Runners  │  │ & Sessions│  │   Costs   │  │(hash-chain)│ │
-│  └───────────┘  └───────────┘  └───────────┘  └───────────┘  │
-│                                                              │
-│  ┌───────────────────────────┐  ┌─────────────────────────┐  │
-│  │  MCP client (memory)      │  │  MCP server (expose)    │  │
-│  └───────────────────────────┘  └─────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-      ▲                ▲                          ▼
-┌─────┴─────┐   ┌──────┴──────┐        ┌──────────┴──────────┐
-│Claude Code│   │ any agent   │        │ Wadachi (memory)    │
-│ / adapters│   │ CLI adapter │        │ — first-party,      │
-└───────────┘   └─────────────┘        │   optional (MCP)    │
-                                       └─────────────────────┘
-```
+<p align="center">
+  <img src=".github/assets/architecture.svg" alt="Overmind architecture — a React + TypeScript UI talks to a Rust (axum) server over HTTP and WebSocket; the server holds the org, tasks, scheduler and governance modules over SQLite (domain tables plus an append-only, SHA-256 hash-chained audit log); agent runners spawn agent CLIs in one isolated git worktree per run, and an MCP layer connects to an optional MemoryProvider (Wadachi)." width="100%" />
+</p>
 
 **Company & Org Chart** — Companies scope everything. Agents have archetypes, titles, and reporting lines; the reporting DAG is enforced server-side. Projects cascade into goals and tasks.
 
@@ -162,11 +145,13 @@ Progressive disclosure: pick an archetype, tune with clicks, drop into expert mo
 
 **Memory (MCP)** — Overmind speaks MCP to **Wadachi**, its first-party brain, so the org remembers — and exposes itself over MCP so external agents can file and read tasks.
 
+> Design is documented before code: see [ARCHITECTURE](docs/ARCHITECTURE.md), [VISION](docs/VISION.md), the [UX principles](docs/UX.md), and the [Architecture Decision Records](docs/adr/).
+
 <br/>
 
 ## Powered by Wadachi
 
-<img align="right" width="30%" src="https://img.shields.io/badge/%E8%BD%A4-Wadachi-7c5cff?labelColor=1a1523" alt="Wadachi" />
+<img align="right" width="30%" src=".github/assets/logomark.svg" alt="Overmind logomark" />
 
 Overmind's memory isn't a bolt-on cache — it's **[Wadachi](https://github.com/EliaCinti/wadachi) (轍**, the ruts a wheel leaves in the road**)**, a persistent-memory engine for AI agents that Overmind adopts as its first-party brain.
 
@@ -233,8 +218,6 @@ Agents then load org context before working and record what they learned. Unset 
 ## Status
 
 Pre-alpha, built in the open. The core is done and tested: company & org chart, tasks & board, agent execution in worktrees, heartbeats & recovery, budgets & governance, hash-chained audit, and organizational memory over MCP. Next on the [roadmap](docs/ROADMAP.md): managed per-company brains + memory UI, Overmind as an MCP server, and container-based agent sandboxing.
-
-The design is documented before the code: see [VISION](docs/VISION.md), [ARCHITECTURE](docs/ARCHITECTURE.md), the [UX principles](docs/UX.md), and the [Architecture Decision Records](docs/adr/).
 
 <br/>
 
