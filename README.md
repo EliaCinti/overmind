@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD033 MD041 -->
 <p align="center">
   <a href="#quickstart"><strong>Quickstart</strong></a> &middot;
   <a href="docs/VISION.md"><strong>Vision</strong></a> &middot;
@@ -7,10 +8,14 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/server-Rust-orange" alt="Rust" />
-  <img src="https://img.shields.io/badge/ui-React%20%2B%20TS-06b6d4" alt="React + TypeScript" />
-  <img src="https://img.shields.io/badge/status-pre--alpha-yellow" alt="Status" />
+  <img src=".github/assets/hero.svg" alt="Overmind — the mind that runs your agent company. Your org leaves a track; Overmind remembers it." width="860">
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7c5cff?labelColor=1a1523" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/server-Rust-9d7bff?labelColor=1a1523" alt="Rust" />
+  <img src="https://img.shields.io/badge/ui-React%20%2B%20TS-c9bcff?labelColor=1a1523" alt="React + TypeScript" />
+  <img src="https://img.shields.io/badge/status-pre--alpha-f5b73d?labelColor=1a1523" alt="Status" />
 </p>
 
 <br/>
@@ -33,6 +38,16 @@ What makes it different: Overmind is **memory-native**, and its brain is **[Wada
 | **02** | Hire an agent      | Pick an archetype (_Security Engineer_, _Backend Dev_…), one click.     |
 | **03** | Create a task      | Describe the work. An agent picks it up, in its own isolated worktree.  |
 | **04** | Review & remember  | Read the diff, approve. The org stores what it learned for next time.   |
+
+<br/>
+
+## Provenance you can verify
+
+Everyone runs agents. Overmind can **prove what every agent did.** Each action is an append-only, SHA-256-chained event, committed in the same transaction as the change it records — so history is tamper-evident, not just logged. Break the chain and `GET /audit/verify` pinpoints the exact block that no longer seals.
+
+<p align="center">
+  <img src=".github/assets/proof-chain.svg" alt="A hash-chained audit trail: four linked blocks, each sealing the one before it, with the HEAD block verified and the chain intact." width="860">
+</p>
 
 <br/>
 
@@ -97,6 +112,21 @@ Progressive disclosure: pick an archetype, tune with clicks, drop into expert mo
 
 <br/>
 
+## How it works
+
+The control plane, drawn to scale: one server runs your company, every action passes a server-enforced budget gate, every task runs in an isolated git worktree, and every agent reads and writes organizational memory over MCP.
+
+<p align="center">
+  <img src=".github/assets/architecture.svg" alt="Overmind's control plane: a company node passes a server-enforced budget gate to three agents in isolated git worktrees, each reading and writing Wadachi memory over MCP." width="860">
+</p>
+
+1. **Company** — one server runs your whole agent org. Companies scope everything; agents have archetypes, titles, and reporting lines, and the reporting DAG is enforced server-side. Projects cascade into goals and tasks.
+2. **Gate** — every action passes a server-enforced budget. Per-agent monthly caps are reserved atomically inside the task-checkout transaction; an over-budget agent is stopped, and the incident is recorded.
+3. **Agents** — every task runs an agent CLI in its own isolated git worktree/branch. Output and cost are captured, sessions resume across restarts, and you review each diff before it lands.
+4. **Memory** — every agent reads and writes **Wadachi** over MCP, so the org remembers. Overmind also exposes itself over MCP so external agents can file and read tasks. And every mutation above appends an immutable, hash-chained audit event.
+
+<br/>
+
 ## Problems Overmind solves
 
 | Without Overmind                                                                                   | With Overmind                                                                                        |
@@ -119,48 +149,6 @@ Progressive disclosure: pick an archetype, tune with clicks, drop into expert mo
 | **Enforced, not suggested.**       | Archetype choices compile to server-enforced config (permissions, budget, gates) — a prompt can't override limits. |
 | **Correctness-first stack.**       | Rust server (axum + SQLite), typed React UI — the concurrency-critical parts get compile-time guarantees.          |
 | **Graceful degradation.**          | No memory server? Broken one? Tasks run identically. Memory failures are logged, never fatal.                      |
-
-<br/>
-
-## What's under the hood
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                       OVERMIND SERVER (Rust)                  │
-│                                                              │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  │
-│  │ Company & │  │  Tasks &  │  │ Heartbeat │  │Governance │  │
-│  │ Org Chart │  │   Board   │  │ Scheduler │  │& Approvals│  │
-│  └───────────┘  └───────────┘  └───────────┘  └───────────┘  │
-│                                                              │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  │
-│  │  Agent    │  │ Worktrees │  │ Budgets & │  │  Audit    │  │
-│  │  Runners  │  │ & Sessions│  │   Costs   │  │(hash-chain)│ │
-│  └───────────┘  └───────────┘  └───────────┘  └───────────┘  │
-│                                                              │
-│  ┌───────────────────────────┐  ┌─────────────────────────┐  │
-│  │  MCP client (memory)      │  │  MCP server (expose)    │  │
-│  └───────────────────────────┘  └─────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-      ▲                ▲                          ▼
-┌─────┴─────┐   ┌──────┴──────┐        ┌──────────┴──────────┐
-│Claude Code│   │ any agent   │        │ Wadachi (memory)    │
-│ / adapters│   │ CLI adapter │        │ — first-party,      │
-└───────────┘   └─────────────┘        │   optional (MCP)    │
-                                       └─────────────────────┘
-```
-
-**Company & Org Chart** — Companies scope everything. Agents have archetypes, titles, and reporting lines; the reporting DAG is enforced server-side. Projects cascade into goals and tasks.
-
-**Tasks & Board** — A kanban board of tasks (backlog → todo → in_progress → in_review → blocked → done), with a live-updating UI over WebSocket and diff review.
-
-**Agent Runners & Sessions** — Each task runs an agent CLI in its own git worktree/branch; output and cost are captured; sessions resume across restarts.
-
-**Budgets & Governance** — Per-agent monthly budgets enforced atomically at checkout; approval gates; pause/resume/terminate; config revisions with rollback.
-
-**Audit (hash-chained)** — Every mutation appends an immutable, SHA-256-chained event, committed in the same transaction as the change it records.
-
-**Memory (MCP)** — Overmind speaks MCP to **Wadachi**, its first-party brain, so the org remembers — and exposes itself over MCP so external agents can file and read tasks.
 
 <br/>
 
