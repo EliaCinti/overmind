@@ -154,7 +154,12 @@ The control plane, drawn to scale: one server runs your company, every action pa
 
 ## Powered by Wadachi
 
-<img align="right" width="30%" src="https://img.shields.io/badge/%E8%BD%A4-Wadachi-7c5cff?labelColor=1a1523" alt="Wadachi" />
+<a href="https://github.com/EliaCinti/wadachi">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/wadachi-logomark.svg">
+    <img align="right" width="150" src=".github/assets/wadachi-logomark-light.svg" alt="Wadachi — the sumi-e wheel-ruts (轍) logomark" />
+  </picture>
+</a>
 
 Overmind's memory isn't a bolt-on cache — it's **[Wadachi](https://github.com/EliaCinti/wadachi) (轍**, the ruts a wheel leaves in the road**)**, a persistent-memory engine for AI agents that Overmind adopts as its first-party brain.
 
