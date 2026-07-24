@@ -317,3 +317,134 @@ footer.site .fnav { display: flex; gap: 18px; flex-wrap: wrap; }
   .links-grid { grid-template-columns: 1fr; }
   nav.site { flex-direction: column; align-items: flex-start; gap: 12px; }
 }
+
+/* ==========================================================================
+   MOTION LAYER — calm, self-contained, on-brand. No libraries.
+   Every effect below is disabled or made instant under prefers-reduced-motion
+   (see the reduced-motion block at the very end). Scroll-reveal hidden-states
+   are gated on `html.motion`, which motion.js only sets when JS is live — so
+   with JS disabled, nothing is ever hidden.
+   ========================================================================== */
+
+/* keep page content above the fixed aurora layer */
+.wrap { position: relative; z-index: 1; }
+
+/* ---- aurora: two slow-drifting violet/amber blobs behind everything ---- */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  filter: blur(60px);
+  opacity: 0.5;
+  will-change: transform;
+}
+body::before {
+  top: -18vh; right: -10vw;
+  width: 62vw; height: 62vw; max-width: 900px; max-height: 900px;
+  background: radial-gradient(circle at 50% 50%, rgba(124, 92, 255, 0.30), rgba(124, 92, 255, 0) 66%);
+  animation: aurora-a 30s ease-in-out infinite alternate;
+}
+body::after {
+  bottom: -22vh; left: -14vw;
+  width: 52vw; height: 52vw; max-width: 760px; max-height: 760px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(157, 123, 255, 0.22), rgba(157, 123, 255, 0) 60%),
+    radial-gradient(circle at 60% 40%, rgba(240, 192, 122, 0.10), rgba(240, 192, 122, 0) 55%);
+  animation: aurora-b 38s ease-in-out infinite alternate;
+}
+@keyframes aurora-a {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(-6vw, 5vh, 0) scale(1.12); }
+}
+@keyframes aurora-b {
+  0%   { transform: translate3d(0, 0, 0) scale(1.05); }
+  100% { transform: translate3d(7vw, -4vh, 0) scale(0.92); }
+}
+
+/* ---- scroll-reveal (gentle fade + slide up, staggered by JS) ---- */
+/* generic reveal — excludes .tilt, whose transform is driven by custom props */
+.motion [data-reveal]:not(.tilt) {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.7s cubic-bezier(0.2, 0.7, 0.2, 1),
+              transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+.motion [data-reveal]:not(.tilt).is-visible { opacity: 1; transform: none; }
+
+/* ---- pointer tilt + hover lift + border glow ----
+   Tilt elements unify reveal + tilt into one transform via custom props, so
+   the two never fight over the `transform` property. */
+.tilt {
+  --rx: 0deg; --ry: 0deg; --lift: 0px; --rvy: 0px;
+  --gx: 50%; --gy: 50%;
+  position: relative;
+  transform: perspective(900px) rotateX(var(--rx)) rotateY(var(--ry)) translateY(calc(var(--lift) + var(--rvy)));
+  transform-style: preserve-3d;
+  transition: transform 0.3s cubic-bezier(0.2, 0.7, 0.2, 1),
+              box-shadow 0.3s ease, border-color 0.3s ease, opacity 0.7s ease;
+}
+.motion .tilt[data-reveal] { opacity: 0; --rvy: 18px; }
+.motion .tilt[data-reveal].is-visible { opacity: 1; --rvy: 0px; }
+/* cursor-following glare, kept faint */
+.tilt::after {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(220px circle at var(--gx) var(--gy), rgba(201, 188, 255, 0.10), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+.tilt:hover { --lift: -4px; }
+.tilt:hover::after { opacity: 1; }
+.card.tilt:hover, .feature.tilt:hover, .link-card.tilt:hover {
+  border-color: rgba(124, 92, 255, 0.5);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(124, 92, 255, 0.12);
+}
+figure.framed.tilt:hover img {
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+}
+
+/* graceful lift for coarse-pointer / no-JS visitors (no tilt class) */
+.card, .feature, .link-card {
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease, transform 0.3s ease;
+}
+figure.framed img { transition: box-shadow 0.3s ease; }
+
+/* ---- micro-interactions: buttons, links, arrows ease on hover ---- */
+.btn { transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease; }
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+.btn-primary:hover { box-shadow: 0 12px 34px rgba(124, 92, 255, 0.44); }
+.arrow-link, a.gh { transition: color 0.2s ease; }
+.arrow-link .arrow, .arrow-link::after { transition: transform 0.2s ease; }
+.arrow-link:hover { letter-spacing: 0.1px; }
+
+/* ---- nav: smooth active/scroll-spy underline ---- */
+nav.site .links a {
+  transition: color 0.2s ease, border-bottom-color 0.25s ease;
+}
+nav.site .links a.spy {
+  color: var(--text-hi);
+  border-bottom-color: var(--memory-ember);
+}
+
+/* ==========================================================================
+   REDUCED MOTION — honor the user. Instant final states, no drift, no tilt.
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  body::before, body::after { animation: none; }
+  .motion [data-reveal],
+  .motion .tilt[data-reveal] { opacity: 1 !important; transform: none !important; }
+  .tilt {
+    transform: none !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .tilt::after { display: none; }
+  .btn:hover, .btn:active { transform: none; }
+}

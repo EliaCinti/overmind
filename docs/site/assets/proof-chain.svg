@@ -12,6 +12,32 @@
     </linearGradient>
   </defs>
 
+  <!-- The HEAD block seals last: its checkmark draws in and 'verified' fades up.
+       The SVG's own media context honors reduced-motion even when img-embedded. -->
+  <style>
+    .tick {
+      stroke-dasharray: 1; stroke-dashoffset: 1;
+      animation: tick-draw 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) 0.9s forwards;
+    }
+    @keyframes tick-draw { to { stroke-dashoffset: 0; } }
+    .verified-label { opacity: 0; animation: fade-up 0.5s ease 1.15s forwards; }
+    @keyframes fade-up { from { opacity: 0; } to { opacity: 1; } }
+    .head-ring {
+      transform-box: fill-box; transform-origin: center;
+      animation: head-pulse 0.9s ease 1.1s;
+    }
+    @keyframes head-pulse {
+      0% { transform: scale(1); }
+      45% { transform: scale(1.35); }
+      100% { transform: scale(1); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .tick { stroke-dashoffset: 0; animation: none; }
+      .verified-label { opacity: 1; animation: none; }
+      .head-ring { animation: none; }
+    }
+  </style>
+
   <!-- Self-contained dark card: renders identically on light + dark GitHub themes -->
   <rect width="1000" height="360" rx="28" fill="url(#proof-bg)"/>
   <rect x="1.5" y="1.5" width="997" height="357" rx="26.5" fill="none" stroke="#7c5cff" stroke-opacity="0.28" stroke-width="2"/>
@@ -64,12 +90,12 @@
 
   <!-- block 4 (HEAD) — verified: the one semantic green, meaning an intact chain -->
   <g font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace">
-    <circle cx="616" cy="281" r="5.5" fill="#161020" stroke="#46cf9c" stroke-width="2"/>
+    <circle class="head-ring" cx="616" cy="281" r="5.5" fill="#161020" stroke="#46cf9c" stroke-width="2"/>
     <rect x="636" y="256" width="320" height="50" rx="11" fill="#221a33" stroke="#46cf9c" stroke-opacity="0.5" stroke-width="1.5"/>
     <text x="654" y="280" font-size="15" fill="#f2eeff">e1a6</text>
     <text x="690" y="280" font-size="15" fill="#6d6386">…0b7c</text>
     <text x="654" y="296" font-size="11" fill="#a99cd6">HEAD&#160;&#160;task#0341 done</text>
-    <path d="M842 289 l3.4 3.4 l6.2 -6.6" fill="none" stroke="#46cf9c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-    <text x="858" y="296" font-size="11" fill="#46cf9c">verified</text>
+    <path class="tick" d="M842 289 l3.4 3.4 l6.2 -6.6" pathLength="1" fill="none" stroke="#46cf9c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text class="verified-label" x="858" y="296" font-size="11" fill="#46cf9c">verified</text>
   </g>
 </svg>
