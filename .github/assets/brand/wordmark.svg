@@ -1,0 +1,48 @@
+<svg width="720" height="200" viewBox="0 0 720 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind">
+  <defs>
+    <linearGradient id="wm-bg" x1="0" y1="0" x2="720" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1730"/>
+      <stop offset="0.55" stop-color="#1a1523"/>
+      <stop offset="1" stop-color="#150f1f"/>
+    </linearGradient>
+    <linearGradient id="wm-violet" x1="72" y1="66" x2="152" y2="146" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9d7bff"/>
+      <stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+    <linearGradient id="wm-title" x1="200" y1="80" x2="200" y2="132" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4f1ff"/>
+      <stop offset="1" stop-color="#d9d1f5"/>
+    </linearGradient>
+    <radialGradient id="wm-glow" cx="0.86" cy="0.24" r="0.7">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Self-contained dark card: renders identically in light and dark GitHub themes -->
+  <rect width="720" height="200" rx="24" fill="url(#wm-bg)"/>
+  <rect width="720" height="200" rx="24" fill="url(#wm-glow)"/>
+  <rect x="1" y="1" width="718" height="198" rx="23" fill="none" stroke="#7c5cff" stroke-opacity="0.35" stroke-width="2"/>
+
+  <!-- Logomark: orchestration hub wiring worker nodes to a central mind -->
+  <g transform="translate(64,64)">
+    <rect x="0" y="0" width="72" height="72" rx="17" fill="#221a33" stroke="#7c5cff" stroke-opacity="0.6" stroke-width="2"/>
+    <g stroke="url(#wm-violet)" stroke-width="2.6" stroke-linecap="round">
+      <line x1="36" y1="36" x2="22" y2="21"/>
+      <line x1="36" y1="36" x2="51" y2="23"/>
+      <line x1="36" y1="36" x2="21" y2="50"/>
+      <line x1="36" y1="36" x2="51" y2="50"/>
+    </g>
+    <g fill="#c9bcff">
+      <circle cx="22" cy="21" r="4.2"/>
+      <circle cx="51" cy="23" r="4.2"/>
+      <circle cx="21" cy="50" r="4.2"/>
+      <circle cx="51" cy="50" r="4.2"/>
+    </g>
+    <circle cx="36" cy="36" r="8.4" fill="url(#wm-violet)"/>
+    <circle cx="36" cy="36" r="3.4" fill="#f2eeff"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="168" y="124" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="-1.5" fill="url(#wm-title)">Overmind</text>
+</svg>

@@ -1,0 +1,75 @@
+<svg width="1000" height="360" viewBox="0 0 1000 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Provenance you can verify — an append-only, hash-chained audit trail; the HEAD block is verified and the chain is intact.">
+  <defs>
+    <linearGradient id="proof-bg" x1="0" y1="0" x2="1000" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b1529"/>
+      <stop offset="1" stop-color="#161020"/>
+    </linearGradient>
+    <!-- The chain rail: violet used ONCE, as the through-line -->
+    <linearGradient id="proof-rail" x1="616" y1="52" x2="616" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.25"/>
+      <stop offset="0.85" stop-color="#7c5cff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#9d7bff" stop-opacity="0.95"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Self-contained dark card: renders identically on light + dark GitHub themes -->
+  <rect width="1000" height="360" rx="28" fill="url(#proof-bg)"/>
+  <rect x="1.5" y="1.5" width="997" height="357" rx="26.5" fill="none" stroke="#7c5cff" stroke-opacity="0.28" stroke-width="2"/>
+
+  <!-- ===== LEFT: the claim, then the proof ===== -->
+  <text x="56" y="96" font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace" font-size="14" font-weight="600" letter-spacing="3.5" fill="#c9bcff">TAMPER-EVIDENT AUDIT TRAIL</text>
+
+  <text x="54" y="150" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="42" font-weight="700" letter-spacing="-1.5" fill="#f4f1ff">Provenance you</text>
+  <text x="54" y="196" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="42" font-weight="700" letter-spacing="-1.5" fill="#f4f1ff">can verify.</text>
+
+  <text x="56" y="234" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#a99cd6">Every action is an append-only, SHA-256-chained event.</text>
+  <text x="56" y="256" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#a99cd6">Each block seals the one before it, so tampering is</text>
+  <text x="56" y="278" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="15" fill="#a99cd6">detectable — not hypothetical.</text>
+
+  <!-- the proof, on screen: a verify command and its output -->
+  <text x="56" y="322" font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace" font-size="13.5" fill="#6d6386"><tspan fill="#a99cd6">$</tspan> overmind audit --verify  <tspan fill="#46cf9c">✓ chain intact · 4 blocks</tspan></text>
+
+  <!-- ===== RIGHT: the hash-chain, rendered like a receipt ===== -->
+  <line x1="616" y1="64" x2="616" y2="312" stroke="url(#proof-rail)" stroke-width="2"/>
+
+  <!-- block 1 (genesis) -->
+  <g font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace">
+    <circle cx="616" cy="71" r="4.5" fill="#161020" stroke="#7c5cff" stroke-opacity="0.7" stroke-width="2"/>
+    <rect x="636" y="46" width="320" height="50" rx="11" fill="#221a33" stroke="#7c5cff" stroke-opacity="0.18" stroke-width="1"/>
+    <text x="654" y="70" font-size="15" fill="#e7e1f7">9f2a</text>
+    <text x="690" y="70" font-size="15" fill="#6d6386">…c1d4</text>
+    <text x="654" y="86" font-size="11" fill="#a99cd6">company.bootstrap</text>
+    <text x="836" y="86" font-size="11" fill="#6d6386">prev &#8594; 0000</text>
+  </g>
+
+  <!-- block 2 -->
+  <g font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace">
+    <circle cx="616" cy="141" r="4.5" fill="#161020" stroke="#7c5cff" stroke-opacity="0.7" stroke-width="2"/>
+    <rect x="636" y="116" width="320" height="50" rx="11" fill="#221a33" stroke="#7c5cff" stroke-opacity="0.18" stroke-width="1"/>
+    <text x="654" y="140" font-size="15" fill="#e7e1f7">b7e0</text>
+    <text x="690" y="140" font-size="15" fill="#6d6386">…4a19</text>
+    <text x="654" y="156" font-size="11" fill="#a99cd6">task#0341 checkout</text>
+    <text x="836" y="156" font-size="11" fill="#6d6386">prev &#8594; 9f2a</text>
+  </g>
+
+  <!-- block 3 -->
+  <g font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace">
+    <circle cx="616" cy="211" r="4.5" fill="#161020" stroke="#7c5cff" stroke-opacity="0.7" stroke-width="2"/>
+    <rect x="636" y="186" width="320" height="50" rx="11" fill="#221a33" stroke="#7c5cff" stroke-opacity="0.18" stroke-width="1"/>
+    <text x="654" y="210" font-size="15" fill="#e7e1f7">c3d8</text>
+    <text x="690" y="210" font-size="15" fill="#6d6386">…8f52</text>
+    <text x="654" y="226" font-size="11" fill="#a99cd6">task#0341 commit&#160;&#160;+142&#8722;17</text>
+    <text x="836" y="226" font-size="11" fill="#6d6386">prev &#8594; b7e0</text>
+  </g>
+
+  <!-- block 4 (HEAD) — verified: the one semantic green, meaning an intact chain -->
+  <g font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace">
+    <circle cx="616" cy="281" r="5.5" fill="#161020" stroke="#46cf9c" stroke-width="2"/>
+    <rect x="636" y="256" width="320" height="50" rx="11" fill="#221a33" stroke="#46cf9c" stroke-opacity="0.5" stroke-width="1.5"/>
+    <text x="654" y="280" font-size="15" fill="#f2eeff">e1a6</text>
+    <text x="690" y="280" font-size="15" fill="#6d6386">…0b7c</text>
+    <text x="654" y="296" font-size="11" fill="#a99cd6">HEAD&#160;&#160;task#0341 done</text>
+    <path d="M842 289 l3.4 3.4 l6.2 -6.6" fill="none" stroke="#46cf9c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="858" y="296" font-size="11" fill="#46cf9c">verified</text>
+  </g>
+</svg>
