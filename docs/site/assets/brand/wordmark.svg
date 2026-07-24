@@ -1,0 +1,50 @@
+<svg width="720" height="200" viewBox="0 0 720 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind">
+  <defs>
+    <linearGradient id="wm-bg" x1="0" y1="0" x2="720" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1730"/>
+      <stop offset="0.55" stop-color="#1a1523"/>
+      <stop offset="1" stop-color="#150f1f"/>
+    </linearGradient>
+    <!-- Ruts (轍) brighten from a faint 'past' (left) into the luminous 'present' (right) -->
+    <linearGradient id="wm-track" x1="12" y1="36" x2="52" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6d6386" stop-opacity="0.15"/>
+      <stop offset="0.55" stop-color="#7c5cff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#9d7bff" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="wm-title" x1="200" y1="80" x2="200" y2="132" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4f1ff"/>
+      <stop offset="1" stop-color="#d9d1f5"/>
+    </linearGradient>
+    <!-- Present node: warm memory-ember core wrapped in violet -->
+    <radialGradient id="wm-present" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f0c07a" stop-opacity="0.95"/>
+      <stop offset="0.35" stop-color="#9d7bff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="wm-glow" cx="0.86" cy="0.24" r="0.7">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Self-contained dark card: renders identically in light and dark GitHub themes -->
+  <rect width="720" height="200" rx="24" fill="url(#wm-bg)"/>
+  <rect width="720" height="200" rx="24" fill="url(#wm-glow)"/>
+  <rect x="1" y="1" width="718" height="198" rx="23" fill="none" stroke="#7c5cff" stroke-opacity="0.35" stroke-width="2"/>
+
+  <!-- Logomark: memory-trace — converging ruts collapse into a violet present node with an amber ember core -->
+  <g transform="translate(64,64)">
+    <rect x="0" y="0" width="72" height="72" rx="17" fill="#221a33" stroke="#7c5cff" stroke-opacity="0.6" stroke-width="2"/>
+    <g stroke="url(#wm-track)" stroke-width="4.2" stroke-linecap="round">
+      <line x1="14" y1="21" x2="51" y2="36"/>
+      <line x1="12" y1="36" x2="51" y2="36"/>
+      <line x1="14" y1="51" x2="51" y2="36"/>
+    </g>
+    <circle cx="51" cy="36" r="13.5" fill="url(#wm-present)"/>
+    <circle cx="51" cy="36" r="7.2" fill="#9d7bff"/>
+    <circle cx="51" cy="36" r="2.8" fill="#f0c07a"/>
+  </g>
+
+  <!-- Wordmark: Inter stack, weight 700, tracking −2.5 — matches hero.svg -->
+  <text x="168" y="124" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="76" font-weight="700" letter-spacing="-2.5" fill="url(#wm-title)">Overmind</text>
+</svg>

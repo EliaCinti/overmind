@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Powered by Wadachi 轍 — Overmind</title>
+<meta name="description" content="Wadachi (轍) is Overmind's first-party managed brain: one persistent organizational memory per company, wired in over MCP — and always optional.">
+<meta name="theme-color" content="#1a1523">
+<link rel="icon" type="image/svg+xml" href="assets/brand/logomark.svg">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <nav class="site">
+    <a class="brand" href="index.html">
+      <img src="assets/brand/wordmark.svg" alt="Overmind" height="26">
+    </a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html" class="active">Wadachi</a>
+      <a href="index.html#quickstart">Quickstart</a>
+      <a href="https://github.com/EliaCinti/overmind" class="gh">GitHub&nbsp;↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <p class="eyebrow ember">Powered by Wadachi 轍</p>
+    <h1>The brain,<br>not a footnote.</h1>
+    <p class="signature">轍 <em>wadachi</em> — the ruts a cart leaves in a road. The track your organization carves as it works, so the next journey follows a path that already exists.</p>
+    <div class="wadachi-band">
+      <div class="mark">
+        <img src="assets/wadachi-logomark.svg" alt="Wadachi 轍 — two ink brush-ruts sealed by a vermilion hanko seal.">
+      </div>
+      <div>
+        <h2>Overmind's first-party managed brain</h2>
+        <p>One persistent memory per organization, wired into every agent over MCP. It's what turns a pool of stateless agents into a company that learns — and it's optional by design.</p>
+      </div>
+    </div>
+  </header>
+
+  <section>
+    <h2>What it does for the org</h2>
+    <p class="lede">Memory is Overmind's un-copyable moat: a competitor can ship a launcher, but not your company's accumulated judgment. Wadachi is where that judgment lives.</p>
+    <div class="grid-3">
+      <div class="card">
+        <span class="k">Recall</span>
+        <h3>Nobody starts cold</h3>
+        <p>Before working, an agent pulls the relevant past — decisions, patterns, prior fixes — with <strong>get_context</strong> and <strong>recall</strong>. Context is retrieved, not re-derived.</p>
+      </div>
+      <div class="card">
+        <span class="k">Store</span>
+        <h3>Learning compounds</h3>
+        <p>What an agent discovers goes back with <strong>store_memory</strong> and <strong>store_decision</strong> — rationale and rejected alternatives included. The next run inherits it.</p>
+      </div>
+      <div class="card">
+        <span class="k">Why</span>
+        <h3>Decisions keep their reasons</h3>
+        <p>Ask <strong>why</strong> a past choice was made and get the rationale, the context, and what was rejected — so nobody silently re-opens a settled question.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>How it's wired</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="num">◈</span>
+        <div>
+          <h3>Over MCP, never vendored</h3>
+          <p>Overmind speaks to Wadachi through the Model Context Protocol — a clean process boundary. Overmind handles provisioning and lifecycle; the two stay separate products with a privileged integration.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="num">◈</span>
+        <div>
+          <h3>One brain per organization</h3>
+          <p>Each company gets its own managed brain under the server's data directory. Memory is shared within the org and isolated between them — what one agent writes, its teammates read.</p>
+        </div>
+      </div>
+      <div class="step">
+        <span class="num">◈</span>
+        <div>
+          <h3>Optional, by contract</h3>
+          <p>Memory is a <span class="mono">MemoryProvider</span> contract, not a hard dependency. Point it at Wadachi and the org gains a brain; leave <span class="mono">OVERMIND_MEMORY_CMD</span> unset and Overmind runs identically, memoryless. Any MCP memory server works.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tight">
+    <div class="callout">
+      <strong>Separate project, deliberate integration.</strong> &nbsp;Wadachi is its own open-source repo. Overmind adopts it as the first-party brain (ADR-0004) but never bundles its code — the relationship is MCP + process management, like an editor and a language server.
+    </div>
+  </section>
+
+  <section>
+    <h2>Read more</h2>
+    <div class="links-grid">
+      <a class="link-card" href="https://github.com/EliaCinti/wadachi">
+        <span class="t">Wadachi on GitHub <span class="arrow">→</span></span>
+        <span class="d">The persistent-memory engine — source, MCP tools, and docs.</span>
+      </a>
+      <a class="link-card" href="how-it-works.html">
+        <span class="t">How it works <span class="arrow">→</span></span>
+        <span class="d">Where recall and store fit into the four-step task loop.</span>
+      </a>
+      <a class="link-card" href="index.html#quickstart">
+        <span class="t">Quickstart <span class="arrow">→</span></span>
+        <span class="d">Wire a brain in one env var — or run without one.</span>
+      </a>
+      <a class="link-card" href="https://github.com/EliaCinti/overmind">
+        <span class="t">Overmind <span class="arrow">→</span></span>
+        <span class="d">The orchestrator this brain powers — MIT, built in the open.</span>
+      </a>
+    </div>
+  </section>
+
+  <footer class="site">
+    <span>Overmind — pre-alpha, built in the open.</span>
+    <span class="fnav">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="https://github.com/EliaCinti/overmind/blob/main/LICENSE">MIT License</a>
+    </span>
+  </footer>
+
+</div>
+
+</body>
+</html>

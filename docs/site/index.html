@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overmind — the mind that runs your agent company</title>
+<meta name="description" content="Open-source, self-hosted orchestration for teams of AI agents — with a memory. Isolated worktrees, atomic budgets, a hash-chained audit log, and organizational memory over MCP.">
+<meta name="theme-color" content="#1a1523">
+<link rel="icon" type="image/svg+xml" href="assets/brand/logomark.svg">
+<link rel="stylesheet" href="assets/site.css">
+<meta property="og:title" content="Overmind — the mind that runs your agent company">
+<meta property="og:description" content="Memory-native, self-hosted orchestration for teams of AI agents. Isolated worktrees, atomic budgets, a hash-chained audit log, and organizational memory.">
+<meta property="og:type" content="website">
+</head>
+<body>
+
+<div class="wrap">
+
+  <nav class="site">
+    <a class="brand" href="index.html">
+      <img src="assets/brand/wordmark.svg" alt="Overmind" height="26">
+    </a>
+    <div class="links">
+      <a href="index.html" class="active">Home</a>
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="https://github.com/EliaCinti/overmind" class="gh">GitHub&nbsp;↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <p class="eyebrow">Memory-native orchestration</p>
+    <h1>The mind that runs<br>your agent company.</h1>
+    <p class="tagline">Open-source, self-hosted orchestration for teams of AI agents.</p>
+    <p class="signature">Your org leaves a track. <span class="ember">Overmind remembers it.</span></p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="#quickstart">Get started →</a>
+      <a class="btn btn-ghost" href="https://github.com/EliaCinti/overmind">View on GitHub</a>
+    </div>
+    <figure class="framed">
+      <img src="assets/hero.svg" alt="Overmind — the mind that runs your agent company. Your org leaves a track; Overmind remembers it.">
+    </figure>
+  </header>
+
+  <section id="pitch">
+    <h2>If an agent is an <span class="ember">employee</span>, Overmind is the <span class="ember">company</span> — and it remembers.</h2>
+    <p class="lede">A Rust server and a React UI that organize AI agents into a company: an org chart, budgets, governance, isolated git worktrees, and a tamper-evident audit trail. Everyone runs agents. Overmind is the one that <em>remembers</em> what they did and <em>proves</em> it.</p>
+    <div class="grid-3">
+      <div class="card">
+        <span class="k">01 · Memory</span>
+        <h3>The org that learns</h3>
+        <p>The whole org shares a persistent brain — <strong>Wadachi (轍)</strong> — over MCP. Agents load past decisions, patterns, and fixes before working, and record what they learned. Nobody starts cold.</p>
+      </div>
+      <div class="card">
+        <span class="k">02 · Provable audit</span>
+        <h3>History you can verify</h3>
+        <p>Every action is an append-only, <strong>SHA-256 hash-chained</strong> event, committed with the change it records. Tamper with history and <strong>GET /audit/verify</strong> pinpoints the exact broken block.</p>
+      </div>
+      <div class="card">
+        <span class="k">03 · Control plane</span>
+        <h3>Manage work, not terminals</h3>
+        <p>One server runs the company: <strong>atomic budgets</strong> enforced at checkout, one <strong>isolated git worktree</strong> per run, and approval gates that block until you sign off.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- teaser → features -->
+  <section class="tight">
+    <div class="teaser">
+      <div class="t-copy">
+        <p class="eyebrow">The essentials, done right</p>
+        <h2>Everything a team of agents needs to run.</h2>
+        <p>Organizational memory, isolated worktrees, atomic budgets, governance, a hash-chained audit, an org chart, heartbeat recovery, and guided hiring — eight capabilities, each pulling its weight.</p>
+        <a class="arrow-link" href="features.html">Explore the features →</a>
+      </div>
+      <figure class="framed">
+        <img src="assets/proof-chain.svg" alt="A hash-chained audit trail: four linked blocks, each sealing the one before it, with the HEAD block verified and the chain intact.">
+      </figure>
+    </div>
+  </section>
+
+  <!-- teaser → how it works -->
+  <section class="tight">
+    <div class="teaser flip">
+      <div class="t-copy">
+        <p class="eyebrow">The control plane</p>
+        <h2>One server runs the company.</h2>
+        <p>A company node passes a server-enforced budget gate to each agent, every task runs in an isolated git worktree, and every agent reads and writes organizational memory over MCP. Drawn to scale, in four steps.</p>
+        <a class="arrow-link" href="how-it-works.html">See how it works →</a>
+      </div>
+      <figure class="framed">
+        <img src="assets/architecture.svg" alt="Overmind's control plane: a company node passes a server-enforced budget gate to three agents in isolated git worktrees, each reading and writing Wadachi memory over MCP.">
+      </figure>
+    </div>
+  </section>
+
+  <!-- teaser → the app -->
+  <section class="tight">
+    <div class="teaser">
+      <div class="t-copy">
+        <p class="eyebrow">The product</p>
+        <h2>A real UI, not a config file.</h2>
+        <p>A Kanban board with a hue per lifecycle state, an org chart you hire into, a task-detail drawer with live sessions and diffs, and a guided hire dialog. Click-first, progressive disclosure — pick, tune, expert.</p>
+        <a class="arrow-link" href="app.html">Tour the app →</a>
+      </div>
+      <figure class="framed">
+        <img src="assets/mock-board.svg" alt="The Overmind Kanban board: columns for Backlog, To do, In progress, In review, Blocked and Done, each with a status hue, holding task cards assigned to agents.">
+      </figure>
+    </div>
+  </section>
+
+  <!-- wadachi band -->
+  <section id="wadachi" class="tight">
+    <div class="wadachi-band">
+      <div class="mark">
+        <img src="assets/wadachi-logomark.svg" alt="Wadachi 轍 — two ink brush-ruts sealed by a vermilion hanko.">
+      </div>
+      <div>
+        <p class="eyebrow ember">Powered by Wadachi 轍</p>
+        <h2>The brain, not a footnote.</h2>
+        <p>轍 <em>wadachi</em> — the ruts a cart leaves in a road. Overmind's first-party managed brain: one persistent memory per organization, wired in over MCP. Optional by design — unset it and Overmind runs identically, memoryless. <a href="wadachi.html">Meet Wadachi →</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="quickstart" class="quickstart">
+    <h2>Quickstart</h2>
+    <p class="lede">Self-hosted, no account, your data on your machine.</p>
+    <pre><span class="c"># Docker (recommended)</span>
+<span class="prompt">$ </span>docker compose up --build          <span class="c"># → http://localhost:7070</span>
+
+<span class="c"># Or from source</span>
+<span class="prompt">$ </span>cargo run                           <span class="c"># Rust control plane + web UI</span>
+
+<span class="c"># Organizational memory (optional) — point at any MCP memory server</span>
+<span class="prompt">$ </span>OVERMIND_MEMORY_CMD=<span>"BRAIN_DIR=/path/to/brain wadachi"</span> cargo run</pre>
+    <p class="note">Mount your repos and set <code>OVERMIND_AGENT_CMD</code> to your agent CLI — see the <a href="https://github.com/EliaCinti/overmind#quickstart">full quickstart</a>. Memory unset? Overmind runs identically, memoryless.</p>
+  </section>
+
+  <section id="links">
+    <h2>Read more</h2>
+    <div class="links-grid">
+      <a class="link-card" href="https://github.com/EliaCinti/overmind">
+        <span class="t">GitHub <span class="arrow">→</span></span>
+        <span class="d">Source, issues, and the roadmap — MIT licensed, built in the open.</span>
+      </a>
+      <a class="link-card" href="features.html">
+        <span class="t">Features <span class="arrow">→</span></span>
+        <span class="d">The eight essentials that make Overmind a company, not a launcher.</span>
+      </a>
+      <a class="link-card" href="how-it-works.html">
+        <span class="t">Architecture <span class="arrow">→</span></span>
+        <span class="d">The Rust control plane: tasks, budgets, worktrees, audit.</span>
+      </a>
+      <a class="link-card" href="wadachi.html">
+        <span class="t">Wadachi 轍 <span class="arrow">→</span></span>
+        <span class="d">The persistent-memory engine Overmind adopts as its brain.</span>
+      </a>
+    </div>
+  </section>
+
+  <footer class="site">
+    <span>Overmind — pre-alpha, built in the open.</span>
+    <span class="fnav">
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="https://github.com/EliaCinti/overmind/blob/main/LICENSE">MIT License</a>
+    </span>
+  </footer>
+
+</div>
+
+</body>
+</html>

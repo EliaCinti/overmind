@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How it works — Overmind</title>
+<meta name="description" content="Overmind's control plane, drawn to scale: one Rust server runs your company, every action passes a server-enforced budget gate, every task runs in an isolated git worktree, and every agent reads and writes organizational memory over MCP.">
+<meta name="theme-color" content="#1a1523">
+<link rel="icon" type="image/svg+xml" href="assets/brand/logomark.svg">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <nav class="site">
+    <a class="brand" href="index.html">
+      <img src="assets/brand/wordmark.svg" alt="Overmind" height="26">
+    </a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html" class="active">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="index.html#quickstart">Quickstart</a>
+      <a href="https://github.com/EliaCinti/overmind" class="gh">GitHub&nbsp;↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <p class="eyebrow">How it works</p>
+    <h1>One server runs<br>the whole company.</h1>
+    <p class="lede">Overmind is a control plane, not a launcher. A single Rust server (axum + SQLite) holds the org chart, the budgets, the audit chain, and the memory contract. You manage work; the server enforces the rules.</p>
+    <figure class="framed">
+      <img src="assets/architecture.svg" alt="Overmind's control plane: a company node passes a server-enforced budget gate to three agents in isolated git worktrees, each reading and writing Wadachi memory over MCP.">
+    </figure>
+    <figcaption>The control plane, drawn to scale — company → budget gate → isolated worktrees → memory over MCP.</figcaption>
+  </header>
+
+  <section>
+    <h2>Four steps, every task</h2>
+    <p class="lede">The same loop runs whether one agent works alone or a dozen run in parallel.</p>
+    <div class="steps">
+
+      <div class="step">
+        <span class="num">1</span>
+        <div>
+          <h3>Recall — nobody starts cold</h3>
+          <p>Before touching code, an agent calls <span class="mono">get_context</span> and <span class="mono">recall</span> against the organization's brain over MCP. Past decisions, patterns, and fixes load into the run — so work builds on what the company already knows instead of re-deriving it.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="num">2</span>
+        <div>
+          <h3>Checkout — claim and budget, atomically</h3>
+          <p>To start, the agent claims the task through a server-enforced gate. The spend check and the claim commit in a single transaction: an agent can never over-claim its budget or grab a task another agent is already running. The budget is truth, not a hint.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="num">3</span>
+        <div>
+          <h3>Work — isolated in its own worktree</h3>
+          <p>Each run executes in an isolated git worktree on its own branch. Parallel agents never collide on a working tree; every change is contained, reviewable, and — where autonomy demands it — held at an approval gate until you sign off.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="num">4</span>
+        <div>
+          <h3>Record — sealed into the chain, remembered in the brain</h3>
+          <p>Every state change is written as an append-only, SHA-256 hash-chained audit event, committed with the change it records. What the agent learned goes back to Wadachi via <span class="mono">store_memory</span> / <span class="mono">store_decision</span> — so the next run starts one step ahead.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Provenance you can verify</h2>
+    <p class="lede">Everyone runs agents. Overmind can <em>prove</em> what every agent did — history is tamper-evident, not just logged. Each block seals the one before it; break any link and the verifier names it.</p>
+    <figure class="framed">
+      <img src="assets/proof-chain.svg" alt="A hash-chained audit trail: four linked blocks, each sealing the one before it, with the HEAD block verified and the chain intact.">
+    </figure>
+  </section>
+
+  <section class="tight">
+    <div class="callout">
+      <strong>Memory is optional, by contract.</strong> &nbsp;Memory is a <code>MemoryProvider</code> contract spoken over MCP. Point it at Wadachi and the org gains a brain; leave it unset and Overmind runs identically, memoryless. No provider is ever a hard dependency.
+    </div>
+  </section>
+
+  <section>
+    <div class="teaser">
+      <div class="t-copy">
+        <p class="eyebrow">Next</p>
+        <h2>See it as a product.</h2>
+        <p>The board, the org chart, the task drawer, the hire dialog — the surfaces where you actually drive the company.</p>
+        <a class="arrow-link" href="app.html">Tour the app →</a>
+      </div>
+      <figure class="framed">
+        <img src="assets/mock-org.svg" alt="The Overmind org chart: the human owner at the root, with agents reporting up through managers, each showing role and budget.">
+      </figure>
+    </div>
+  </section>
+
+  <footer class="site">
+    <span>Overmind — pre-alpha, built in the open.</span>
+    <span class="fnav">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="https://github.com/EliaCinti/overmind/blob/main/LICENSE">MIT License</a>
+    </span>
+  </footer>
+
+</div>
+
+</body>
+</html>

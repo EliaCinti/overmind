@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Features — Overmind</title>
+<meta name="description" content="The eight essentials that make Overmind a company, not a launcher: organizational memory, isolated worktrees, atomic budgets, governance, hash-chained audit, org chart, heartbeat recovery, and guided hiring.">
+<meta name="theme-color" content="#1a1523">
+<link rel="icon" type="image/svg+xml" href="assets/brand/logomark.svg">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <nav class="site">
+    <a class="brand" href="index.html">
+      <img src="assets/brand/wordmark.svg" alt="Overmind" height="26">
+    </a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="features.html" class="active">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="index.html#quickstart">Quickstart</a>
+      <a href="https://github.com/EliaCinti/overmind" class="gh">GitHub&nbsp;↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <p class="eyebrow">Features</p>
+    <h1>Eight essentials.<br>Two of them un-copyable.</h1>
+    <p class="lede">Overmind closes the gaps with the leading orchestrators on the essentials — without diluting its two differentiators: first-class organizational memory, and a tamper-evident, hash-chained audit trail. Everything below is enforced by the server, not just suggested in a prompt.</p>
+  </header>
+
+  <section class="tight">
+    <div class="features">
+
+      <!-- 1 · organizational memory (ember) -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#f0c07a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 4a3 3 0 0 0-3 3 3 3 0 0 0-1 5.8V17a2 2 0 0 0 4 0V4z"/>
+            <path d="M12 4a3 3 0 0 1 3 3 3 3 0 0 1 1 5.8V17a2 2 0 0 1-4 0"/>
+            <path d="M9 9.5h1.5M14 12h1.5M8.5 13h1"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Differentiator</span>
+          <h3>Organizational memory</h3>
+          <p>One persistent brain per org, over MCP. Agents <code>recall</code> before working and <code>store</code> what they learn — decisions, fixes, and rationale outlive any single run.</p>
+        </div>
+      </div>
+
+      <!-- 2 · hash-chained audit (ember) -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#f0c07a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3.5" y="9.5" width="7" height="5" rx="1.4"/>
+            <rect x="13.5" y="9.5" width="7" height="5" rx="1.4"/>
+            <path d="M10.5 12h3"/>
+            <path d="M6.5 9.5V8a1.5 1.5 0 0 1 3 0M16.5 14.5V16"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Differentiator</span>
+          <h3>Hash-chained audit</h3>
+          <p>Every action is an append-only, SHA-256-linked event committed with the change it records. <code>GET /audit/verify</code> re-walks the chain and names the exact broken block.</p>
+        </div>
+      </div>
+
+      <!-- 3 · isolated worktrees -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9d7bff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="6" cy="6" r="2.2"/>
+            <circle cx="6" cy="18" r="2.2"/>
+            <circle cx="18" cy="18" r="2.2"/>
+            <path d="M6 8.2v7.6M8.2 6H14a2 2 0 0 1 2 2v7.8"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Execution</span>
+          <h3>Isolated git worktrees</h3>
+          <p>Each run gets its own worktree off your repo — parallel agents never collide on a working tree, and every change lands on its own branch, reviewable before it merges.</p>
+        </div>
+      </div>
+
+      <!-- 4 · atomic budgets -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9d7bff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="8.2"/>
+            <path d="M12 7v10M14.4 9.2c-.6-.9-1.5-1.2-2.4-1.2-1.3 0-2.4.8-2.4 2s1 1.8 2.4 2 2.4.8 2.4 2-1.1 2-2.4 2c-1 0-1.9-.4-2.4-1.2"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Governance</span>
+          <h3>Atomic budgets</h3>
+          <p>Spend limits are enforced at checkout, atomically: an agent can't claim a task and overspend in the same breath. The budget check and the claim succeed or fail together.</p>
+        </div>
+      </div>
+
+      <!-- 5 · governance / approval gates -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9d7bff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3.5l6.5 2.4v4.7c0 4-2.8 6.7-6.5 8-3.7-1.3-6.5-4-6.5-8V5.9z"/>
+            <path d="M9.3 12.2l1.9 1.9 3.6-3.8"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Governance</span>
+          <h3>Approval gates</h3>
+          <p>Set an agent to propose-only or act-with-approval and it blocks at the gate until you sign off. Autonomy is a structured, server-enforced setting — never just prompt text.</p>
+        </div>
+      </div>
+
+      <!-- 6 · org chart -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9d7bff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9.5" y="3.5" width="5" height="4" rx="1"/>
+            <rect x="3.5" y="16.5" width="5" height="4" rx="1"/>
+            <rect x="15.5" y="16.5" width="5" height="4" rx="1"/>
+            <path d="M12 7.5v4M6 16.5v-2.5h12v2.5M12 11.5v2.5"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Organization</span>
+          <h3>Org chart</h3>
+          <p>Agents are employees with roles, managers, and reporting lines rooted at you. Hire under any node; the chart is the real structure work and budgets flow through.</p>
+        </div>
+      </div>
+
+      <!-- 7 · heartbeats / recovery -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9d7bff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12h4l2-5 3 10 2.5-7 1.5 4h5"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Reliability</span>
+          <h3>Heartbeats &amp; recovery</h3>
+          <p>A scheduler wakes agents on a heartbeat, runs them in parallel with timeouts, and recovers stuck or crashed runs — so long-lived work survives restarts and failures.</p>
+        </div>
+      </div>
+
+      <!-- 8 · guided hiring -->
+      <div class="feature">
+        <div class="ficon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#9d7bff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="9.5" cy="8.5" r="3.2"/>
+            <path d="M4 20c0-3 2.5-5 5.5-5s5.5 2 5.5 5"/>
+            <path d="M18.5 7.5v5M16 10h5"/>
+          </svg>
+        </div>
+        <div>
+          <span class="tag">Onboarding</span>
+          <h3>Guided hiring</h3>
+          <p>A three-level hire dialog — pick, tune, expert — turns an archetype into a configured agent: role, autonomy, review strictness, model, budget. Structured choices map to enforced config.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="tight">
+    <div class="callout">
+      <strong>Enforced, not suggested.</strong> &nbsp;Every option above is a structured setting the Rust server enforces — budgets at checkout, autonomy at the gate, transitions against a mirrored state machine. Prompts describe intent; the server holds the line.
+    </div>
+  </section>
+
+  <section>
+    <div class="teaser flip">
+      <div class="t-copy">
+        <p class="eyebrow">Next</p>
+        <h2>See these run as one server.</h2>
+        <p>How the control plane wires memory, budgets, worktrees, and audit into a single loop — in four steps, drawn to scale.</p>
+        <a class="arrow-link" href="how-it-works.html">How it works →</a>
+      </div>
+      <figure class="framed">
+        <img src="assets/architecture.svg" alt="Overmind's control plane: a company node passes a server-enforced budget gate to three agents in isolated git worktrees, each reading and writing Wadachi memory over MCP.">
+      </figure>
+    </div>
+  </section>
+
+  <footer class="site">
+    <span>Overmind — pre-alpha, built in the open.</span>
+    <span class="fnav">
+      <a href="index.html">Home</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="https://github.com/EliaCinti/overmind/blob/main/LICENSE">MIT License</a>
+    </span>
+  </footer>
+
+</div>
+
+</body>
+</html>

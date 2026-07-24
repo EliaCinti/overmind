@@ -1,0 +1,72 @@
+<svg width="1000" height="360" viewBox="0 0 1000 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind — the mind that runs your agent company. Your org leaves a track; Overmind remembers it.">
+  <defs>
+    <linearGradient id="hero-bg" x1="0" y1="0" x2="1000" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1730"/>
+      <stop offset="0.55" stop-color="#1a1523"/>
+      <stop offset="1" stop-color="#150f1f"/>
+    </linearGradient>
+    <!-- Ruts (轍) brighten from a faint 'past' (left) into the luminous 'present' (right) -->
+    <linearGradient id="hero-track" x1="40" y1="180" x2="885" y2="180" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6d6386" stop-opacity="0.10"/>
+      <stop offset="0.55" stop-color="#7c5cff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#9d7bff" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="hero-title" x1="56" y1="150" x2="56" y2="212" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4f1ff"/>
+      <stop offset="1" stop-color="#d9d1f5"/>
+    </linearGradient>
+    <radialGradient id="hero-present" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f0c07a" stop-opacity="0.95"/>
+      <stop offset="0.35" stop-color="#9d7bff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="hero-glow" cx="0.82" cy="0.5" r="0.6">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Self-contained dark card: renders identically on light + dark GitHub themes -->
+  <rect width="1000" height="360" rx="28" fill="url(#hero-bg)"/>
+  <rect width="1000" height="360" rx="28" fill="url(#hero-glow)"/>
+  <rect x="1.5" y="1.5" width="997" height="357" rx="26.5" fill="none" stroke="#7c5cff" stroke-opacity="0.35" stroke-width="2"/>
+
+  <!-- MEMORY FIELD: parallel ruts receding to the 'present' node on the right -->
+  <g stroke="url(#hero-track)" stroke-width="2" stroke-linecap="round">
+    <line x1="520" y1="70"  x2="884" y2="180"/>
+    <line x1="520" y1="104" x2="884" y2="180"/>
+    <line x1="510" y1="140" x2="884" y2="180"/>
+    <line x1="508" y1="180" x2="884" y2="180"/>
+    <line x1="510" y1="220" x2="884" y2="180"/>
+    <line x1="520" y1="256" x2="884" y2="180"/>
+    <line x1="520" y1="290" x2="884" y2="180"/>
+  </g>
+
+  <!-- Stored memories: dots accumulating along the ruts, brighter toward 'now' -->
+  <g fill="#c9bcff">
+    <circle cx="612" cy="120" r="2.6" fill-opacity="0.35"/>
+    <circle cx="640" cy="214" r="2.6" fill-opacity="0.35"/>
+    <circle cx="690" cy="150" r="3.1" fill-opacity="0.55"/>
+    <circle cx="712" cy="205" r="3.1" fill-opacity="0.55"/>
+    <circle cx="770" cy="132" r="3.6" fill-opacity="0.8"/>
+    <circle cx="788" cy="200" r="3.6" fill-opacity="0.85"/>
+    <circle cx="820" cy="166" r="4" fill-opacity="0.95"/>
+  </g>
+
+  <!-- The present: bright violet node with a warm memory ember at its core -->
+  <circle cx="884" cy="180" r="46" fill="url(#hero-present)"/>
+  <circle cx="884" cy="180" r="14" fill="#9d7bff"/>
+  <circle cx="884" cy="180" r="6" fill="#f4ecd8"/>
+
+  <!-- eyebrow -->
+  <text x="56" y="112" font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace" font-size="15" font-weight="600" letter-spacing="3.5" fill="#c9bcff">MEMORY-NATIVE ORCHESTRATION</text>
+
+  <!-- wordmark (Inter; falls back to system sans where Inter is absent) -->
+  <text x="54" y="204" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="82" font-weight="700" letter-spacing="-2.5" fill="url(#hero-title)">Overmind</text>
+
+  <!-- tagline (canonical) -->
+  <text x="56" y="250" font-family="'JetBrains Mono','SFMono-Regular',Menlo,monospace" font-size="18" fill="#a99cd6">the mind that runs your agent company.</text>
+
+  <!-- signature line: the differentiator, stated plainly; amber is the memory-ember tell -->
+  <text x="56" y="300" font-family="'Inter Variable','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="16" font-weight="500" fill="#e7e1f7">Your org leaves a track. <tspan fill="#f0c07a">Overmind remembers it.</tspan></text>
+</svg>

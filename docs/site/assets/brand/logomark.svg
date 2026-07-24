@@ -1,0 +1,49 @@
+<svg width="220" height="220" viewBox="0 0 220 220" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Overmind logomark — memory-trace">
+  <defs>
+    <linearGradient id="lm-bg" x1="0" y1="0" x2="220" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d1730"/>
+      <stop offset="0.55" stop-color="#1a1523"/>
+      <stop offset="1" stop-color="#150f1f"/>
+    </linearGradient>
+    <!-- Ruts (轍) brighten from a faint 'past' (left) into the luminous 'present' (right) -->
+    <linearGradient id="lm-track" x1="40" y1="110" x2="154" y2="110" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6d6386" stop-opacity="0.15"/>
+      <stop offset="0.55" stop-color="#7c5cff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#9d7bff" stop-opacity="0.95"/>
+    </linearGradient>
+    <!-- Present node: warm memory-ember core wrapped in violet -->
+    <radialGradient id="lm-present" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f0c07a" stop-opacity="0.95"/>
+      <stop offset="0.35" stop-color="#9d7bff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="lm-glow" cx="0.28" cy="0.22" r="0.75">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Self-contained dark tile: renders identically in light and dark GitHub themes -->
+  <rect width="220" height="220" rx="46" fill="url(#lm-bg)"/>
+  <rect width="220" height="220" rx="46" fill="url(#lm-glow)"/>
+  <rect x="1.5" y="1.5" width="217" height="217" rx="44.5" fill="none" stroke="#7c5cff" stroke-opacity="0.55" stroke-width="3"/>
+
+  <!-- Memory-trace (轍): three converging ruts collapsing into the present -->
+  <g stroke="url(#lm-track)" stroke-width="11" stroke-linecap="round">
+    <line x1="46" y1="56"  x2="152" y2="110"/>
+    <line x1="40" y1="110" x2="152" y2="110"/>
+    <line x1="46" y1="164" x2="152" y2="110"/>
+  </g>
+
+  <!-- Stored memories: dots along the ruts, brighter toward 'now' -->
+  <g fill="#c9bcff">
+    <circle cx="88" cy="77"  r="4.2" fill-opacity="0.45"/>
+    <circle cx="86" cy="110" r="4.8" fill-opacity="0.6"/>
+    <circle cx="88" cy="143" r="4.2" fill-opacity="0.45"/>
+  </g>
+
+  <!-- The present: bright violet node with a warm amber ember at its core -->
+  <circle cx="152" cy="110" r="42" fill="url(#lm-present)"/>
+  <circle cx="152" cy="110" r="22" fill="#9d7bff"/>
+  <circle cx="152" cy="110" r="8" fill="#f0c07a"/>
+</svg>

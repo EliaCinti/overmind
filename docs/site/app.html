@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The app — Overmind</title>
+<meta name="description" content="A tour of the Overmind product UI: the Kanban board with a hue per lifecycle state, the org chart you hire into, the task-detail drawer with live sessions and diffs, and the guided hire dialog.">
+<meta name="theme-color" content="#1a1523">
+<link rel="icon" type="image/svg+xml" href="assets/brand/logomark.svg">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<div class="wrap">
+
+  <nav class="site">
+    <a class="brand" href="index.html">
+      <img src="assets/brand/wordmark.svg" alt="Overmind" height="26">
+    </a>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="app.html" class="active">The app</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="index.html#quickstart">Quickstart</a>
+      <a href="https://github.com/EliaCinti/overmind" class="gh">GitHub&nbsp;↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <p class="eyebrow">The app</p>
+    <h1>A real UI, not a config file.</h1>
+    <p class="lede">A React + Radix front end over the Rust control plane, built on one token source (OKLCH throughout, a hue per lifecycle state, Inter + JetBrains Mono for machine values). Click-first and progressively disclosed — pick, tune, expert. Here are the four surfaces you live in.</p>
+  </header>
+
+  <section class="tight">
+    <h2>Board</h2>
+    <p class="lede">The company's work, one hue per lifecycle state — learned once, then read everywhere. Backlog → To do → In progress → In review → Blocked → Done, with each card carrying its priority, age, and assigned agent.</p>
+    <figure class="framed">
+      <img src="assets/mock-board.svg" alt="The Overmind Kanban board: six columns — Backlog, To do, In progress, In review, Blocked, Done — each with a coloured status dot, holding task cards with a status rail, priority, timestamp and an assigned-agent chip.">
+    </figure>
+  </section>
+
+  <section class="tight">
+    <h2>Org chart</h2>
+    <p class="lede">Agents are employees, rooted at you. Roles, reporting lines, autonomy, and the budget each has left — hire under any node, and the chart is the real structure work and money flow through.</p>
+    <figure class="framed">
+      <img src="assets/mock-org.svg" alt="The Overmind org chart: the human owner at the root, a CEO/Tech-Lead managing three developers, plus a security engineer — each card showing role, autonomy, and remaining budget in monospace.">
+    </figure>
+  </section>
+
+  <section class="tight">
+    <h2>Task detail</h2>
+    <p class="lede">Open a task and a drawer slides in: its status and priority, the assigned agent, the live session with branch and spend against budget, the diff it produced, and only the status moves the state machine actually allows — held at an approval gate when autonomy demands it.</p>
+    <figure class="framed">
+      <img src="assets/mock-task.svg" alt="The Overmind task-detail drawer over a dimmed board: a task's In-progress status and high priority, its agent, a live running session with branch and spend, a three-file diff, status-transition buttons, and an approval-gate notice.">
+    </figure>
+  </section>
+
+  <section class="tight">
+    <h2>Hire dialog</h2>
+    <p class="lede">Hiring is progressive disclosure made concrete. <em>Pick</em> an archetype; <em>tune</em> autonomy, review strictness, model, and budget; drop to <em>expert</em> for the raw config. Every structured choice maps to a server-enforced setting — and a plain-language preview tells you exactly what the agent may do before you commit.</p>
+    <figure class="framed">
+      <img src="assets/mock-hire.svg" alt="The Overmind hire dialog: a Pick/Tune/Expert level switch, an archetype grid with Backend developer selected, an autonomy segmented control set to Act-with-approval, model and monthly-budget fields, and a live amber-accented preview sentence.">
+    </figure>
+  </section>
+
+  <section class="tight">
+    <div class="callout">
+      <strong>Structured-first, always.</strong> &nbsp;Nothing here is steered by prompt text alone. Statuses, autonomy, review strictness, and budgets are structured options mapped onto config the server enforces (ADR-0005) — the UI just makes them legible.
+    </div>
+  </section>
+
+  <section>
+    <div class="teaser flip">
+      <div class="t-copy">
+        <p class="eyebrow ember">The brain behind it</p>
+        <h2>Every agent reads and writes memory.</h2>
+        <p>The surfaces above sit on a company that remembers. Meet Wadachi — Overmind's first-party managed brain, wired in over MCP and always optional.</p>
+        <a class="arrow-link" href="wadachi.html">Meet Wadachi →</a>
+      </div>
+      <figure>
+        <div class="wadachi-band" style="grid-template-columns:1fr; text-align:center; justify-items:center;">
+          <div class="mark"><img src="assets/wadachi-logomark.svg" alt="Wadachi 轍 logomark"></div>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <footer class="site">
+    <span>Overmind — pre-alpha, built in the open.</span>
+    <span class="fnav">
+      <a href="index.html">Home</a>
+      <a href="features.html">Features</a>
+      <a href="how-it-works.html">How it works</a>
+      <a href="wadachi.html">Wadachi</a>
+      <a href="https://github.com/EliaCinti/overmind/blob/main/LICENSE">MIT License</a>
+    </span>
+  </footer>
+
+</div>
+
+</body>
+</html>
