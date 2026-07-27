@@ -114,14 +114,32 @@ export function TopBar({
   );
 }
 
+/** The Overmind mark: a memory-trace (轍) — three ruts converging into the
+ * present node. Kept identical to the marketing site's assets/brand/mark.svg. */
 function Logo() {
   return (
-    <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2.2}>
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19" />
-      </svg>
-    </span>
+    <svg viewBox="0 0 220 220" className="h-7 w-7" fill="none" role="img" aria-label="Overmind">
+      <defs>
+        <linearGradient id="om-track" x1="40" y1="110" x2="154" y2="110" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#6d6386" stopOpacity="0.3" />
+          <stop offset="0.55" stopColor="#7c5cff" stopOpacity="0.75" />
+          <stop offset="1" stopColor="#9d7bff" stopOpacity="1" />
+        </linearGradient>
+        <radialGradient id="om-present" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stopColor="#f0c07a" stopOpacity="0.95" />
+          <stop offset="0.35" stopColor="#9d7bff" stopOpacity="0.9" />
+          <stop offset="1" stopColor="#7c5cff" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <g stroke="url(#om-track)" strokeWidth="12" strokeLinecap="round">
+        <line x1="46" y1="56" x2="152" y2="110" />
+        <line x1="40" y1="110" x2="152" y2="110" />
+        <line x1="46" y1="164" x2="152" y2="110" />
+      </g>
+      <circle cx="152" cy="110" r="44" fill="url(#om-present)" />
+      <circle cx="152" cy="110" r="23" fill="#9d7bff" />
+      <circle cx="152" cy="110" r="8.5" fill="#f0c07a" />
+    </svg>
   );
 }
 
