@@ -30,17 +30,16 @@ export function Chat({
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState(false); // CEO turn in flight
 
-  // Active agents that could act as CEO; default to the top of the org
-  // (an agent that reports to the human, i.e. reports_to === null).
+  // The CEO is the leader of the organization: the agent that reports to the
+  // human (the top of the org chart). It's a property of the org — designated
+  // in the Org view, not re-picked per conversation. Once a thread exists, its
+  // CEO is whatever it was opened with.
   const candidates = useMemo(() => agents.filter((a) => a.status === "active"), [agents]);
-  const defaultCeo = useMemo(
+  const leader = useMemo(
     () => candidates.find((a) => a.reports_to === null)?.id ?? candidates[0]?.id ?? null,
     [candidates],
   );
-  const [pickedCeo, setPickedCeo] = useState<string | null>(null);
-
-  // Once a conversation exists its CEO is fixed; before that, the user picks.
-  const ceoId = conversation?.ceo_agent_id ?? pickedCeo ?? defaultCeo;
+  const ceoId = conversation?.ceo_agent_id ?? leader;
   const ceo = candidates.find((a) => a.id === ceoId) ?? null;
 
   // (Re)load the thread on company switch and on every live tick.
@@ -97,6 +96,15 @@ export function Chat({
 
   return (
     <div className="mx-auto flex w-full min-h-0 max-w-3xl flex-1 flex-col px-4">
+      {ceo && (messages.length > 0 || pending) && (
+        <div className="flex items-center gap-2.5 border-b border-border py-3">
+          <Avatar name={ceo.name} />
+          <div className="flex flex-col leading-tight">
+            <span className="text-sm font-medium">{ceo.name}</span>
+            <span className="text-xs text-muted-foreground">{ceo.title ?? "CEO"}</span>
+          </div>
+        </div>
+      )}
       <div className="flex-1 space-y-5 overflow-y-auto py-6">
         {messages.length === 0 && !pending ? (
           <EmptyState ceoName={ceo?.name ?? null} />
@@ -108,24 +116,6 @@ export function Chat({
       </div>
 
       <div className="border-t border-border py-3">
-        {!conversation && !noCeo && candidates.length > 1 && (
-          <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
-            <span>Speaking to</span>
-            <select
-              value={ceoId ?? ""}
-              onChange={(e) => setPickedCeo(e.target.value)}
-              className="h-7 rounded-md border border-input bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {candidates.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                  {a.title ? ` — ${a.title}` : ""}
-                </option>
-              ))}
-            </select>
-            <span>as CEO</span>
-          </div>
-        )}
         <div className="flex items-end gap-2">
           <textarea
             value={draft}
@@ -203,7 +193,7 @@ function MessageRow({ message, ceo }: { message: Message; ceo: Agent | null }) {
       transition={{ duration: 0.18, ease: "easeOut" }}
       className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}
     >
-      {!isUser && <Avatar name={ceo?.name ?? "CEO"} />}
+      {!isUser && <Avatar name={ceo?.name ?? "CEO"} className="mt-6" />}
       <div className={cn("flex max-w-[82%] flex-col gap-1", isUser && "items-end")}>
         {!isUser && (
           <span className="px-1 text-xs font-medium text-muted-foreground">
@@ -244,14 +234,19 @@ function Typing({ ceo }: { ceo: Agent | null }) {
   );
 }
 
-function Avatar({ name }: { name: string }) {
+function Avatar({ name, className }: { name: string; className?: string }) {
   const initials = name
     .split(/\s+/)
     .slice(0, 2)
     .map((w) => w.charAt(0).toUpperCase())
     .join("");
   return (
-    <span className="mt-6 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary">
+    <span
+      className={cn(
+        "flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-xs font-semibold text-primary",
+        className,
+      )}
+    >
       {initials || "C"}
     </span>
   );
