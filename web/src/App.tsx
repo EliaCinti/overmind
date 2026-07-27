@@ -5,6 +5,7 @@ import { useLive } from "./lib/live";
 import { useTheme } from "./lib/theme";
 import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
+import { Chat } from "./components/Chat";
 import { OrgChart } from "./components/OrgChart";
 import { TaskDetail } from "./components/TaskDetail";
 import { HireAgentDialog } from "./components/HireAgentDialog";
@@ -12,7 +13,7 @@ import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Spinner } from "./components/ui/primitives";
 
-type View = "board" | "org";
+type View = "chat" | "board" | "org";
 
 const LAST_COMPANY = "overmind-last-company";
 
@@ -29,7 +30,7 @@ export default function App() {
   const [budgets, setBudgets] = useState<AgentBudget[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [view, setView] = useState<View>("board");
+  const [view, setView] = useState<View>("chat");
   const [openTask, setOpenTask] = useState<Task | null>(null);
   const [hireOpen, setHireOpen] = useState(false);
   const [hireManager, setHireManager] = useState<string | null>(null);
@@ -141,7 +142,9 @@ export default function App() {
         />
       ) : (
         <main className="flex flex-1 flex-col overflow-hidden pt-4">
-          {view === "board" ? (
+          {view === "chat" ? (
+            <Chat companyId={companyId} agents={agents} tick={tick} onChanged={bump} />
+          ) : view === "board" ? (
             <Board tasks={tasks} agents={agents} onOpenTask={setOpenTask} />
           ) : (
             <OrgChart

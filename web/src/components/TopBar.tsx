@@ -41,8 +41,8 @@ export function TopBar({
   onHire: () => void;
   onNewTask: () => void;
   canCreateTask: boolean;
-  view: "board" | "org";
-  onViewChange: (v: "board" | "org") => void;
+  view: "chat" | "board" | "org";
+  onViewChange: (v: "chat" | "board" | "org") => void;
   showViews: boolean;
   onApprovalDecided: () => void;
   connected: boolean;
@@ -75,10 +75,11 @@ export function TopBar({
 
       {showViews && (
         <div className="ml-2">
-          <Segmented<"board" | "org">
+          <Segmented<"chat" | "board" | "org">
             value={view}
             onChange={onViewChange}
             options={[
+              { value: "chat", label: "Chat" },
               { value: "board", label: "Board" },
               { value: "org", label: "Org" },
             ]}

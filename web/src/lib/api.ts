@@ -116,6 +116,23 @@ export interface Artifact {
   created_at: string;
 }
 
+/** A turn in the CEO conversation (M12 / ADR-0018). */
+export type MessageRole = "user" | "ceo" | "system";
+
+export interface Message {
+  id: string;
+  role: MessageRole;
+  content: string;
+  created_at: string;
+}
+
+export interface Conversation {
+  id: string;
+  ceo_agent_id: string;
+  title: string;
+  created_at: string;
+}
+
 export interface Session {
   id: string;
   task_id: string;
@@ -291,4 +308,17 @@ export const api = {
     ),
 
   memoryStatus: () => req<{ enabled: boolean }>("GET", "/memory/status"),
+
+  // Conversation with the CEO (M12 / ADR-0018).
+  getConversation: (companyId: string) =>
+    req<{ conversation: Conversation | null; messages: Message[] }>(
+      "GET",
+      `/companies/${companyId}/conversation`,
+    ),
+  postMessage: (companyId: string, agentId: string, content: string) =>
+    req<{ conversation_id: string }>(
+      "POST",
+      `/companies/${companyId}/conversation/messages`,
+      { agent_id: agentId, content },
+    ),
 };
