@@ -341,3 +341,111 @@ async fn failed_session_blocks_task_with_error() {
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+// M11 / ADR-0017: a knowledge run produces a document artifact, not a diff.
+const KNOWLEDGE_STUB: &str = r#"#!/bin/sh
+echo "researching: $OVERMIND_TASK_TITLE"
+printf '# Avengers - best editions\n\n4K UHD, Dolby Atmos.\n' > ARTIFACT.md
+echo '{"model":"stub-model","total_cost_usd":0.10,"usage":{"input_tokens":100,"output_tokens":50}}'
+"#;
+
+#[tokio::test]
+async fn knowledge_task_produces_document_artifact() {
+    let env = setup(KNOWLEDGE_STUB).await;
+
+    // A knowledge task needs neither a goal nor a git workspace (ADR-0017).
+    let (status, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({
+            "title": "Research Avengers editions",
+            "description": "Find the best 4K release.",
+            "execution_kind": "knowledge"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {task}");
+    assert_eq!(task["execution_kind"], "knowledge");
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start failed: {started}");
+    let session_id = started["session_id"].as_str().expect("session id");
+    // Knowledge runs have no git branch.
+    assert_eq!(started["branch"], "");
+
+    let session = wait_for_session(&env.app, session_id).await;
+    assert_eq!(session["status"], "completed", "session: {session}");
+
+    // The deliverable is an artifact, not a diff.
+    let (status, artifacts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{task_id}/artifacts"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let doc = artifacts["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .find(|a| a["title"] == "ARTIFACT.md")
+        .expect("ARTIFACT.md artifact");
+    assert!(
+        doc["content"].as_str().expect("content").contains("4K UHD"),
+        "artifact: {doc}"
+    );
+
+    // Task landed in review; the artifact is audited and the chain still verifies.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let ours = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["id"] == task_id.as_str())
+        .expect("our task");
+    assert_eq!(ours["status"], "in_review");
+    assert_eq!(ours["execution_kind"], "knowledge");
+
+    let (_, events) = send(
+        &env.app,
+        "GET",
+        &format!("/api/audit/events?company_id={}", env.company_id),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().expect("kind"))
+        .collect();
+    assert!(
+        kinds.contains(&"artifact.created"),
+        "missing artifact.created in {kinds:?}"
+    );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}

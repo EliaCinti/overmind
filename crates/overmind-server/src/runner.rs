@@ -15,7 +15,7 @@ use tokio::process::Command;
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::event_kind;
+use crate::domain::{ExecutionKind, event_kind};
 use crate::governance;
 
 #[derive(Debug, thiserror::Error)]
@@ -98,35 +98,45 @@ pub async fn start_task(
     bypass_approval: bool,
 ) -> Result<StartResult, RunnerError> {
     // Resolve task -> goal -> project -> primary workspace.
-    let task: Option<(String, Option<String>, String, String, String)> = sqlx::query_as(
-        "SELECT company_id, goal_id, title, description, status FROM tasks WHERE id = ?",
+    let task: Option<(String, Option<String>, String, String, String, String)> = sqlx::query_as(
+        "SELECT company_id, goal_id, title, description, status, execution_kind FROM tasks WHERE id = ?",
     )
     .bind(task_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((company_id, goal_id, title, description, status)) = task else {
+    let Some((company_id, goal_id, title, description, status, exec_kind_str)) = task else {
         return Err(RunnerError::NotFound("task"));
     };
     if status != "todo" {
         return Err(RunnerError::Conflict);
     }
-    let Some(goal_id) = goal_id else {
-        return Err(RunnerError::Invalid(
-            "task has no goal: attach it to a project with a workspace first".into(),
-        ));
-    };
-    let workspace: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT w.cwd, w.default_ref FROM project_workspaces w
-         JOIN goals g ON g.project_id = w.project_id
-         WHERE g.id = ? AND w.is_primary = 1",
-    )
-    .bind(&goal_id)
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some((repo_cwd, default_ref)) = workspace else {
-        return Err(RunnerError::Invalid(
-            "the task's project has no primary workspace".into(),
-        ));
+    let exec_kind = ExecutionKind::parse(&exec_kind_str).unwrap_or_default();
+
+    // A `code` run needs a git repo to branch a worktree from; a `knowledge`
+    // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
+    let workspace: Option<(String, Option<String>)> = match exec_kind {
+        ExecutionKind::Code => {
+            let Some(goal_id) = goal_id else {
+                return Err(RunnerError::Invalid(
+                    "task has no goal: attach it to a project with a workspace first".into(),
+                ));
+            };
+            let ws: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                 JOIN goals g ON g.project_id = w.project_id
+                 WHERE g.id = ? AND w.is_primary = 1",
+            )
+            .bind(&goal_id)
+            .fetch_optional(&state.pool)
+            .await?;
+            let Some(ws) = ws else {
+                return Err(RunnerError::Invalid(
+                    "the task's project has no primary workspace".into(),
+                ));
+            };
+            Some(ws)
+        }
+        ExecutionKind::Knowledge => None,
     };
 
     let agent: Option<(String, String, i64)> = sqlx::query_as(
@@ -175,16 +185,20 @@ pub async fn start_task(
     let estimate = state.config.start_estimate_cents;
 
     let session_id = uuid::Uuid::now_v7().to_string();
-    // Branch uniqueness comes from the full session id (globally unique); the
-    // task tag is only there to make the branch human-recognizable.
-    let branch = format!("overmind/task-{}-sess-{}", tag(task_id), session_id);
-    let worktree_dir = state
-        .config
-        .data_dir
-        .join("worktrees")
-        .join(&session_id)
-        .to_string_lossy()
-        .into_owned();
+    // `code`: a git branch + worktree dir. `knowledge`: no branch, a scratch dir.
+    // Branch uniqueness rides on the full session id (globally unique); the task
+    // tag only makes it human-recognizable.
+    let (branch, work_dir): (String, PathBuf) = match exec_kind {
+        ExecutionKind::Code => (
+            format!("overmind/task-{}-sess-{}", tag(task_id), session_id),
+            state.config.data_dir.join("worktrees").join(&session_id),
+        ),
+        ExecutionKind::Knowledge => (
+            String::new(),
+            state.config.data_dir.join("sessions").join(&session_id),
+        ),
+    };
+    let work_dir_str = work_dir.to_string_lossy().into_owned();
 
     let mut tx = state.pool.begin().await?;
 
@@ -242,7 +256,7 @@ pub async fn start_task(
     .bind(task_id)
     .bind(agent_id)
     .bind(&branch)
-    .bind(&worktree_dir)
+    .bind(&work_dir_str)
     .bind(estimate)
     .bind(now())
     .execute(&mut *tx)
@@ -271,25 +285,33 @@ pub async fn start_task(
         session_id: session_id.clone(),
         task_id: task_id.to_string(),
         company_id,
-        worktree_dir: PathBuf::from(&worktree_dir),
+        worktree_dir: work_dir,
         title,
         description,
         agent_traits,
+        exec_kind,
     };
-    let spec = WorktreeSpec {
-        repo_cwd: PathBuf::from(repo_cwd),
-        default_ref,
-        branch: branch.clone(),
+    let fresh = match exec_kind {
+        ExecutionKind::Code => {
+            let (repo_cwd, default_ref) =
+                workspace.expect("a code run resolved a primary workspace above");
+            FreshSpec::Code(WorktreeSpec {
+                repo_cwd: PathBuf::from(repo_cwd),
+                default_ref,
+                branch: branch.clone(),
+            })
+        }
+        ExecutionKind::Knowledge => FreshSpec::Knowledge,
     };
     register(state, &session_id);
     tokio::spawn(async move {
-        run_session(ctx, Mode::Fresh(spec)).await;
+        run_session(ctx, Mode::Fresh(fresh)).await;
     });
 
     Ok(StartResult::Started(StartOutcome {
         session_id,
         branch,
-        workspace_path: worktree_dir,
+        workspace_path: work_dir_str,
     }))
 }
 
@@ -314,14 +336,16 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     let Some((task_id, agent_id, workspace_path)) = session else {
         return Err(RunnerError::NotFound("session"));
     };
-    let task: Option<(String, String, String, String)> =
-        sqlx::query_as("SELECT company_id, title, description, status FROM tasks WHERE id = ?")
-            .bind(&task_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((company_id, title, description, task_status)) = task else {
+    let task: Option<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT company_id, title, description, status, execution_kind FROM tasks WHERE id = ?",
+    )
+    .bind(&task_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((company_id, title, description, task_status, exec_kind_str)) = task else {
         return Err(RunnerError::NotFound("task"));
     };
+    let exec_kind = ExecutionKind::parse(&exec_kind_str).unwrap_or_default();
     let agent_traits: Option<(String,)> = sqlx::query_as("SELECT traits FROM agents WHERE id = ?")
         .bind(&agent_id)
         .fetch_optional(&state.pool)
@@ -337,6 +361,7 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         title,
         description,
         agent_traits,
+        exec_kind,
     };
 
     // A session whose task is no longer in progress, or whose worktree is
@@ -394,10 +419,12 @@ pub(crate) struct SessionContext {
     session_id: String,
     task_id: String,
     company_id: String,
+    /// The agent's cwd: a git worktree for `code`, a scratch dir for `knowledge`.
     worktree_dir: PathBuf,
     title: String,
     description: String,
     agent_traits: String,
+    exec_kind: ExecutionKind,
 }
 
 pub(crate) struct WorktreeSpec {
@@ -406,8 +433,15 @@ pub(crate) struct WorktreeSpec {
     branch: String,
 }
 
+/// How a fresh run is prepared: `code` needs a git worktree from a repo;
+/// `knowledge` just needs an empty scratch dir (ADR-0017).
+pub(crate) enum FreshSpec {
+    Code(WorktreeSpec),
+    Knowledge,
+}
+
 pub(crate) enum Mode {
-    Fresh(WorktreeSpec),
+    Fresh(FreshSpec),
     Resume,
 }
 
@@ -428,15 +462,33 @@ async fn run_session(ctx: SessionContext, mode: Mode) {
 
 async fn execute(ctx: &SessionContext, mode: Mode) -> Outcome {
     let resume = matches!(mode, Mode::Resume);
-    if let Mode::Fresh(spec) = &mode
-        && let Err(e) = prepare_worktree(ctx, spec).await
-    {
-        return Outcome::Infra {
-            error: e.to_string(),
-            release: false,
+    if let Mode::Fresh(fresh) = &mode {
+        let prep = match fresh {
+            FreshSpec::Code(spec) => prepare_worktree(ctx, spec).await,
+            FreshSpec::Knowledge => prepare_scratch(ctx).await,
         };
+        if let Err(e) = prep {
+            return Outcome::Infra {
+                error: e.to_string(),
+                release: false,
+            };
+        }
     }
     run_process(ctx, resume).await
+}
+
+/// Prepare a `knowledge` run: an empty scratch dir, no git. The session goes
+/// `running` with no `base_sha` — there is no diff base (ADR-0017).
+async fn prepare_scratch(ctx: &SessionContext) -> Result<(), RunnerError> {
+    tokio::fs::create_dir_all(&ctx.worktree_dir)
+        .await
+        .map_err(|e| RunnerError::Invalid(format!("cannot create scratch dir: {e}")))?;
+    sqlx::query("UPDATE agent_task_sessions SET status = 'running', started_at = ? WHERE id = ?")
+        .bind(now())
+        .bind(&ctx.session_id)
+        .execute(&ctx.state.pool)
+        .await?;
+    Ok(())
 }
 
 async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(), RunnerError> {
@@ -489,14 +541,23 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         })
         .unwrap_or_default();
 
+    // How the agent is expected to deliver, per execution kind (ADR-0017).
+    let deliver = match ctx.exec_kind {
+        ExecutionKind::Code => {
+            "Work in the current directory. When done, leave the changes uncommitted."
+        }
+        ExecutionKind::Knowledge => {
+            "Write your deliverable as one or more Markdown files in the current directory (e.g. ARTIFACT.md). Do not use git."
+        }
+    };
     let prompt = if resume {
         format!(
-            "You are resuming interrupted work on the task \"{}\".\n\n{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. Leave the changes uncommitted.",
+            "You are resuming interrupted work on the task \"{}\".\n\n{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}",
             ctx.title, ctx.description, memory_block
         )
     } else {
         format!(
-            "You are working on the task \"{}\".\n\n{}{}\n\nWork in the current directory. When done, leave the changes uncommitted.",
+            "You are working on the task \"{}\".\n\n{}{}\n\n{deliver}",
             ctx.title, ctx.description, memory_block
         )
     };
@@ -683,6 +744,84 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         }),
     )
     .await?;
+
+    // Knowledge runs deliver files, not a diff (ADR-0017): register everything
+    // the agent wrote in the scratch dir as task artifacts. Reading the dir is
+    // best-effort; a missing file must not fail the already-recorded session.
+    if ctx.exec_kind == ExecutionKind::Knowledge && f.session_status == "completed" {
+        let mut n = 0usize;
+        if let Ok(mut entries) = tokio::fs::read_dir(&ctx.worktree_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let is_file = entry
+                    .file_type()
+                    .await
+                    .map(|t| t.is_file())
+                    .unwrap_or(false);
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !is_file || name.starts_with('.') {
+                    continue;
+                }
+                let (content, file_path, mime): (Option<String>, Option<String>, &str) =
+                    match tokio::fs::read(entry.path()).await {
+                        Ok(bytes) => match String::from_utf8(bytes) {
+                            Ok(text) => (Some(text), None, "text/markdown"),
+                            // Non-text payload: point at the file on disk instead.
+                            Err(_) => (
+                                None,
+                                Some(entry.path().to_string_lossy().into_owned()),
+                                "application/octet-stream",
+                            ),
+                        },
+                        Err(_) => continue,
+                    };
+                sqlx::query(
+                    "INSERT INTO task_artifacts (id, task_id, session_id, kind, title, mime, content, file_path, created_at)
+                     VALUES (?, ?, ?, 'document', ?, ?, ?, ?, ?)",
+                )
+                .bind(uuid::Uuid::now_v7().to_string())
+                .bind(&ctx.task_id)
+                .bind(&ctx.session_id)
+                .bind(&name)
+                .bind(mime)
+                .bind(&content)
+                .bind(&file_path)
+                .bind(now())
+                .execute(&mut *tx)
+                .await?;
+                audit::append(
+                    &mut tx,
+                    Some(&ctx.company_id),
+                    Some(&ctx.task_id),
+                    event_kind::ARTIFACT_CREATED,
+                    &json!({ "session_id": ctx.session_id, "title": name }),
+                )
+                .await?;
+                n += 1;
+            }
+        }
+        // Always leave at least one artifact so the drawer has something to show.
+        if n == 0 {
+            sqlx::query(
+                "INSERT INTO task_artifacts (id, task_id, session_id, kind, title, mime, content, file_path, created_at)
+                 VALUES (?, ?, ?, 'document', 'Run output', 'text/plain', ?, NULL, ?)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&ctx.task_id)
+            .bind(&ctx.session_id)
+            .bind(&f.output)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            audit::append(
+                &mut tx,
+                Some(&ctx.company_id),
+                Some(&ctx.task_id),
+                event_kind::ARTIFACT_CREATED,
+                &json!({ "session_id": ctx.session_id, "title": "Run output" }),
+            )
+            .await?;
+        }
+    }
 
     // Cost capture: the Claude Code CLI (and our stubs) print a final JSON
     // object with total_cost_usd and usage. Missing/unparseable cost is not

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { TaskPriority } from "../lib/api";
+import type { ExecutionKind, TaskPriority } from "../lib/api";
 import { api } from "../lib/api";
 import { PRIORITY_LABEL } from "../lib/status";
 import { Dialog } from "./ui/dialog";
@@ -23,6 +23,7 @@ export function CreateTaskDialog({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("medium");
+  const [executionKind, setExecutionKind] = useState<ExecutionKind>("code");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -36,12 +37,14 @@ export function CreateTaskDialog({
         description: description.trim(),
         goal_id: goalId ?? undefined,
         priority,
+        execution_kind: executionKind,
       });
       onCreated();
       onOpenChange(false);
       setTitle("");
       setDescription("");
       setPriority("medium");
+      setExecutionKind("code");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to create task");
     } finally {
@@ -81,6 +84,16 @@ export function CreateTaskDialog({
               value: p,
               label: PRIORITY_LABEL[p],
             }))}
+          />
+        </Field>
+        <Field label="Kind" hint="Code produces a diff in a git worktree; Knowledge produces documents.">
+          <Segmented<ExecutionKind>
+            value={executionKind}
+            onChange={setExecutionKind}
+            options={[
+              { value: "code", label: "Code" },
+              { value: "knowledge", label: "Knowledge" },
+            ]}
           />
         </Field>
         {error && <p className="text-sm text-destructive">{error}</p>}

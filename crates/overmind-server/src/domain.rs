@@ -105,6 +105,34 @@ pub enum ReviewStrictness {
     Strict,
 }
 
+/// What a run produces (ADR-0017). `code` = git worktree + diff (ADR-0008);
+/// `knowledge` = no git, the agent produces artifacts (documents, tables,
+/// research, decisions). `Code` is the default so existing tasks are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionKind {
+    #[default]
+    Code,
+    Knowledge,
+}
+
+impl ExecutionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExecutionKind::Code => "code",
+            ExecutionKind::Knowledge => "knowledge",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "code" => Some(ExecutionKind::Code),
+            "knowledge" => Some(ExecutionKind::Knowledge),
+            _ => None,
+        }
+    }
+}
+
 /// Structured agent characterization (ADR-0005). Compiled into both the
 /// agent's prompt context and its server-enforced configuration — one
 /// source of truth for both.
@@ -169,6 +197,7 @@ pub mod event_kind {
     pub const SESSION_FINISHED: &str = "session.finished";
     pub const SESSION_RESUMED: &str = "session.resumed";
     pub const TASK_RELEASED: &str = "task.released";
+    pub const ARTIFACT_CREATED: &str = "artifact.created";
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";
     pub const BUDGET_BLOCKED: &str = "budget.blocked";

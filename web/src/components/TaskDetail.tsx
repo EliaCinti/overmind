@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { X, Play, GitBranch, CircleDollarSign, Bot, ChevronRight } from "lucide-react";
-import type { Agent, Session, Task, TaskSessionRef, TaskStatus } from "../lib/api";
+import { X, Play, GitBranch, CircleDollarSign, Bot, ChevronRight, FileText } from "lucide-react";
+import type { Agent, Artifact, Session, Task, TaskSessionRef, TaskStatus } from "../lib/api";
 import { api } from "../lib/api";
 import { STATUS_LABEL, STATUS_VAR, STATUS_LABEL as SL, TRANSITIONS } from "../lib/status";
 import { Button } from "./ui/button";
@@ -64,9 +64,13 @@ function Inner({
   const [sessions, setSessions] = useState<TaskSessionRef[]>([]);
   const [session, setSession] = useState<Session | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
+  const [artifacts, setArtifacts] = useState<Artifact[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pickAgent, setPickAgent] = useState(false);
+
+  // A knowledge task delivers documents (artifacts), not a diff (ADR-0017).
+  const isKnowledge = task.execution_kind === "knowledge";
 
   // (Re)load sessions whenever the task or a live tick changes.
   useEffect(() => {
@@ -81,6 +85,19 @@ function Inner({
       alive = false;
     };
   }, [task.id, tick]);
+
+  // Load a knowledge task's artifacts whenever its latest run changes.
+  useEffect(() => {
+    if (!isKnowledge || !session) {
+      setArtifacts(null);
+      return;
+    }
+    let alive = true;
+    api.listTaskArtifacts(task.id).then((a) => alive && setArtifacts(a));
+    return () => {
+      alive = false;
+    };
+  }, [isKnowledge, task.id, session?.id, session?.status]);
 
   const activeAgents = agents.filter((a) => a.status === "active");
 
@@ -205,10 +222,12 @@ function Inner({
             </div>
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5 mono">
-                <GitBranch className="h-3.5 w-3.5" />
-                {session.branch}
-              </span>
+              {session.branch && (
+                <span className="inline-flex items-center gap-1.5 mono">
+                  <GitBranch className="h-3.5 w-3.5" />
+                  {session.branch}
+                </span>
+              )}
               <span className="inline-flex items-center gap-1.5 mono">
                 <CircleDollarSign className="h-3.5 w-3.5" />
                 {formatCents(session.cost_cents)}
@@ -229,7 +248,9 @@ function Inner({
             )}
 
             <div>
-              {diff === null ? (
+              {isKnowledge ? (
+                <ArtifactsView artifacts={artifacts} />
+              ) : diff === null ? (
                 <Button size="sm" variant="outline" onClick={loadDiff}>
                   <GitBranch className="h-4 w-4" />
                   View diff
@@ -293,5 +314,38 @@ function DiffView({ diff }: { diff: string }) {
         </div>
       ))}
     </pre>
+  );
+}
+
+/** Documents a knowledge run produced (ADR-0017), newest first. */
+function ArtifactsView({ artifacts }: { artifacts: Artifact[] | null }) {
+  if (artifacts === null) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Spinner className="h-4 w-4" /> Loading documents…
+      </div>
+    );
+  }
+  if (artifacts.length === 0) {
+    return <p className="text-sm text-muted-foreground">No documents produced yet.</p>;
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      {artifacts.map((a) => (
+        <div key={a.id} className="overflow-hidden rounded-md border border-border bg-muted/40">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-sm font-medium">
+            <FileText className="h-4 w-4 text-primary" />
+            {a.title}
+          </div>
+          {a.content !== null ? (
+            <pre className="mono max-h-96 overflow-auto p-3 text-xs leading-relaxed whitespace-pre-wrap">
+              {a.content}
+            </pre>
+          ) : (
+            <p className="mono px-3 py-2 text-xs text-muted-foreground">{a.file_path}</p>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }

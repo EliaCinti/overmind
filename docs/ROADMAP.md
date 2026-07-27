@@ -86,5 +86,28 @@ The differentiator, part 2: Wadachi as first-party brain (ADR-0004).
 - OS-level sandboxing of runners (macOS `sandbox-exec` first); secrets isolation; threat-model doc; prompt-injection review of every gate
 - **Accept:** a deliberately malicious task ("read ~/.ssh, push to main, exceed budget") fails at every layer.
 
+---
+
+> **Direction change ([ADR-0016](adr/0016-general-purpose-conversational-company.md), 2026-07-27):** Overmind becomes a **general-purpose conversational company**, not only a software-team orchestrator. The line below (M11–M14) is now the **active priority**; M8–M10 are deferred/interleaved as they serve it (M8 managed-brain still complements it). Same doctrine: one slice at a time, each end-to-end usable.
+
+## M11 — Deliverable-agnostic execution `in-progress`
+The foundation of general-purpose: agents that produce **documents**, not only code ([ADR-0017](adr/0017-knowledge-execution-and-artifacts.md)).
+- Per-task **`execution_kind`**: `code` (today's worktree/diff, [ADR-0008](adr/0008-execution-sessions-and-atomic-checkout.md)) or `knowledge` (no git; agent produces **artifacts**).
+- **`task_artifacts`**: documents / research briefs / comparison tables / decisions, persisted against the task; task-detail drawer shows artifacts instead of a diff for `knowledge` tasks.
+- Same lifecycle, budget checkout, approval gates, audit (new `artifact.created` event), and memory (`get_context`/`store_memory`) — knowledge tasks inherit all governance for free.
+- **Accept:** a `knowledge` task, created from the board, runs an agent that produces a document artifact, visible in the drawer and audited with the chain intact; a `code` task still behaves exactly as before.
+
+## M12 — Conversational CEO `todo`
+- A chat surface (Claude-style) with a CEO agent that **decomposes intent → goals/tasks and dispatches**; **file/image attachments** in the conversation and on tasks; the board is the ledger of what the chat produced.
+- **Accept:** the user states a goal in chat, the CEO opens the right tasks, and an uploaded image reaches the agent that needs it.
+
+## M13 — Inter-agent meetings `todo`
+- A **bounded** deliberation protocol (goal, participants, turn cap, budget) that ends with a **recorded decision** stored to memory. Not free-form group chat.
+- **Accept:** two+ agents deliberate to a decision within the cap and budget; the decision is audited and retrievable from memory.
+
+## M14 — Deep characterization `todo`
+- Extend [ADR-0005](adr/0005-structured-agent-characterization.md): domain brief + declared **tools/capabilities** (web research, spreadsheet output, vision) + multimodal flag — structured-first, server-enforced.
+- **Accept:** a "Media & A/V quality" agent, hired without free text, uses a declared web-research capability and returns a structured result.
+
 ## Later / icebox
-Linux/Windows support · multi-user · plugin system · agent marketplace-style role templates · non-coding agent workflows (research, content) · public release polish
+Linux/Windows support · multi-user · plugin system · agent marketplace-style role templates · public release polish

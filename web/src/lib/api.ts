@@ -91,6 +91,8 @@ export interface ProjectDetail {
   workspaces: { id: string; name: string; cwd: string; is_primary: boolean }[];
 }
 
+export type ExecutionKind = "code" | "knowledge";
+
 export interface Task {
   id: string;
   goal_id: string | null;
@@ -98,7 +100,20 @@ export interface Task {
   status: TaskStatus;
   priority: TaskPriority;
   assignee_agent_id: string | null;
+  execution_kind: ExecutionKind;
   updated_at: string;
+}
+
+/** A knowledge run's deliverable (ADR-0017): a document, table, or research note. */
+export interface Artifact {
+  id: string;
+  session_id: string;
+  kind: string;
+  title: string;
+  mime: string;
+  content: string | null;
+  file_path: string | null;
+  created_at: string;
 }
 
 export interface Session {
@@ -230,7 +245,13 @@ export const api = {
     req<{ tasks: Task[] }>("GET", `/companies/${companyId}/tasks`).then((r) => r.tasks),
   createTask: (
     companyId: string,
-    body: { title: string; description?: string; goal_id?: string; priority?: TaskPriority },
+    body: {
+      title: string;
+      description?: string;
+      goal_id?: string;
+      priority?: TaskPriority;
+      execution_kind?: ExecutionKind;
+    },
   ) => req<Task>("POST", `/companies/${companyId}/tasks`, body),
   transitionTask: (taskId: string, to: TaskStatus, agent_id?: string) =>
     req<{ id: string; status: TaskStatus }>("POST", `/tasks/${taskId}/transition`, {
@@ -250,6 +271,10 @@ export const api = {
   listTaskSessions: (taskId: string) =>
     req<{ sessions: TaskSessionRef[] }>("GET", `/tasks/${taskId}/sessions`).then(
       (r) => r.sessions,
+    ),
+  listTaskArtifacts: (taskId: string) =>
+    req<{ artifacts: Artifact[] }>("GET", `/tasks/${taskId}/artifacts`).then(
+      (r) => r.artifacts,
     ),
 
   requestWakeup: (agentId: string, reason?: string) =>

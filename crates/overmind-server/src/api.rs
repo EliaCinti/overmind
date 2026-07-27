@@ -71,6 +71,7 @@ fn api_router() -> Router<AppState> {
         .route("/tasks/{task_id}/transition", post(transition_task))
         .route("/tasks/{task_id}/start", post(start_task))
         .route("/tasks/{task_id}/sessions", get(list_task_sessions))
+        .route("/tasks/{task_id}/artifacts", get(list_task_artifacts))
         .route("/agents/{agent_id}/wakeup", post(request_wakeup))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/diff", get(get_session_diff))
@@ -678,6 +679,8 @@ struct CreateTask {
     description: String,
     goal_id: Option<String>,
     priority: Option<String>,
+    /// `code` (default) or `knowledge` (ADR-0017).
+    execution_kind: Option<String>,
 }
 
 async fn create_task(
@@ -691,6 +694,12 @@ async fn create_task(
     let priority = req.priority.as_deref().unwrap_or("medium");
     if !matches!(priority, "low" | "medium" | "high" | "urgent") {
         return Err(ApiError::Invalid(format!("unknown priority '{priority}'")));
+    }
+    let execution_kind = req.execution_kind.as_deref().unwrap_or("code");
+    if crate::domain::ExecutionKind::parse(execution_kind).is_none() {
+        return Err(ApiError::Invalid(format!(
+            "unknown execution_kind '{execution_kind}'"
+        )));
     }
     let mut tx = state.pool.begin().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
@@ -714,8 +723,8 @@ async fn create_task(
     }
     let (id, created_at) = (new_id(), now());
     sqlx::query(
-        "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'backlog', ?, ?, ?)",
+        "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'backlog', ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&company_id)
@@ -723,6 +732,7 @@ async fn create_task(
     .bind(req.title.trim())
     .bind(&req.description)
     .bind(priority)
+    .bind(execution_kind)
     .bind(&created_at)
     .bind(&created_at)
     .execute(&mut *tx)
@@ -732,7 +742,7 @@ async fn create_task(
         Some(&company_id),
         Some(&id),
         event_kind::TASK_CREATED,
-        &json!({ "title": req.title.trim(), "goal_id": req.goal_id, "priority": priority }),
+        &json!({ "title": req.title.trim(), "goal_id": req.goal_id, "priority": priority, "execution_kind": execution_kind }),
     )
     .await?;
     tx.commit().await?;
@@ -746,12 +756,13 @@ async fn create_task(
             "title": req.title.trim(),
             "status": "backlog",
             "priority": priority,
+            "execution_kind": execution_kind,
             "created_at": created_at,
         })),
     ))
 }
 
-/// (id, goal_id, title, status, priority, assignee_agent_id, updated_at)
+/// (id, goal_id, title, status, priority, assignee_agent_id, execution_kind, updated_at)
 type TaskRow = (
     String,
     Option<String>,
@@ -760,6 +771,7 @@ type TaskRow = (
     String,
     Option<String>,
     String,
+    String,
 );
 
 async fn list_tasks(
@@ -767,7 +779,7 @@ async fn list_tasks(
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<TaskRow> = sqlx::query_as(
-        "SELECT id, goal_id, title, status, priority, assignee_agent_id, updated_at
+        "SELECT id, goal_id, title, status, priority, assignee_agent_id, execution_kind, updated_at
          FROM tasks WHERE company_id = ? ORDER BY created_at",
     )
     .bind(&company_id)
@@ -776,7 +788,7 @@ async fn list_tasks(
     let tasks: Vec<Value> = rows
         .into_iter()
         .map(
-            |(id, goal_id, title, status, priority, assignee, updated_at)| {
+            |(id, goal_id, title, status, priority, assignee, execution_kind, updated_at)| {
                 json!({
                     "id": id,
                     "goal_id": goal_id,
@@ -784,6 +796,7 @@ async fn list_tasks(
                     "status": status,
                     "priority": priority,
                     "assignee_agent_id": assignee,
+                    "execution_kind": execution_kind,
                     "updated_at": updated_at,
                 })
             },
@@ -1171,6 +1184,51 @@ async fn list_task_sessions(
         )
         .collect();
     Ok(Json(json!({ "sessions": sessions })))
+}
+
+/// (id, session_id, kind, title, mime, content, file_path, created_at)
+type TaskArtifactRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+/// Artifacts a task's knowledge run(s) produced (ADR-0017), newest first. The
+/// drawer shows these instead of a diff for `knowledge` tasks.
+async fn list_task_artifacts(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<TaskArtifactRow> = sqlx::query_as(
+        "SELECT id, session_id, kind, title, mime, content, file_path, created_at
+         FROM task_artifacts WHERE task_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&task_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let artifacts: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, session_id, kind, title, mime, content, file_path, created_at)| {
+                json!({
+                    "id": id,
+                    "session_id": session_id,
+                    "kind": kind,
+                    "title": title,
+                    "mime": mime,
+                    "content": content,
+                    "file_path": file_path,
+                    "created_at": created_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({ "artifacts": artifacts })))
 }
 
 // ---------- governance: lifecycle, approvals, budgets, config revisions ----------
