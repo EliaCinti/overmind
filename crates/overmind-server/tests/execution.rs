@@ -449,3 +449,97 @@ async fn knowledge_task_produces_document_artifact() {
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+// M12 / ADR-0018: talking to the CEO opens a task. The stub CEO returns a plan.
+const CEO_STUB: &str = r#"#!/bin/sh
+echo "thinking..."
+echo '{"reply":"On it - I will research that.","tasks":[{"title":"Research Avengers 4K editions","description":"Best release per film.","execution_kind":"knowledge"}]}'
+"#;
+
+#[tokio::test]
+async fn ceo_replies_and_opens_a_task() {
+    let env = setup(CEO_STUB).await;
+
+    let (status, posted) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/conversation/messages", env.company_id),
+        Some(json!({
+            "agent_id": env.agent_id,
+            "content": "Find the best 4K Avengers editions."
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "post failed: {posted}");
+
+    // The CEO's turn runs in the background; poll until it has replied.
+    let mut convo = json!({});
+    for _ in 0..100 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!("/api/companies/{}/conversation", env.company_id),
+            None,
+        )
+        .await;
+        let replied = c["messages"]
+            .as_array()
+            .map(|m| m.iter().any(|x| x["role"] == "ceo"))
+            .unwrap_or(false);
+        if replied {
+            convo = c;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let messages = convo["messages"].as_array().expect("messages");
+    assert!(
+        messages.iter().any(|m| m["role"] == "user"),
+        "no user message"
+    );
+    let ceo = messages
+        .iter()
+        .find(|m| m["role"] == "ceo")
+        .expect("ceo reply");
+    assert!(
+        ceo["content"].as_str().unwrap_or("").contains("research"),
+        "ceo: {ceo}"
+    );
+
+    // The CEO opened a knowledge task, visible on the board and dispatchable.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let opened = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["title"] == "Research Avengers 4K editions")
+        .expect("the CEO's task");
+    assert_eq!(opened["status"], "todo");
+    assert_eq!(opened["execution_kind"], "knowledge");
+
+    // Every step audited; the chain still verifies.
+    let (_, events) = send(
+        &env.app,
+        "GET",
+        &format!("/api/audit/events?company_id={}", env.company_id),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().expect("kind"))
+        .collect();
+    for expected in ["conversation.created", "message.posted", "task.created"] {
+        assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
+    }
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}

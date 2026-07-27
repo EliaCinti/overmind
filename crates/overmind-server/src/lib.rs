@@ -1,5 +1,6 @@
 pub mod api;
 pub mod audit;
+pub mod ceo;
 pub mod db;
 pub mod domain;
 pub mod governance;

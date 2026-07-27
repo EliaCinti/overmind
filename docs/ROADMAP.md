@@ -90,14 +90,14 @@ The differentiator, part 2: Wadachi as first-party brain (ADR-0004).
 
 > **Direction change ([ADR-0016](adr/0016-general-purpose-conversational-company.md), 2026-07-27):** Overmind becomes a **general-purpose conversational company**, not only a software-team orchestrator. The line below (M11–M14) is now the **active priority**; M8–M10 are deferred/interleaved as they serve it (M8 managed-brain still complements it). Same doctrine: one slice at a time, each end-to-end usable.
 
-## M11 — Deliverable-agnostic execution `in-progress`
+## M11 — Deliverable-agnostic execution `done`
 The foundation of general-purpose: agents that produce **documents**, not only code ([ADR-0017](adr/0017-knowledge-execution-and-artifacts.md)).
 - Per-task **`execution_kind`**: `code` (today's worktree/diff, [ADR-0008](adr/0008-execution-sessions-and-atomic-checkout.md)) or `knowledge` (no git; agent produces **artifacts**).
 - **`task_artifacts`**: documents / research briefs / comparison tables / decisions, persisted against the task; task-detail drawer shows artifacts instead of a diff for `knowledge` tasks.
 - Same lifecycle, budget checkout, approval gates, audit (new `artifact.created` event), and memory (`get_context`/`store_memory`) — knowledge tasks inherit all governance for free.
 - **Accept:** a `knowledge` task, created from the board, runs an agent that produces a document artifact, visible in the drawer and audited with the chain intact; a `code` task still behaves exactly as before.
 
-## M12 — Conversational CEO `todo`
+## M12 — Conversational CEO `in-progress`
 - A chat surface (Claude-style) with a CEO agent that **decomposes intent → goals/tasks and dispatches**; **file/image attachments** in the conversation and on tasks; the board is the ledger of what the chat produced.
 - **Accept:** the user states a goal in chat, the CEO opens the right tasks, and an uploaded image reaches the agent that needs it.
 

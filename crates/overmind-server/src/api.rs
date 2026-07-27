@@ -56,6 +56,14 @@ fn api_router() -> Router<AppState> {
         .route("/approvals/{approval_id}/decision", post(decide_approval))
         .route("/companies/{company_id}/budget", get(budget_summary))
         .route(
+            "/companies/{company_id}/conversation",
+            get(get_conversation),
+        )
+        .route(
+            "/companies/{company_id}/conversation/messages",
+            post(post_message),
+        )
+        .route(
             "/companies/{company_id}/projects",
             post(create_project).get(list_projects),
         )
@@ -113,6 +121,17 @@ impl From<crate::runner::RunnerError> for ApiError {
             RunnerError::OverBudget => ApiError::Blocked("agent is over its monthly budget".into()),
             RunnerError::Git(msg) => ApiError::Internal(msg.into()),
             RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
+        }
+    }
+}
+
+impl From<crate::ceo::CeoError> for ApiError {
+    fn from(e: crate::ceo::CeoError) -> Self {
+        use crate::ceo::CeoError;
+        match e {
+            CeoError::NotFound(what) => ApiError::NotFound(what),
+            CeoError::Invalid(msg) => ApiError::Invalid(msg),
+            CeoError::Db(e) => ApiError::Internal(Box::new(e)),
         }
     }
 }
@@ -1229,6 +1248,61 @@ async fn list_task_artifacts(
         )
         .collect();
     Ok(Json(json!({ "artifacts": artifacts })))
+}
+
+// ---------- conversation: talk to the CEO (M12 / ADR-0018) ----------
+
+#[derive(Deserialize)]
+struct PostMessage {
+    agent_id: String,
+    content: String,
+}
+
+/// Post a user message to the company's CEO thread. The CEO's reply and any
+/// tasks it opens arrive asynchronously (announced over `/ws`).
+async fn post_message(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<PostMessage>,
+) -> Result<impl IntoResponse, ApiError> {
+    let conversation_id =
+        crate::ceo::post_user_message(&state, &company_id, &req.agent_id, &req.content).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "conversation_id": conversation_id })),
+    ))
+}
+
+/// The company's CEO thread and its messages (null until the first message).
+async fn get_conversation(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let convo: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, ceo_agent_id, title, created_at FROM conversations WHERE company_id = ?",
+    )
+    .bind(&company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((id, ceo_agent_id, title, created_at)) = convo else {
+        return Ok(Json(json!({ "conversation": null, "messages": [] })));
+    };
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+    let messages: Vec<Value> = rows
+        .into_iter()
+        .map(|(mid, role, content, created)| {
+            json!({ "id": mid, "role": role, "content": content, "created_at": created })
+        })
+        .collect();
+    Ok(Json(json!({
+        "conversation": { "id": id, "ceo_agent_id": ceo_agent_id, "title": title, "created_at": created_at },
+        "messages": messages,
+    })))
 }
 
 // ---------- governance: lifecycle, approvals, budgets, config revisions ----------
