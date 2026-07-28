@@ -1,17 +1,18 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
-import type { Agent, Attachment, Conversation, Message } from "../lib/api";
+import type { Agent, Attachment, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
 /**
- * The conversational surface (M12 / ADR-0018). The user talks to a CEO agent;
- * posting a message runs the CEO's turn server-side, which replies and opens
- * tasks. Files/images attached to a message are uploaded first, then reach the
- * agent in its working directory. Replies arrive asynchronously over the live
- * channel, so this view refetches whenever the parent's `tick` changes.
+ * The conversational surface (ADR-0018/0019). The user talks to any agent in
+ * its role — the CEO (the org leader) or a teammate. Posting a message runs
+ * that agent's turn server-side: it replies, opens tasks (optionally assigned
+ * to a teammate — the ripple), and can escalate to the CEO. Files/images
+ * attached to a message reach the agent's working directory. Replies arrive
+ * asynchronously over the live channel, so this view refetches on `tick`.
  */
 export function Chat({
   companyId,
@@ -22,37 +23,37 @@ export function Chat({
   companyId: string;
   agents: Agent[];
   tick: number;
-  /** Bump the app-wide live tick (so the board reflects new CEO tasks at once). */
+  /** Bump the app-wide live tick (so the board reflects new tasks at once). */
   onChanged: () => void;
 }) {
-  const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
-  const [pending, setPending] = useState(false); // CEO turn in flight
+  const [pending, setPending] = useState(false); // agent turn in flight
+  const [activeId, setActiveId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // The CEO is the leader of the organization: the agent that reports to the
-  // human (the top of the org chart). It's a property of the org — designated
-  // in the Org view, not re-picked per conversation. Once a thread exists, its
-  // CEO is whatever it was opened with.
+  // Who you can talk to; the CEO is the org leader (reports to the human).
   const candidates = useMemo(() => agents.filter((a) => a.status === "active"), [agents]);
   const leader = useMemo(
     () => candidates.find((a) => a.reports_to === null)?.id ?? candidates[0]?.id ?? null,
     [candidates],
   );
-  const ceoId = conversation?.ceo_agent_id ?? leader;
-  const ceo = candidates.find((a) => a.id === ceoId) ?? null;
+  const currentId = activeId ?? leader;
+  const agent = candidates.find((a) => a.id === currentId) ?? null;
 
-  // (Re)load the thread on company switch and on every live tick.
+  // (Re)load the active agent's thread on switch / company change / live tick.
   useEffect(() => {
+    if (!currentId) {
+      setMessages([]);
+      return;
+    }
     let cancelled = false;
     api
-      .getConversation(companyId)
+      .getConversation(companyId, currentId)
       .then((r) => {
         if (cancelled) return;
-        setConversation(r.conversation);
         setMessages(r.messages);
         const last = r.messages[r.messages.length - 1];
         if (last && last.role !== "user") setPending(false);
@@ -61,24 +62,31 @@ export function Chat({
     return () => {
       cancelled = true;
     };
-  }, [companyId, tick]);
+  }, [companyId, currentId, tick]);
 
-  // Keep the thread pinned to the bottom as it grows / the CEO "types".
+  // Keep the thread pinned to the bottom as it grows / the agent "types".
   const bottomRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, pending]);
 
+  function switchTo(id: string) {
+    if (id === currentId) return;
+    setActiveId(id);
+    setMessages([]);
+    setPending(false);
+    setDraft("");
+    setFiles([]);
+  }
+
   async function send() {
     const content = draft.trim();
     const toSend = files;
-    if ((!content && toSend.length === 0) || !ceoId || sending) return;
+    if ((!content && toSend.length === 0) || !currentId || sending) return;
     setDraft("");
     setFiles([]);
     setSending(true);
     setPending(true);
-    // Optimistic: show the user's text immediately; the refetch reconciles
-    // (and fills in the attachments the server stored).
     setMessages((m) => [
       ...m,
       { id: `tmp-${Date.now()}`, role: "user", content, created_at: new Date().toISOString() },
@@ -86,14 +94,14 @@ export function Chat({
     try {
       const ids: string[] = [];
       for (const f of toSend) {
-        const a = await api.uploadAttachment(companyId, ceoId, f);
+        const a = await api.uploadAttachment(companyId, currentId, f);
         ids.push(a.id);
       }
-      await api.postMessage(companyId, ceoId, content, ids);
+      await api.postMessage(companyId, currentId, content, ids);
       onChanged();
     } catch (e) {
       setPending(false);
-      const msg = e instanceof ApiError ? e.message : "Could not reach the CEO.";
+      const msg = e instanceof ApiError ? e.message : "Could not reach the agent.";
       setMessages((m) => [
         ...m,
         { id: `err-${Date.now()}`, role: "system", content: msg, created_at: new Date().toISOString() },
@@ -103,27 +111,50 @@ export function Chat({
     }
   }
 
-  const noCeo = candidates.length === 0;
-  const canSend = !noCeo && (draft.trim().length > 0 || files.length > 0) && !sending;
+  const noAgents = candidates.length === 0;
+  const canSend = !noAgents && (draft.trim().length > 0 || files.length > 0) && !sending;
 
   return (
     <div className="mx-auto flex w-full min-h-0 max-w-3xl flex-1 flex-col px-4">
-      {ceo && (messages.length > 0 || pending) && (
-        <div className="flex items-center gap-2.5 border-b border-border py-3">
-          <Avatar name={ceo.name} />
-          <div className="flex flex-col leading-tight">
-            <span className="text-sm font-medium">{ceo.name}</span>
-            <span className="text-xs text-muted-foreground">{ceo.title ?? "CEO"}</span>
-          </div>
+      {/* agent switcher — talk to the CEO or any teammate */}
+      {candidates.length > 1 && (
+        <div className="flex gap-1.5 overflow-x-auto border-b border-border py-2.5">
+          {candidates.map((a) => {
+            const isActive = a.id === currentId;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => switchTo(a.id)}
+                className={cn(
+                  "flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1.5 text-xs transition-colors",
+                  isActive
+                    ? "border-primary/40 bg-primary/10 text-foreground"
+                    : "border-border text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
+                  {initials(a.name)}
+                </span>
+                <span className="font-medium">{a.name}</span>
+                {a.reports_to === null && (
+                  <span className="rounded bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wide text-primary">
+                    CEO
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
+
       <div className="flex-1 space-y-5 overflow-y-auto py-6">
         {messages.length === 0 && !pending ? (
-          <EmptyState ceoName={ceo?.name ?? null} />
+          <EmptyState agent={agent} isLeader={agent?.reports_to === null} />
         ) : (
-          messages.map((m) => <MessageRow key={m.id} message={m} ceo={ceo} companyId={companyId} />)
+          messages.map((m) => <MessageRow key={m.id} message={m} agent={agent} companyId={companyId} />)
         )}
-        {pending && <Typing ceo={ceo} />}
+        {pending && <Typing agent={agent} />}
         <div ref={bottomRef} />
       </div>
 
@@ -165,7 +196,7 @@ export function Chat({
             variant="ghost"
             size="icon"
             onClick={() => fileRef.current?.click()}
-            disabled={noCeo}
+            disabled={noAgents}
             aria-label="Attach files"
             className="h-11 w-11 rounded-xl"
           >
@@ -181,9 +212,9 @@ export function Chat({
               }
             }}
             rows={1}
-            disabled={noCeo}
+            disabled={noAgents}
             placeholder={
-              noCeo ? "Hire an agent to act as CEO first…" : `Message ${ceo?.name ?? "the CEO"}…`
+              noAgents ? "Hire an agent to talk to first…" : `Message ${agent?.name ?? "the agent"}…`
             }
             className={cn(
               "max-h-40 min-h-11 flex-1 resize-none rounded-xl border border-input bg-background px-3.5 py-2.5 text-sm",
@@ -203,26 +234,29 @@ export function Chat({
           </Button>
         </div>
         <p className="mt-1.5 px-1 text-[11px] text-muted-foreground/70">
-          The CEO decomposes what you ask into tasks and dispatches the team. Attach photos or docs
-          and they reach the agents who need them.
+          {agent?.reports_to === null
+            ? "The CEO decomposes what you ask into tasks and dispatches the team."
+            : `${agent?.name ?? "This agent"} can act in their role and pull in teammates when it affects them.`}
         </p>
       </div>
     </div>
   );
 }
 
-function EmptyState({ ceoName }: { ceoName: string | null }) {
+function EmptyState({ agent, isLeader }: { agent: Agent | null; isLeader?: boolean }) {
   return (
     <div className="flex h-full flex-col items-center justify-center py-16 text-center">
       <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
         <Sparkles className="h-6 w-6" />
       </span>
       <h2 className="text-lg font-semibold tracking-tight">
-        Talk to {ceoName ?? "your CEO"}
+        Talk to {agent?.name ?? "your team"}
+        {agent?.title ? <span className="text-muted-foreground"> · {agent.title}</span> : null}
       </h2>
       <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
-        Describe what you want — a decision, a piece of research, a change to ship. The CEO breaks
-        it down, opens the right tasks, and puts the team on it.
+        {isLeader
+          ? "Describe what you want — a decision, a piece of research, a change to ship. The CEO breaks it down, opens the right tasks, and puts the team on it."
+          : `Ask ${agent?.name ?? "this agent"} directly. They reply in their role, open tasks, and loop in teammates (or the CEO) when your request affects them.`}
       </p>
     </div>
   );
@@ -230,11 +264,11 @@ function EmptyState({ ceoName }: { ceoName: string | null }) {
 
 function MessageRow({
   message,
-  ceo,
+  agent,
   companyId,
 }: {
   message: Message;
-  ceo: Agent | null;
+  agent: Agent | null;
   companyId: string;
 }) {
   if (message.role === "system") {
@@ -256,12 +290,12 @@ function MessageRow({
       transition={{ duration: 0.18, ease: "easeOut" }}
       className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}
     >
-      {!isUser && <Avatar name={ceo?.name ?? "CEO"} className="mt-6" />}
+      {!isUser && <Avatar name={agent?.name ?? "Agent"} className="mt-6" />}
       <div className={cn("flex max-w-[82%] flex-col gap-1", isUser && "items-end")}>
         {!isUser && (
           <span className="px-1 text-xs font-medium text-muted-foreground">
-            {ceo?.name ?? "CEO"}
-            {ceo?.title ? <span className="font-normal"> · {ceo.title}</span> : null}
+            {agent?.name ?? "Agent"}
+            {agent?.title ? <span className="font-normal"> · {agent.title}</span> : null}
           </span>
         )}
         {attachments.length > 0 && (
@@ -316,10 +350,10 @@ function AttachmentView({ companyId, att }: { companyId: string; att: Attachment
   );
 }
 
-function Typing({ ceo }: { ceo: Agent | null }) {
+function Typing({ agent }: { agent: Agent | null }) {
   return (
     <div className="flex gap-3">
-      <Avatar name={ceo?.name ?? "CEO"} />
+      <Avatar name={agent?.name ?? "Agent"} />
       <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3.5">
         {[0, 1, 2].map((i) => (
           <motion.span
@@ -334,12 +368,17 @@ function Typing({ ceo }: { ceo: Agent | null }) {
   );
 }
 
+function initials(name: string) {
+  return (
+    name
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((w) => w.charAt(0).toUpperCase())
+      .join("") || "A"
+  );
+}
+
 function Avatar({ name, className }: { name: string; className?: string }) {
-  const initials = name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w.charAt(0).toUpperCase())
-    .join("");
   return (
     <span
       className={cn(
@@ -347,7 +386,7 @@ function Avatar({ name, className }: { name: string; className?: string }) {
         className,
       )}
     >
-      {initials || "C"}
+      {initials(name)}
     </span>
   );
 }

@@ -101,6 +101,13 @@ The foundation of general-purpose: agents that produce **documents**, not only c
 - A chat surface (Claude-style) with a CEO agent that **decomposes intent → goals/tasks and dispatches**; **file/image attachments** in the conversation reach the agent's working directory; the board is the ledger of what the chat produced.
 - **Accept:** the user states a goal in chat, the CEO opens the right tasks ✓, and an uploaded image reaches the agent that needs it ✓ — end-to-end: the conversation runs the CEO turn (structured JSON plan applied server-side), attachments are stored on disk, linked to the message, copied into the agent's cwd, and audited (`attachment.added`); chat UI has a message thread + composer with file upload. Integration tests: `ceo_replies_and_opens_a_task`, `ceo_sees_an_attachment` (uploaded file reaches the agent; downloadable; chain verifies).
 
+## M12.5 — Conversational agents & cross-impact `done`
+Talk to **any agent in its role**, not only the CEO ([ADR-0019](adr/0019-conversational-agents-and-cross-impact.md)).
+- Conversations are per-agent (migration 0009: one thread per `(company, agent)`); the CEO thread is just the org leader's. The turn is **role-aware** — the leader dispatches broadly, a specialist acts in role.
+- **Cross-impact, never silent:** a specialist's plan can **assign a task to a teammate** (resolved by name → `assignee_agent_id`, the ripple) and **escalate** to the leader (a system message posted in the CEO's thread). All structured-first and audited.
+- Chat UI gains an **agent switcher** (talk to the CEO or any teammate).
+- **Accept:** messaging a specialist opens a task assigned to a named teammate and escalates to the CEO ✓ — integration test `agent_conversation_ripples_to_teammates` (assigned task + escalation reaches the leader's thread; chain verifies). This is the substrate for M13.
+
 ## M13 — Inter-agent meetings `todo`
 - A **bounded** deliberation protocol (goal, participants, turn cap, budget) that ends with a **recorded decision** stored to memory. Not free-form group chat.
 - **Accept:** two+ agents deliberate to a decision within the cap and budget; the decision is audited and retrievable from memory.

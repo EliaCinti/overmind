@@ -137,7 +137,7 @@ export interface Message {
 
 export interface Conversation {
   id: string;
-  ceo_agent_id: string;
+  agent_id: string;
   title: string;
   created_at: string;
 }
@@ -318,24 +318,23 @@ export const api = {
 
   memoryStatus: () => req<{ enabled: boolean }>("GET", "/memory/status"),
 
-  // Conversation with the CEO (M12 / ADR-0018).
-  getConversation: (companyId: string) =>
+  // Conversation with an agent — the CEO is the org leader (ADR-0019).
+  getConversation: (companyId: string, agentId: string) =>
     req<{ conversation: Conversation | null; messages: Message[] }>(
       "GET",
-      `/companies/${companyId}/conversation`,
+      `/companies/${companyId}/agents/${agentId}/conversation`,
     ),
   postMessage: (companyId: string, agentId: string, content: string, attachmentIds?: string[]) =>
     req<{ conversation_id: string }>(
       "POST",
-      `/companies/${companyId}/conversation/messages`,
-      { agent_id: agentId, content, attachment_ids: attachmentIds ?? [] },
+      `/companies/${companyId}/agents/${agentId}/conversation/messages`,
+      { content, attachment_ids: attachmentIds ?? [] },
     ),
-  /** Upload a file/image to the CEO thread; returns its attachment metadata. */
+  /** Upload a file/image to an agent's thread; returns its attachment metadata. */
   uploadAttachment: (companyId: string, agentId: string, file: File): Promise<Attachment> => {
     const form = new FormData();
-    form.append("agent_id", agentId);
     form.append("file", file);
-    return fetch(`/api/companies/${companyId}/conversation/attachments`, {
+    return fetch(`/api/companies/${companyId}/agents/${agentId}/conversation/attachments`, {
       method: "POST",
       body: form,
     }).then(async (res) => {

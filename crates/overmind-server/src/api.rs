@@ -56,15 +56,15 @@ fn api_router() -> Router<AppState> {
         .route("/approvals/{approval_id}/decision", post(decide_approval))
         .route("/companies/{company_id}/budget", get(budget_summary))
         .route(
-            "/companies/{company_id}/conversation",
+            "/companies/{company_id}/agents/{agent_id}/conversation",
             get(get_conversation),
         )
         .route(
-            "/companies/{company_id}/conversation/messages",
+            "/companies/{company_id}/agents/{agent_id}/conversation/messages",
             post(post_message),
         )
         .route(
-            "/companies/{company_id}/conversation/attachments",
+            "/companies/{company_id}/agents/{agent_id}/conversation/attachments",
             post(upload_attachment),
         )
         .route(
@@ -1262,24 +1262,23 @@ async fn list_task_artifacts(
 
 #[derive(Deserialize)]
 struct PostMessage {
-    agent_id: String,
     content: String,
     /// Ids of attachments already uploaded to this thread (see upload_attachment).
     #[serde(default)]
     attachment_ids: Vec<String>,
 }
 
-/// Post a user message to the company's CEO thread. The CEO's reply and any
-/// tasks it opens arrive asynchronously (announced over `/ws`).
+/// Post a user message to an agent's thread. The agent's reply and any tasks it
+/// opens arrive asynchronously (announced over `/ws`).
 async fn post_message(
     State(state): State<AppState>,
-    Path(company_id): Path<String>,
+    Path((company_id, agent_id)): Path<(String, String)>,
     Json(req): Json<PostMessage>,
 ) -> Result<impl IntoResponse, ApiError> {
     let conversation_id = crate::ceo::post_user_message(
         &state,
         &company_id,
-        &req.agent_id,
+        &agent_id,
         &req.content,
         &req.attachment_ids,
     )
@@ -1290,48 +1289,33 @@ async fn post_message(
     ))
 }
 
-/// Upload a file/image to the company's CEO thread. Multipart with an
-/// `agent_id` field (which agent is the CEO) and a `file` part. Returns the
-/// attachment id to include in the next `post_message`.
+/// Upload a file/image to an agent's thread. Multipart with a `file` part.
+/// Returns the attachment id to include in the next `post_message`.
 async fn upload_attachment(
     State(state): State<AppState>,
-    Path(company_id): Path<String>,
+    Path((company_id, agent_id)): Path<(String, String)>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut agent_id: Option<String> = None;
     let mut file: Option<(String, String, Vec<u8>)> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| ApiError::Invalid(format!("malformed upload: {e}")))?
     {
-        let name = field.name().map(str::to_string);
-        match name.as_deref() {
-            Some("agent_id") => {
-                agent_id = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| ApiError::Invalid(format!("bad agent_id: {e}")))?,
-                );
-            }
-            Some("file") => {
-                let filename = field.file_name().unwrap_or("file").to_string();
-                let mime = field
-                    .content_type()
-                    .unwrap_or("application/octet-stream")
-                    .to_string();
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| ApiError::Invalid(format!("bad file: {e}")))?
-                    .to_vec();
-                file = Some((filename, mime, bytes));
-            }
-            _ => {}
+        if field.name() == Some("file") {
+            let filename = field.file_name().unwrap_or("file").to_string();
+            let mime = field
+                .content_type()
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| ApiError::Invalid(format!("bad file: {e}")))?
+                .to_vec();
+            file = Some((filename, mime, bytes));
         }
     }
-    let agent_id = agent_id.ok_or_else(|| ApiError::Invalid("agent_id is required".into()))?;
     let (filename, mime, bytes) =
         file.ok_or_else(|| ApiError::Invalid("a file part is required".into()))?;
     let meta =
@@ -1380,18 +1364,19 @@ async fn download_attachment(
     ))
 }
 
-/// The company's CEO thread and its messages (null until the first message).
+/// An agent's thread and its messages (null until the first message).
 async fn get_conversation(
     State(state): State<AppState>,
-    Path(company_id): Path<String>,
+    Path((company_id, agent_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let convo: Option<(String, String, String, String)> = sqlx::query_as(
-        "SELECT id, ceo_agent_id, title, created_at FROM conversations WHERE company_id = ?",
+        "SELECT id, agent_id, title, created_at FROM conversations WHERE company_id = ? AND agent_id = ?",
     )
     .bind(&company_id)
+    .bind(&agent_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((id, ceo_agent_id, title, created_at)) = convo else {
+    let Some((id, agent_id, title, created_at)) = convo else {
         return Ok(Json(json!({ "conversation": null, "messages": [] })));
     };
     let rows: Vec<(String, String, String, String)> = sqlx::query_as(
@@ -1423,7 +1408,7 @@ async fn get_conversation(
         })
         .collect();
     Ok(Json(json!({
-        "conversation": { "id": id, "ceo_agent_id": ceo_agent_id, "title": title, "created_at": created_at },
+        "conversation": { "id": id, "agent_id": agent_id, "title": title, "created_at": created_at },
         "messages": messages,
     })))
 }

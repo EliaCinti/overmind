@@ -463,9 +463,11 @@ async fn ceo_replies_and_opens_a_task() {
     let (status, posted) = send(
         &env.app,
         "POST",
-        &format!("/api/companies/{}/conversation/messages", env.company_id),
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.agent_id
+        ),
         Some(json!({
-            "agent_id": env.agent_id,
             "content": "Find the best 4K Avengers editions."
         })),
     )
@@ -478,7 +480,10 @@ async fn ceo_replies_and_opens_a_task() {
         let (_, c) = send(
             &env.app,
             "GET",
-            &format!("/api/companies/{}/conversation", env.company_id),
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, env.agent_id
+            ),
             None,
         )
         .await;
@@ -562,9 +567,6 @@ async fn upload_file(
     let boundary = "OMTESTBOUNDARY";
     let mut body: Vec<u8> = Vec::new();
     body.extend_from_slice(
-        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"agent_id\"\r\n\r\n{agent_id}\r\n").as_bytes(),
-    );
-    body.extend_from_slice(
         format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes(),
     );
     body.extend_from_slice(content);
@@ -572,7 +574,7 @@ async fn upload_file(
     let request = Request::builder()
         .method("POST")
         .uri(format!(
-            "/api/companies/{company_id}/conversation/attachments"
+            "/api/companies/{company_id}/agents/{agent_id}/conversation/attachments"
         ))
         .header(
             "content-type",
@@ -618,9 +620,11 @@ async fn ceo_sees_an_attachment() {
     let (status, _) = send(
         &env.app,
         "POST",
-        &format!("/api/companies/{}/conversation/messages", env.company_id),
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.agent_id
+        ),
         Some(json!({
-            "agent_id": env.agent_id,
             "content": "What do you think of this room?",
             "attachment_ids": [attachment_id],
         })),
@@ -635,7 +639,10 @@ async fn ceo_sees_an_attachment() {
         let (_, c) = send(
             &env.app,
             "GET",
-            &format!("/api/companies/{}/conversation", env.company_id),
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, env.agent_id
+            ),
             None,
         )
         .await;
@@ -695,6 +702,129 @@ async fn ceo_sees_an_attachment() {
         kinds.contains(&"attachment.added"),
         "missing attachment.added in {kinds:?}"
     );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+// ADR-0019: talking to a single agent ripples onto the team — a specialist
+// assigns a task to a teammate and escalates to the CEO. The stub returns that plan.
+const SPECIALIST_STUB: &str = r#"#!/bin/sh
+echo '{"reply":"On it - I will bring in Guard.","tasks":[{"title":"Harden the login flow","description":"Review auth.","execution_kind":"code","assignee":"Guard"}],"escalate":"This affects the whole app; the CEO should know."}'
+"#;
+
+#[tokio::test]
+async fn agent_conversation_ripples_to_teammates() {
+    // env.agent_id ("Builder") reports to nobody, so it is the org leader (the CEO).
+    let env = setup(SPECIALIST_STUB).await;
+
+    // A teammate to assign to, and the specialist we'll talk to — both report to the leader.
+    let (_, guard) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(json!({ "name": "Guard", "archetype": "backend-developer", "reports_to": env.agent_id })),
+    )
+    .await;
+    let guard_id = guard["id"].as_str().expect("guard id").to_string();
+    let (_, iris) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(
+            json!({ "name": "Iris", "archetype": "backend-developer", "reports_to": env.agent_id }),
+        ),
+    )
+    .await;
+    let iris_id = iris["id"].as_str().expect("iris id").to_string();
+
+    // Talk to Iris directly (a specialist, not the leader).
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, iris_id
+        ),
+        Some(json!({ "content": "Can you secure the login?" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // Wait for Iris to reply.
+    for _ in 0..100 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, iris_id
+            ),
+            None,
+        )
+        .await;
+        if c["messages"]
+            .as_array()
+            .map(|m| m.iter().any(|x| x["role"] == "ceo"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The ripple: a task was created and ASSIGNED to Guard (a different agent).
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let task = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["title"] == "Harden the login flow")
+        .expect("the assigned task");
+    assert_eq!(
+        task["assignee_agent_id"],
+        json!(guard_id),
+        "task not assigned to the teammate: {task}"
+    );
+
+    // The escalation reached the leader's (Builder's) thread as a system message.
+    let mut escalated = false;
+    for _ in 0..60 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, env.agent_id
+            ),
+            None,
+        )
+        .await;
+        if c["messages"]
+            .as_array()
+            .map(|m| {
+                m.iter().any(|x| {
+                    x["role"] == "system"
+                        && x["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .contains("Escalation from Iris")
+                })
+            })
+            .unwrap_or(false)
+        {
+            escalated = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(escalated, "no escalation reached the leader's thread");
+
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
