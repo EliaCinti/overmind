@@ -34,70 +34,162 @@ fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
+/// Get the company's CEO thread, creating it on first use. The caller names
+/// which agent is the CEO (the org leader, in the UI).
+async fn get_or_create_conversation(
+    state: &AppState,
+    company_id: &str,
+    ceo_agent_id: &str,
+) -> Result<String, CeoError> {
+    if let Some((id,)) =
+        sqlx::query_as::<_, (String,)>("SELECT id FROM conversations WHERE company_id = ?")
+            .bind(company_id)
+            .fetch_optional(&state.pool)
+            .await?
+    {
+        return Ok(id);
+    }
+    let agent: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM agents WHERE id = ? AND company_id = ?")
+            .bind(ceo_agent_id)
+            .bind(company_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((status,)) = agent else {
+        return Err(CeoError::NotFound("agent"));
+    };
+    if status != "active" {
+        return Err(CeoError::Invalid(format!("CEO agent is {status}")));
+    }
+    let id = new_id();
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO conversations (id, company_id, ceo_agent_id, title, created_at)
+         VALUES (?, ?, ?, 'CEO', ?)",
+    )
+    .bind(&id)
+    .bind(company_id)
+    .bind(ceo_agent_id)
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        event_kind::CONVERSATION_CREATED,
+        &json!({ "conversation_id": id, "ceo_agent_id": ceo_agent_id }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    Ok(id)
+}
+
+/// Metadata for a stored attachment, returned to the client.
+pub struct AttachmentMeta {
+    pub id: String,
+    pub filename: String,
+    pub mime: String,
+    pub size_bytes: i64,
+}
+
+/// A path-free, filesystem-safe basename for an uploaded file.
+fn safe_name(filename: &str) -> String {
+    let base = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('.').to_string();
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Store an uploaded file against the company's CEO thread. The bytes go to
+/// disk; the row is created unlinked (`message_id` NULL) and is attached to the
+/// user's message when they post it (see `post_user_message`).
+pub async fn store_attachment(
+    state: &AppState,
+    company_id: &str,
+    ceo_agent_id: &str,
+    filename: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<AttachmentMeta, CeoError> {
+    if bytes.is_empty() {
+        return Err(CeoError::Invalid("attachment is empty".into()));
+    }
+    let conversation_id = get_or_create_conversation(state, company_id, ceo_agent_id).await?;
+    let name = safe_name(filename);
+    let id = new_id();
+    let dir = state
+        .config
+        .data_dir
+        .join("attachments")
+        .join(&conversation_id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| CeoError::Invalid(format!("cannot create attachments dir: {e}")))?;
+    let path = dir.join(format!("{id}_{name}"));
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|e| CeoError::Invalid(format!("cannot write attachment: {e}")))?;
+    let size = bytes.len() as i64;
+    sqlx::query(
+        "INSERT INTO attachments (id, conversation_id, message_id, filename, mime, size_bytes, path, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&conversation_id)
+    .bind(&name)
+    .bind(mime)
+    .bind(size)
+    .bind(path.to_string_lossy().as_ref())
+    .bind(now())
+    .execute(&state.pool)
+    .await?;
+    Ok(AttachmentMeta {
+        id,
+        filename: name,
+        mime: mime.to_string(),
+        size_bytes: size,
+    })
+}
+
 /// Post a user message to the company's CEO thread and launch the CEO's turn.
-/// The thread is created on first use (the caller names which agent is the CEO).
-/// Returns the conversation id; the CEO's reply and any tasks land
-/// asynchronously and are announced over the live channel.
+/// Any `attachment_ids` (already uploaded via `store_attachment`) are linked to
+/// the new message and reach the CEO in its working directory. Returns the
+/// conversation id; the CEO's reply and any tasks land asynchronously over `/ws`.
 pub async fn post_user_message(
     state: &AppState,
     company_id: &str,
     ceo_agent_id: &str,
     content: &str,
+    attachment_ids: &[String],
 ) -> Result<String, CeoError> {
-    if content.trim().is_empty() {
+    if content.trim().is_empty() && attachment_ids.is_empty() {
         return Err(CeoError::Invalid("message must not be empty".into()));
     }
+    let conversation_id = get_or_create_conversation(state, company_id, ceo_agent_id).await?;
+    let ceo_id = ceo_agent_id.to_string();
 
-    let existing: Option<(String, String)> =
-        sqlx::query_as("SELECT id, ceo_agent_id FROM conversations WHERE company_id = ?")
-            .bind(company_id)
-            .fetch_optional(&state.pool)
-            .await?;
-
+    let message_id = new_id();
     let mut tx = state.pool.begin().await?;
-    let (conversation_id, ceo_id) = match existing {
-        Some(pair) => pair,
-        None => {
-            let agent: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM agents WHERE id = ? AND company_id = ?")
-                    .bind(ceo_agent_id)
-                    .bind(company_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            let Some((status,)) = agent else {
-                return Err(CeoError::NotFound("agent"));
-            };
-            if status != "active" {
-                return Err(CeoError::Invalid(format!("CEO agent is {status}")));
-            }
-            let id = new_id();
-            sqlx::query(
-                "INSERT INTO conversations (id, company_id, ceo_agent_id, title, created_at)
-                 VALUES (?, ?, ?, 'CEO', ?)",
-            )
-            .bind(&id)
-            .bind(company_id)
-            .bind(ceo_agent_id)
-            .bind(now())
-            .execute(&mut *tx)
-            .await?;
-            audit::append(
-                &mut tx,
-                Some(company_id),
-                None,
-                event_kind::CONVERSATION_CREATED,
-                &json!({ "conversation_id": id, "ceo_agent_id": ceo_agent_id }),
-            )
-            .await?;
-            (id, ceo_agent_id.to_string())
-        }
-    };
-
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, created_at)
          VALUES (?, ?, 'user', ?, ?)",
     )
-    .bind(new_id())
+    .bind(&message_id)
     .bind(&conversation_id)
     .bind(content)
     .bind(now())
@@ -111,6 +203,29 @@ pub async fn post_user_message(
         &json!({ "conversation_id": conversation_id, "role": "user" }),
     )
     .await?;
+    // Link any staged attachments to this message (only ones in this thread,
+    // not already linked — so ids can't be replayed across messages).
+    for att_id in attachment_ids {
+        let linked = sqlx::query(
+            "UPDATE attachments SET message_id = ?
+             WHERE id = ? AND conversation_id = ? AND message_id IS NULL",
+        )
+        .bind(&message_id)
+        .bind(att_id)
+        .bind(&conversation_id)
+        .execute(&mut *tx)
+        .await?;
+        if linked.rows_affected() == 1 {
+            audit::append(
+                &mut tx,
+                Some(company_id),
+                None,
+                event_kind::ATTACHMENT_ADDED,
+                &json!({ "conversation_id": conversation_id, "attachment_id": att_id }),
+            )
+            .await?;
+        }
+    }
     tx.commit().await?;
     state.notify(company_id);
 
@@ -230,8 +345,30 @@ async fn run_ceo_turn(
         .map(|m| format!("\n\nWhat the organization remembers:\n{m}"))
         .unwrap_or_default();
 
+    // Files the user attached to the thread — copied into the CEO's working
+    // directory below, and listed here so it knows to open them.
+    let attachments: Vec<(String, String)> = sqlx::query_as(
+        "SELECT filename, path FROM attachments
+         WHERE conversation_id = ? AND message_id IS NOT NULL ORDER BY created_at",
+    )
+    .bind(conversation_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let attach_block = if attachments.is_empty() {
+        String::new()
+    } else {
+        let list = attachments
+            .iter()
+            .map(|(name, _)| format!("- {name}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nThe user attached these files, now in your working directory — open them if relevant:\n{list}"
+        )
+    };
+
     let prompt = format!(
-        "You are the CEO of an AI company. The user is talking to you. Reply helpfully, and when work is needed, delegate it by proposing tasks for your team.\n\nYour team:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\"}}]}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Propose tasks only when the user actually needs work done; otherwise return an empty tasks array."
+        "You are the CEO of an AI company. The user is talking to you. Reply helpfully, and when work is needed, delegate it by proposing tasks for your team.\n\nYour team:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\"}}]}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Propose tasks only when the user actually needs work done; otherwise return an empty tasks array."
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -239,6 +376,10 @@ async fn run_ceo_turn(
     tokio::fs::create_dir_all(&scratch)
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot create ceo scratch dir: {e}")))?;
+    // Copy the attachments in so the agent can read (or see) them by filename.
+    for (name, path) in &attachments {
+        let _ = tokio::fs::copy(path, scratch.join(safe_name(name))).await;
+    }
     let agent_cmd =
         state.config.agent_cmd.clone().unwrap_or_else(|| {
             "claude -p \"$OVERMIND_TASK_PROMPT\" --output-format json".to_string()

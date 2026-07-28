@@ -119,11 +119,20 @@ export interface Artifact {
 /** A turn in the CEO conversation (M12 / ADR-0018). */
 export type MessageRole = "user" | "ceo" | "system";
 
+/** A file/image attached to a message. */
+export interface Attachment {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
   content: string;
   created_at: string;
+  attachments?: Attachment[];
 }
 
 export interface Conversation {
@@ -315,10 +324,35 @@ export const api = {
       "GET",
       `/companies/${companyId}/conversation`,
     ),
-  postMessage: (companyId: string, agentId: string, content: string) =>
+  postMessage: (companyId: string, agentId: string, content: string, attachmentIds?: string[]) =>
     req<{ conversation_id: string }>(
       "POST",
       `/companies/${companyId}/conversation/messages`,
-      { agent_id: agentId, content },
+      { agent_id: agentId, content, attachment_ids: attachmentIds ?? [] },
     ),
+  /** Upload a file/image to the CEO thread; returns its attachment metadata. */
+  uploadAttachment: (companyId: string, agentId: string, file: File): Promise<Attachment> => {
+    const form = new FormData();
+    form.append("agent_id", agentId);
+    form.append("file", file);
+    return fetch(`/api/companies/${companyId}/conversation/attachments`, {
+      method: "POST",
+      body: form,
+    }).then(async (res) => {
+      if (!res.ok) {
+        let message = res.statusText;
+        try {
+          const data = await res.json();
+          if (data?.error) message = data.error;
+        } catch {
+          // keep statusText
+        }
+        throw new ApiError(res.status, message);
+      }
+      return (await res.json()) as Attachment;
+    });
+  },
+  /** URL that serves an attachment's bytes (for <img> / download links). */
+  attachmentUrl: (companyId: string, attachmentId: string) =>
+    `/api/companies/${companyId}/conversation/attachments/${attachmentId}`,
 };

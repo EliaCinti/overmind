@@ -543,3 +543,158 @@ async fn ceo_replies_and_opens_a_task() {
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+// M12 / ADR-0018: an uploaded file reaches the CEO agent's working directory.
+// This stub reports the files it can see, so the test can prove the file arrived.
+const CEO_ATTACH_STUB: &str = r#"#!/bin/sh
+printf '{"reply":"files present: %s","tasks":[]}\n' "$(ls)"
+"#;
+
+/// POST a multipart upload (agent_id field + a file part) to the attachments endpoint.
+async fn upload_file(
+    app: &axum::Router,
+    company_id: &str,
+    agent_id: &str,
+    filename: &str,
+    mime: &str,
+    content: &[u8],
+) -> (StatusCode, Value) {
+    let boundary = "OMTESTBOUNDARY";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"agent_id\"\r\n\r\n{agent_id}\r\n").as_bytes(),
+    );
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/companies/{company_id}/conversation/attachments"
+        ))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .expect("build request");
+    let response = app.clone().oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+#[tokio::test]
+async fn ceo_sees_an_attachment() {
+    let env = setup(CEO_ATTACH_STUB).await;
+
+    // Upload a file to the CEO thread.
+    let (status, att) = upload_file(
+        &env.app,
+        &env.company_id,
+        &env.agent_id,
+        "room.txt",
+        "text/plain",
+        b"a cozy living room",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "upload failed: {att}");
+    let attachment_id = att["id"].as_str().expect("attachment id").to_string();
+    assert_eq!(att["filename"], "room.txt");
+
+    // Post a message that references the attachment.
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/conversation/messages", env.company_id),
+        Some(json!({
+            "agent_id": env.agent_id,
+            "content": "What do you think of this room?",
+            "attachment_ids": [attachment_id],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // Poll for the CEO's reply; the stub lists the files in its working dir.
+    let mut ceo_reply = String::new();
+    let mut convo = json!({});
+    for _ in 0..100 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!("/api/companies/{}/conversation", env.company_id),
+            None,
+        )
+        .await;
+        if let Some(m) = c["messages"]
+            .as_array()
+            .and_then(|m| m.iter().find(|x| x["role"] == "ceo"))
+        {
+            ceo_reply = m["content"].as_str().unwrap_or("").to_string();
+            convo = c;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The file reached the agent's working directory.
+    assert!(
+        ceo_reply.contains("room.txt"),
+        "the attachment didn't reach the agent — reply: {ceo_reply:?}"
+    );
+
+    // The attachment is shown on the user's message.
+    let user = convo["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user message");
+    assert_eq!(user["attachments"][0]["filename"], "room.txt");
+
+    // And it's downloadable, with the exact bytes we uploaded.
+    let (status, body) = send_text(
+        &env.app,
+        &format!(
+            "/api/companies/{}/conversation/attachments/{}",
+            env.company_id, attachment_id
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "a cozy living room");
+
+    // Audited (attachment.added), and the chain still verifies.
+    let (_, events) = send(
+        &env.app,
+        "GET",
+        &format!("/api/audit/events?company_id={}", env.company_id),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        kinds.contains(&"attachment.added"),
+        "missing attachment.added in {kinds:?}"
+    );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}

@@ -200,6 +200,7 @@ pub mod event_kind {
     pub const ARTIFACT_CREATED: &str = "artifact.created";
     pub const CONVERSATION_CREATED: &str = "conversation.created";
     pub const MESSAGE_POSTED: &str = "message.posted";
+    pub const ATTACHMENT_ADDED: &str = "attachment.added";
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";
     pub const BUDGET_BLOCKED: &str = "budget.blocked";

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { SendHorizontal, Sparkles } from "lucide-react";
-import type { Agent, Conversation, Message } from "../lib/api";
+import { Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
+import type { Agent, Attachment, Conversation, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
@@ -9,7 +9,8 @@ import { cn } from "../lib/utils";
 /**
  * The conversational surface (M12 / ADR-0018). The user talks to a CEO agent;
  * posting a message runs the CEO's turn server-side, which replies and opens
- * tasks. Replies and system notices arrive asynchronously over the live
+ * tasks. Files/images attached to a message are uploaded first, then reach the
+ * agent in its working directory. Replies arrive asynchronously over the live
  * channel, so this view refetches whenever the parent's `tick` changes.
  */
 export function Chat({
@@ -27,8 +28,10 @@ export function Chat({
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState(false); // CEO turn in flight
+  const fileRef = useRef<HTMLInputElement>(null);
 
   // The CEO is the leader of the organization: the agent that reports to the
   // human (the top of the org chart). It's a property of the org — designated
@@ -68,17 +71,25 @@ export function Chat({
 
   async function send() {
     const content = draft.trim();
-    if (!content || !ceoId || sending) return;
+    const toSend = files;
+    if ((!content && toSend.length === 0) || !ceoId || sending) return;
     setDraft("");
+    setFiles([]);
     setSending(true);
     setPending(true);
-    // Optimistic: show the user's message immediately; the refetch reconciles.
+    // Optimistic: show the user's text immediately; the refetch reconciles
+    // (and fills in the attachments the server stored).
     setMessages((m) => [
       ...m,
       { id: `tmp-${Date.now()}`, role: "user", content, created_at: new Date().toISOString() },
     ]);
     try {
-      await api.postMessage(companyId, ceoId, content);
+      const ids: string[] = [];
+      for (const f of toSend) {
+        const a = await api.uploadAttachment(companyId, ceoId, f);
+        ids.push(a.id);
+      }
+      await api.postMessage(companyId, ceoId, content, ids);
       onChanged();
     } catch (e) {
       setPending(false);
@@ -93,6 +104,7 @@ export function Chat({
   }
 
   const noCeo = candidates.length === 0;
+  const canSend = !noCeo && (draft.trim().length > 0 || files.length > 0) && !sending;
 
   return (
     <div className="mx-auto flex w-full min-h-0 max-w-3xl flex-1 flex-col px-4">
@@ -109,14 +121,56 @@ export function Chat({
         {messages.length === 0 && !pending ? (
           <EmptyState ceoName={ceo?.name ?? null} />
         ) : (
-          messages.map((m) => <MessageRow key={m.id} message={m} ceo={ceo} />)
+          messages.map((m) => <MessageRow key={m.id} message={m} ceo={ceo} companyId={companyId} />)
         )}
         {pending && <Typing ceo={ceo} />}
         <div ref={bottomRef} />
       </div>
 
       <div className="border-t border-border py-3">
+        {files.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {files.map((f, i) => (
+              <span
+                key={`${f.name}-${i}`}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-muted/50 py-1 pl-2 pr-1 text-xs"
+              >
+                <Paperclip className="h-3 w-3 text-muted-foreground" />
+                <span className="max-w-[160px] truncate">{f.name}</span>
+                <button
+                  type="button"
+                  onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
+                  className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label={`Remove ${f.name}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="flex items-end gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              const picked = Array.from(e.target.files ?? []);
+              if (picked.length) setFiles((prev) => [...prev, ...picked]);
+              e.target.value = "";
+            }}
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => fileRef.current?.click()}
+            disabled={noCeo}
+            aria-label="Attach files"
+            className="h-11 w-11 rounded-xl"
+          >
+            <Paperclip className="h-4.5 w-4.5" />
+          </Button>
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -141,7 +195,7 @@ export function Chat({
             variant="primary"
             size="icon"
             onClick={() => void send()}
-            disabled={noCeo || !draft.trim() || sending}
+            disabled={!canSend}
             aria-label="Send message"
             className="h-11 w-11 rounded-xl"
           >
@@ -149,8 +203,8 @@ export function Chat({
           </Button>
         </div>
         <p className="mt-1.5 px-1 text-[11px] text-muted-foreground/70">
-          The CEO decomposes what you ask into tasks and dispatches the team. Watch them land on
-          the Board.
+          The CEO decomposes what you ask into tasks and dispatches the team. Attach photos or docs
+          and they reach the agents who need them.
         </p>
       </div>
     </div>
@@ -174,7 +228,15 @@ function EmptyState({ ceoName }: { ceoName: string | null }) {
   );
 }
 
-function MessageRow({ message, ceo }: { message: Message; ceo: Agent | null }) {
+function MessageRow({
+  message,
+  ceo,
+  companyId,
+}: {
+  message: Message;
+  ceo: Agent | null;
+  companyId: string;
+}) {
   if (message.role === "system") {
     return (
       <div className="flex justify-center">
@@ -186,6 +248,7 @@ function MessageRow({ message, ceo }: { message: Message; ceo: Agent | null }) {
   }
 
   const isUser = message.role === "user";
+  const attachments = message.attachments ?? [];
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
@@ -201,18 +264,55 @@ function MessageRow({ message, ceo }: { message: Message; ceo: Agent | null }) {
             {ceo?.title ? <span className="font-normal"> · {ceo.title}</span> : null}
           </span>
         )}
-        <div
-          className={cn(
-            "whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
-            isUser
-              ? "rounded-br-sm bg-primary text-primary-foreground"
-              : "rounded-tl-sm border border-border bg-card text-card-foreground",
-          )}
-        >
-          {message.content}
-        </div>
+        {attachments.length > 0 && (
+          <div className={cn("flex flex-wrap gap-2", isUser && "justify-end")}>
+            {attachments.map((a) => (
+              <AttachmentView key={a.id} companyId={companyId} att={a} />
+            ))}
+          </div>
+        )}
+        {message.content && (
+          <div
+            className={cn(
+              "whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
+              isUser
+                ? "rounded-br-sm bg-primary text-primary-foreground"
+                : "rounded-tl-sm border border-border bg-card text-card-foreground",
+            )}
+          >
+            {message.content}
+          </div>
+        )}
       </div>
     </motion.div>
+  );
+}
+
+function AttachmentView({ companyId, att }: { companyId: string; att: Attachment }) {
+  const url = api.attachmentUrl(companyId, att.id);
+  if (att.mime.startsWith("image/")) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener"
+        className="block overflow-hidden rounded-xl border border-border"
+        title={att.filename}
+      >
+        <img src={url} alt={att.filename} className="max-h-56 max-w-[240px] object-cover" />
+      </a>
+    );
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener"
+      className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs hover:bg-muted"
+    >
+      <Paperclip className="h-3.5 w-3.5 text-muted-foreground" />
+      <span className="max-w-[200px] truncate">{att.filename}</span>
+    </a>
   );
 }
 

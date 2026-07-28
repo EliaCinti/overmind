@@ -97,9 +97,9 @@ The foundation of general-purpose: agents that produce **documents**, not only c
 - Same lifecycle, budget checkout, approval gates, audit (new `artifact.created` event), and memory (`get_context`/`store_memory`) — knowledge tasks inherit all governance for free.
 - **Accept:** a `knowledge` task, created from the board, runs an agent that produces a document artifact, visible in the drawer and audited with the chain intact; a `code` task still behaves exactly as before.
 
-## M12 — Conversational CEO `in-progress`
-- A chat surface (Claude-style) with a CEO agent that **decomposes intent → goals/tasks and dispatches**; **file/image attachments** in the conversation and on tasks; the board is the ledger of what the chat produced.
-- **Accept:** the user states a goal in chat, the CEO opens the right tasks, and an uploaded image reaches the agent that needs it.
+## M12 — Conversational CEO `done`
+- A chat surface (Claude-style) with a CEO agent that **decomposes intent → goals/tasks and dispatches**; **file/image attachments** in the conversation reach the agent's working directory; the board is the ledger of what the chat produced.
+- **Accept:** the user states a goal in chat, the CEO opens the right tasks ✓, and an uploaded image reaches the agent that needs it ✓ — end-to-end: the conversation runs the CEO turn (structured JSON plan applied server-side), attachments are stored on disk, linked to the message, copied into the agent's cwd, and audited (`attachment.added`); chat UI has a message thread + composer with file upload. Integration tests: `ceo_replies_and_opens_a_task`, `ceo_sees_an_attachment` (uploaded file reaches the agent; downloadable; chain verifies).
 
 ## M13 — Inter-agent meetings `todo`
 - A **bounded** deliberation protocol (goal, participants, turn cap, budget) that ends with a **recorded decision** stored to memory. Not free-form group chat.

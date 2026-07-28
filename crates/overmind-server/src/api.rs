@@ -1,5 +1,5 @@
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -62,6 +62,14 @@ fn api_router() -> Router<AppState> {
         .route(
             "/companies/{company_id}/conversation/messages",
             post(post_message),
+        )
+        .route(
+            "/companies/{company_id}/conversation/attachments",
+            post(upload_attachment),
+        )
+        .route(
+            "/companies/{company_id}/conversation/attachments/{attachment_id}",
+            get(download_attachment),
         )
         .route(
             "/companies/{company_id}/projects",
@@ -1256,6 +1264,9 @@ async fn list_task_artifacts(
 struct PostMessage {
     agent_id: String,
     content: String,
+    /// Ids of attachments already uploaded to this thread (see upload_attachment).
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 /// Post a user message to the company's CEO thread. The CEO's reply and any
@@ -1265,11 +1276,107 @@ async fn post_message(
     Path(company_id): Path<String>,
     Json(req): Json<PostMessage>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let conversation_id =
-        crate::ceo::post_user_message(&state, &company_id, &req.agent_id, &req.content).await?;
+    let conversation_id = crate::ceo::post_user_message(
+        &state,
+        &company_id,
+        &req.agent_id,
+        &req.content,
+        &req.attachment_ids,
+    )
+    .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({ "conversation_id": conversation_id })),
+    ))
+}
+
+/// Upload a file/image to the company's CEO thread. Multipart with an
+/// `agent_id` field (which agent is the CEO) and a `file` part. Returns the
+/// attachment id to include in the next `post_message`.
+async fn upload_attachment(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut agent_id: Option<String> = None;
+    let mut file: Option<(String, String, Vec<u8>)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::Invalid(format!("malformed upload: {e}")))?
+    {
+        let name = field.name().map(str::to_string);
+        match name.as_deref() {
+            Some("agent_id") => {
+                agent_id = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| ApiError::Invalid(format!("bad agent_id: {e}")))?,
+                );
+            }
+            Some("file") => {
+                let filename = field.file_name().unwrap_or("file").to_string();
+                let mime = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| ApiError::Invalid(format!("bad file: {e}")))?
+                    .to_vec();
+                file = Some((filename, mime, bytes));
+            }
+            _ => {}
+        }
+    }
+    let agent_id = agent_id.ok_or_else(|| ApiError::Invalid("agent_id is required".into()))?;
+    let (filename, mime, bytes) =
+        file.ok_or_else(|| ApiError::Invalid("a file part is required".into()))?;
+    let meta =
+        crate::ceo::store_attachment(&state, &company_id, &agent_id, &filename, &mime, &bytes)
+            .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": meta.id,
+            "filename": meta.filename,
+            "mime": meta.mime,
+            "size_bytes": meta.size_bytes,
+        })),
+    ))
+}
+
+/// Serve an attachment's bytes (for the UI to render images / offer downloads).
+async fn download_attachment(
+    State(state): State<AppState>,
+    Path((company_id, attachment_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT a.filename, a.mime, a.path FROM attachments a
+         JOIN conversations c ON c.id = a.conversation_id
+         WHERE a.id = ? AND c.company_id = ?",
+    )
+    .bind(&attachment_id)
+    .bind(&company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((filename, mime, path)) = row else {
+        return Err(ApiError::NotFound("attachment"));
+    };
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError::NotFound("attachment file"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
     ))
 }
 
@@ -1293,10 +1400,26 @@ async fn get_conversation(
     .bind(&id)
     .fetch_all(&state.pool)
     .await?;
+    // Attachments, grouped by their message.
+    let atts: Vec<(String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, message_id, filename, mime, size_bytes FROM attachments
+         WHERE conversation_id = ? AND message_id IS NOT NULL ORDER BY created_at",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut by_msg: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
+    for (aid, mid, fname, mime, size) in atts {
+        by_msg.entry(mid).or_default().push(json!({
+            "id": aid, "filename": fname, "mime": mime, "size_bytes": size,
+        }));
+    }
     let messages: Vec<Value> = rows
         .into_iter()
         .map(|(mid, role, content, created)| {
-            json!({ "id": mid, "role": role, "content": content, "created_at": created })
+            let attachments = by_msg.remove(&mid).unwrap_or_default();
+            json!({ "id": mid, "role": role, "content": content, "created_at": created, "attachments": attachments })
         })
         .collect();
     Ok(Json(json!({

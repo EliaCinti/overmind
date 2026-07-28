@@ -9,7 +9,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
