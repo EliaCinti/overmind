@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
 import type { Agent, Attachment, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
@@ -116,35 +117,59 @@ export function Chat({
 
   return (
     <div className="mx-auto flex w-full min-h-0 max-w-3xl flex-1 flex-col px-4">
-      {/* agent switcher — talk to the CEO or any teammate */}
-      {candidates.length > 1 && (
-        <div className="flex gap-1.5 overflow-x-auto border-b border-border py-2.5">
-          {candidates.map((a) => {
-            const isActive = a.id === currentId;
-            return (
+      {/* agent picker — "You're talking to [agent]" above the thread (Claude-style dropdown) */}
+      {candidates.length > 0 && (
+        <div className="flex items-center gap-1 border-b border-border py-2.5">
+          <span className="pl-1 text-sm text-muted-foreground">You're talking to</span>
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
               <button
-                key={a.id}
                 type="button"
-                onClick={() => switchTo(a.id)}
-                className={cn(
-                  "flex shrink-0 items-center gap-2 rounded-full border px-2.5 py-1.5 text-xs transition-colors",
-                  isActive
-                    ? "border-primary/40 bg-primary/10 text-foreground"
-                    : "border-border text-muted-foreground hover:text-foreground",
-                )}
+                className="press flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
-                  {initials(a.name)}
+                <span className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-[10px] font-semibold text-primary">
+                  {initials(agent?.name ?? "?")}
                 </span>
-                <span className="font-medium">{a.name}</span>
-                {a.reports_to === null && (
-                  <span className="rounded bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wide text-primary">
-                    CEO
-                  </span>
-                )}
+                <span className="font-medium">{agent?.name ?? "Select agent"}</span>
+                {agent?.title && <span className="text-muted-foreground">· {agent.title}</span>}
+                <ChevronDown className="h-4 w-4 text-muted-foreground" />
               </button>
-            );
-          })}
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                align="start"
+                sideOffset={6}
+                className="z-50 min-w-[248px] rounded-xl border border-border bg-card p-1.5 text-card-foreground shadow-lg"
+              >
+                <DropdownMenu.Label className="px-2.5 pb-1 pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Talk to
+                </DropdownMenu.Label>
+                {candidates.map((a) => (
+                  <DropdownMenu.Item
+                    key={a.id}
+                    onSelect={() => switchTo(a.id)}
+                    className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm outline-none data-[highlighted]:bg-muted"
+                  >
+                    <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/10 text-[11px] font-semibold text-primary">
+                      {initials(a.name)}
+                    </span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="flex items-center gap-1.5 font-medium">
+                        {a.name}
+                        {a.reports_to === null && (
+                          <span className="rounded bg-primary/15 px-1 text-[9px] font-semibold uppercase tracking-wide text-primary">
+                            CEO
+                          </span>
+                        )}
+                      </span>
+                      {a.title && <span className="truncate text-xs text-muted-foreground">{a.title}</span>}
+                    </span>
+                    {a.id === currentId && <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />}
+                  </DropdownMenu.Item>
+                ))}
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
         </div>
       )}
 
