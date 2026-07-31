@@ -69,6 +69,55 @@ export interface AgentBudget {
   reserved_cents: number;
 }
 
+/** How the company reaches you (ADR-0020). Actionable when `approval_id` is set. */
+export interface Notification {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  agent_id: string | null;
+  subject_type: string | null;
+  subject_id: string | null;
+  approval_id: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+/** The main surfaces of the app. */
+export type View = "chat" | "board" | "meetings" | "org";
+
+export type MeetingStatus = "requested" | "open" | "decided" | "declined" | "failed";
+
+/** A meeting an agent asked for (or you convened). */
+export interface Meeting {
+  id: string;
+  topic: string;
+  reason: string;
+  convener_agent_id: string | null;
+  convener_name: string | null;
+  turn_cap: number;
+  status: MeetingStatus;
+  decision: string | null;
+  approval_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface MeetingTurn {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  ordinal: number;
+  content: string;
+  created_at: string;
+}
+
+export interface MeetingDetail {
+  meeting: Meeting & { company_id: string };
+  participants: { id: string; name: string; title: string | null }[];
+  turns: MeetingTurn[];
+}
+
 export interface Project {
   id: string;
   title: string;
@@ -245,6 +294,21 @@ export const api = {
       decision,
       note,
     }),
+
+  listNotifications: (companyId: string) =>
+    req<{ notifications: Notification[]; unread: number }>(
+      "GET",
+      `/companies/${companyId}/notifications`,
+    ),
+  readNotification: (id: string) => req<unknown>("POST", `/notifications/${id}/read`),
+  readAllNotifications: (companyId: string) =>
+    req<{ read: number }>("POST", `/companies/${companyId}/notifications/read`),
+
+  listMeetings: (companyId: string) =>
+    req<{ meetings: Meeting[] }>("GET", `/companies/${companyId}/meetings`).then(
+      (r) => r.meetings,
+    ),
+  getMeeting: (meetingId: string) => req<MeetingDetail>("GET", `/meetings/${meetingId}`),
 
   budgetSummary: (companyId: string) =>
     req<{ budgets: AgentBudget[]; window_start: string }>(

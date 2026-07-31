@@ -108,9 +108,15 @@ Talk to **any agent in its role**, not only the CEO ([ADR-0019](adr/0019-convers
 - Chat UI gains an **agent switcher** (talk to the CEO or any teammate).
 - **Accept:** messaging a specialist opens a task assigned to a named teammate and escalates to the CEO ✓ — integration test `agent_conversation_ripples_to_teammates` (assigned task + escalation reaches the leader's thread; chain verifies). This is the substrate for M13.
 
-## M13 — Inter-agent meetings `todo`
-- A **bounded** deliberation protocol (goal, participants, turn cap, budget) that ends with a **recorded decision** stored to memory. Not free-form group chat.
-- **Accept:** two+ agents deliberate to a decision within the cap and budget; the decision is audited and retrievable from memory.
+## M13 — Inter-agent meetings `done`
+Meetings are an **automation the agents start and you allow** ([ADR-0020](adr/0020-inter-agent-meetings.md)) — not a free-form group chat, and not something that spends a token before you say yes.
+- **They ask.** Mid-collaboration an agent requests a room: topic, participants, turn cap, and *why*, in its own words. Two channels: a `meeting` object in a conversational turn's plan, or a `MEETING_REQUEST.json` file written while working a task.
+- **You are notified and decide.** The request creates the meeting (`requested`), an approval (`meeting_request`, ADR-0012) and a notification, in one transaction. Approve → the room opens; reject → `declined`, and the agent is told with your note.
+- **They deliberate, bounded — and constructively.** Round-robin, structured-first (`{"say", "decision"?}`), at most `turn_cap` turns (clamped `[1, 12]`); the **chair** (leader in the room, else first) must call it at the cap. The room gets the convener's *reason*, the opener frames the real options and their trade-off, later speakers must add rather than nod (agreement names its cost, disagreement gives the alternative), and a decision must be concrete enough to act on. Persisted as `meetings` + `meeting_participants` + `meeting_turns` (migration 0010).
+- **The decision goes back to work.** Audited, stored to memory (`store_decision`), injected into every participant's next task run and chat turn, and each one is woken to carry on — autonomy and budget still enforced by the scheduler.
+- **Notifications** are now a first-class mechanism (migration 0011, `notify.rs`): durable row + live `/ws` push, carrying who is asking, what to open, and the approval to act on.
+- **UI.** The bell is one **inbox** for everything an agent wants you to know or decide, answered inline; live notifications arrive as **toasts**; a **Meetings** surface shows the rooms, the transcript arriving turn by turn, and the decision. Gated task starts raise a notification too, so there is a single place to look.
+- **Accept:** an agent asks, nothing runs until approval, then they deliberate to a decision that reaches their next run ✓ — `tests/meetings.rs` (9 tests): request from chat and from a task, nothing convenes before approval, decline path, chair closes at the cap, 500-turn request clamped to 12+1, each turn gets the instruction its position calls for, decision lands in a participant's next task. Chain verifies throughout. Also walked end-to-end in the browser against the real server.
 
 ## M14 — Deep characterization `todo`
 - Extend [ADR-0005](adr/0005-structured-agent-characterization.md): domain brief + declared **tools/capabilities** (web research, spreadsheet output, vision) + multimodal flag — structured-first, server-enforced.

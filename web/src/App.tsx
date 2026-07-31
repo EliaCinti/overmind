@@ -1,19 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Agent, AgentBudget, Archetype, Company, ProjectDetail, Task } from "./lib/api";
+import type {
+  Agent,
+  AgentBudget,
+  Archetype,
+  Company,
+  Notification,
+  ProjectDetail,
+  Task,
+  View,
+} from "./lib/api";
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
 import { useTheme } from "./lib/theme";
 import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
 import { Chat } from "./components/Chat";
+import { Meetings } from "./components/Meetings";
 import { OrgChart } from "./components/OrgChart";
 import { TaskDetail } from "./components/TaskDetail";
+import { Toaster } from "./components/Toaster";
 import { HireAgentDialog } from "./components/HireAgentDialog";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Spinner } from "./components/ui/primitives";
-
-type View = "chat" | "board" | "org";
 
 const LAST_COMPANY = "overmind-last-company";
 
@@ -36,6 +45,16 @@ export default function App() {
   const [hireManager, setHireManager] = useState<string | null>(null);
   const [taskOpen, setTaskOpen] = useState(false);
   const [tick, setTick] = useState(0); // bumped on every live change → drives refetch
+
+  // Notifications: toasts as they arrive, and a signal that opens the inbox.
+  const [toasts, setToasts] = useState<Notification[]>([]);
+  const [inboxSignal, setInboxSignal] = useState(0);
+  const [selectedMeeting, setSelectedMeeting] = useState<string | null>(null);
+
+  const openMeeting = (id: string) => {
+    setSelectedMeeting(id);
+    setView("meetings");
+  };
 
   const openHire = (managerId: string | null = null) => {
     setHireManager(managerId);
@@ -86,10 +105,38 @@ export default function App() {
   // Live updates: refetch companies list + current board on any change.
   const companyIdRef = useRef(companyId);
   companyIdRef.current = companyId;
-  const { connected } = useLive((changed) => {
-    if (changed === null) api.listCompanies().then(setCompanies);
-    if (!changed || changed === companyIdRef.current) setTick((n) => n + 1);
-  });
+  const { connected } = useLive(
+    (changed) => {
+      if (changed === null) api.listCompanies().then(setCompanies);
+      if (!changed || changed === companyIdRef.current) setTick((n) => n + 1);
+    },
+    // Something the company wants to tell you right now. Keep a few on screen;
+    // the inbox is the record, so dropping older toasts loses nothing.
+    (changed, notification) => {
+      if (changed && changed !== companyIdRef.current) return;
+      setToasts((current) =>
+        [
+          // A later word on the same subject retires the earlier one: once a
+          // meeting is decided, "waiting on you" is a lie on screen.
+          ...current.filter(
+            (t) => t.id !== notification.id && !sameSubject(t, notification),
+          ),
+          notification,
+        ].slice(-4),
+      );
+      setTick((n) => n + 1);
+    },
+  );
+
+  /** Two notifications about the same thing (e.g. one meeting). */
+  const sameSubject = (a: Notification, b: Notification) =>
+    !!a.subject_id && a.subject_type === b.subject_type && a.subject_id === b.subject_id;
+
+  /** A decision taken in the UI: drop the toast that was asking for it. */
+  const afterDecision = (approvalId?: string) => {
+    if (approvalId) setToasts((current) => current.filter((t) => t.approval_id !== approvalId));
+    setTick((n) => n + 1);
+  };
 
   const bump = () => setTick((n) => n + 1);
 
@@ -126,7 +173,9 @@ export default function App() {
         view={view}
         onViewChange={setView}
         showViews={!!companyId && !needsWorkspace}
-        onApprovalDecided={bump}
+        onApprovalDecided={afterDecision}
+        inboxSignal={inboxSignal}
+        onOpenMeeting={openMeeting}
         connected={connected}
         tick={tick}
         theme={theme}
@@ -146,6 +195,14 @@ export default function App() {
             <Chat companyId={companyId} agents={agents} tick={tick} onChanged={bump} />
           ) : view === "board" ? (
             <Board tasks={tasks} agents={agents} onOpenTask={setOpenTask} />
+          ) : view === "meetings" ? (
+            <Meetings
+              companyId={companyId}
+              tick={tick}
+              onChanged={bump}
+              selectedId={selectedMeeting}
+              onSelect={setSelectedMeeting}
+            />
           ) : (
             <OrgChart
               agents={agents}
@@ -163,6 +220,15 @@ export default function App() {
         tick={tick}
         onClose={() => setOpenTask(null)}
         onChanged={bump}
+      />
+
+      <Toaster
+        toasts={toasts}
+        onDismiss={(id) => setToasts((current) => current.filter((t) => t.id !== id))}
+        onOpen={() => {
+          setToasts([]);
+          setInboxSignal((n) => n + 1);
+        }}
       />
 
       {companyId && (

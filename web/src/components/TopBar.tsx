@@ -10,11 +10,11 @@ import {
   WifiOff,
   BrainCircuit,
 } from "lucide-react";
-import type { Company } from "../lib/api";
+import type { Company, View } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Segmented } from "./ui/controls";
-import { ApprovalsInbox } from "./ApprovalsInbox";
+import { Inbox } from "./Inbox";
 import { cn } from "../lib/utils";
 
 export function TopBar({
@@ -29,6 +29,8 @@ export function TopBar({
   onViewChange,
   showViews,
   onApprovalDecided,
+  inboxSignal,
+  onOpenMeeting,
   connected,
   tick,
   theme,
@@ -41,10 +43,12 @@ export function TopBar({
   onHire: () => void;
   onNewTask: () => void;
   canCreateTask: boolean;
-  view: "chat" | "board" | "org";
-  onViewChange: (v: "chat" | "board" | "org") => void;
+  view: View;
+  onViewChange: (v: View) => void;
   showViews: boolean;
   onApprovalDecided: () => void;
+  inboxSignal: number;
+  onOpenMeeting: (meetingId: string) => void;
   connected: boolean;
   tick: number;
   theme: string;
@@ -75,12 +79,13 @@ export function TopBar({
 
       {showViews && (
         <div className="ml-2">
-          <Segmented<"chat" | "board" | "org">
+          <Segmented<View>
             value={view}
             onChange={onViewChange}
             options={[
               { value: "chat", label: "Chat" },
               { value: "board", label: "Board" },
+              { value: "meetings", label: "Meetings" },
               { value: "org", label: "Org" },
             ]}
           />
@@ -89,7 +94,13 @@ export function TopBar({
 
       <div className="ml-auto flex items-center gap-2">
         {companyId && (
-          <ApprovalsInbox companyId={companyId} tick={tick} onDecided={onApprovalDecided} />
+          <Inbox
+            companyId={companyId}
+            tick={tick}
+            onDecided={onApprovalDecided}
+            openSignal={inboxSignal}
+            onOpenMeeting={onOpenMeeting}
+          />
         )}
         <MemoryIndicator />
         <AuditIndicator tick={tick} />
