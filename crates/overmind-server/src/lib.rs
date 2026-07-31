@@ -5,6 +5,8 @@ pub mod db;
 pub mod domain;
 pub mod governance;
 pub mod mcp;
+pub mod meeting;
+pub mod notify;
 pub mod runner;
 pub mod scheduler;
 pub mod ws;

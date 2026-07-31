@@ -72,6 +72,23 @@ fn api_router() -> Router<AppState> {
             get(download_attachment),
         )
         .route(
+            "/companies/{company_id}/meetings",
+            post(convene_meeting).get(list_meetings),
+        )
+        .route("/meetings/{meeting_id}", get(get_meeting))
+        .route(
+            "/companies/{company_id}/notifications",
+            get(list_notifications),
+        )
+        .route(
+            "/companies/{company_id}/notifications/read",
+            post(read_all_notifications),
+        )
+        .route(
+            "/notifications/{notification_id}/read",
+            post(read_notification),
+        )
+        .route(
             "/companies/{company_id}/projects",
             post(create_project).get(list_projects),
         )
@@ -1413,6 +1430,295 @@ async fn get_conversation(
     })))
 }
 
+// ---------- meetings: bounded deliberation (M13 / ADR-0020) ----------
+
+#[derive(Deserialize)]
+struct ConveneMeeting {
+    topic: String,
+    /// Agent ids, in speaking order. At least two.
+    participants: Vec<String>,
+    /// How many turns before the chair must close it (clamped to [1, 12]).
+    #[serde(default = "default_turn_cap")]
+    turn_cap: i64,
+}
+
+fn default_turn_cap() -> i64 {
+    6
+}
+
+/// Convene a meeting. The deliberation runs in the background; the transcript
+/// and the decision arrive as they happen (announced over `/ws`).
+async fn convene_meeting(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<ConveneMeeting>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = crate::meeting::convene(
+        &state,
+        &company_id,
+        &req.topic,
+        &req.participants,
+        req.turn_cap,
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
+}
+
+/// A company's meetings, newest first — including the ones still waiting on you.
+async fn list_meetings(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT m.id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap, m.status,
+                m.decision, m.approval_id, m.created_at, m.decided_at
+         FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
+         WHERE m.company_id = ? ORDER BY m.created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let meetings: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                topic,
+                reason,
+                convener_agent_id,
+                convener_name,
+                turn_cap,
+                status,
+                decision,
+                approval_id,
+                created_at,
+                decided_at,
+            )| {
+                json!({
+                    "id": id, "topic": topic, "reason": reason,
+                    "convener_agent_id": convener_agent_id, "convener_name": convener_name,
+                    "turn_cap": turn_cap, "status": status, "decision": decision,
+                    "approval_id": approval_id,
+                    "created_at": created_at, "decided_at": decided_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({ "meetings": meetings })))
+}
+
+/// One meeting: who is in the room, the transcript, and the decision.
+async fn get_meeting(
+    State(state): State<AppState>,
+    Path(meeting_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type MeetingRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let row: Option<MeetingRow> = sqlx::query_as(
+        "SELECT m.id, m.company_id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap,
+                m.status, m.decision, m.approval_id, m.created_at, m.decided_at
+         FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
+         WHERE m.id = ?",
+    )
+    .bind(&meeting_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((
+        id,
+        company_id,
+        topic,
+        reason,
+        convener_agent_id,
+        convener_name,
+        turn_cap,
+        status,
+        decision,
+        approval_id,
+        created_at,
+        decided_at,
+    )) = row
+    else {
+        return Err(ApiError::NotFound("meeting"));
+    };
+    let participants: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT a.id, a.name, a.title FROM meeting_participants mp
+         JOIN agents a ON a.id = mp.agent_id
+         WHERE mp.meeting_id = ? ORDER BY mp.position",
+    )
+    .bind(&meeting_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let turns: Vec<(String, String, String, i64, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.agent_id, a.name, t.ordinal, t.content, t.created_at
+         FROM meeting_turns t JOIN agents a ON a.id = t.agent_id
+         WHERE t.meeting_id = ? ORDER BY t.ordinal",
+    )
+    .bind(&meeting_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "meeting": {
+            "id": id, "company_id": company_id, "topic": topic, "reason": reason,
+            "convener_agent_id": convener_agent_id, "convener_name": convener_name,
+            "turn_cap": turn_cap, "status": status, "decision": decision,
+            "approval_id": approval_id,
+            "created_at": created_at, "decided_at": decided_at,
+        },
+        "participants": participants.into_iter().map(|(id, name, title)| {
+            json!({ "id": id, "name": name, "title": title })
+        }).collect::<Vec<_>>(),
+        "turns": turns.into_iter().map(|(id, agent_id, name, ordinal, content, created_at)| {
+            json!({
+                "id": id, "agent_id": agent_id, "agent_name": name,
+                "ordinal": ordinal, "content": content, "created_at": created_at,
+            })
+        }).collect::<Vec<_>>(),
+    })))
+}
+
+// ---------- notifications: how the company reaches you (ADR-0020) ----------
+
+#[derive(Deserialize)]
+struct NotificationQuery {
+    /// Only what you haven't seen yet.
+    #[serde(default)]
+    unread: bool,
+    #[serde(default = "default_notification_limit")]
+    limit: i64,
+}
+
+fn default_notification_limit() -> i64 {
+    50
+}
+
+/// A company's notifications, newest first, with the unread count for the badge.
+async fn list_notifications(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Query(q): Query<NotificationQuery>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    let sql = if q.unread {
+        "SELECT id, kind, title, body, agent_id, subject_type, subject_id, approval_id, read_at, created_at
+         FROM notifications WHERE company_id = ? AND read_at IS NULL
+         ORDER BY created_at DESC LIMIT ?"
+    } else {
+        "SELECT id, kind, title, body, agent_id, subject_type, subject_id, approval_id, read_at, created_at
+         FROM notifications WHERE company_id = ? ORDER BY created_at DESC LIMIT ?"
+    };
+    let rows: Vec<Row> = sqlx::query_as(sql)
+        .bind(&company_id)
+        .bind(q.limit.clamp(1, 500))
+        .fetch_all(&state.pool)
+        .await?;
+    let (unread,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM notifications WHERE company_id = ? AND read_at IS NULL",
+    )
+    .bind(&company_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let notifications: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                kind,
+                title,
+                body,
+                agent_id,
+                subject_type,
+                subject_id,
+                approval_id,
+                read_at,
+                created_at,
+            )| {
+                json!({
+                    "id": id, "kind": kind, "title": title, "body": body,
+                    "agent_id": agent_id, "subject_type": subject_type, "subject_id": subject_id,
+                    "approval_id": approval_id, "read_at": read_at, "created_at": created_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(
+        json!({ "notifications": notifications, "unread": unread }),
+    ))
+}
+
+/// Mark one notification read. Idempotent: the first read wins.
+async fn read_notification(
+    State(state): State<AppState>,
+    Path(notification_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT company_id FROM notifications WHERE id = ?")
+            .bind(&notification_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((company_id,)) = row else {
+        return Err(ApiError::NotFound("notification"));
+    };
+    sqlx::query("UPDATE notifications SET read_at = ? WHERE id = ? AND read_at IS NULL")
+        .bind(now())
+        .bind(&notification_id)
+        .execute(&state.pool)
+        .await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": notification_id, "read": true })))
+}
+
+/// Clear the badge: mark everything in this company read.
+async fn read_all_notifications(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let done = sqlx::query(
+        "UPDATE notifications SET read_at = ? WHERE company_id = ? AND read_at IS NULL",
+    )
+    .bind(now())
+    .bind(&company_id)
+    .execute(&state.pool)
+    .await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "read": done.rows_affected() })))
+}
+
 // ---------- governance: lifecycle, approvals, budgets, config revisions ----------
 
 /// (company_id, name, title, reports_to, traits, custom_brief, requires_approval)
@@ -1666,6 +1972,19 @@ async fn decide_approval(
                 }
                 crate::runner::StartResult::ApprovalRequired { .. } => {}
             }
+        }
+    }
+    // A meeting an agent asked for: approving opens the room, rejecting closes
+    // the request and tells the agent that raised it (ADR-0020).
+    if kind == "meeting_request" {
+        let p: Value = serde_json::from_str(&payload)?;
+        if let Some(meeting_id) = p["meeting_id"].as_str() {
+            if approve {
+                crate::meeting::approve(&state, meeting_id).await?;
+            } else {
+                crate::meeting::decline(&state, meeting_id, req.note.as_deref()).await?;
+            }
+            result["meeting_id"] = json!(meeting_id);
         }
     }
     Ok(Json(result))

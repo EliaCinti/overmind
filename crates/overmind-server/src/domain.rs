@@ -201,6 +201,11 @@ pub mod event_kind {
     pub const CONVERSATION_CREATED: &str = "conversation.created";
     pub const MESSAGE_POSTED: &str = "message.posted";
     pub const ATTACHMENT_ADDED: &str = "attachment.added";
+    pub const MEETING_REQUESTED: &str = "meeting.requested";
+    pub const MEETING_CONVENED: &str = "meeting.convened";
+    pub const MEETING_DECIDED: &str = "meeting.decided";
+    pub const MEETING_DECLINED: &str = "meeting.declined";
+    pub const MEETING_FAILED: &str = "meeting.failed";
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";
     pub const BUDGET_BLOCKED: &str = "budget.blocked";

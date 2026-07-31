@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use tokio::sync::broadcast;
@@ -35,6 +35,12 @@ impl AppState {
         let _ = self
             .events
             .send(json!({ "type": "changed", "company_id": company_id }).to_string());
+    }
+
+    /// Push a typed event carrying content (a notification to surface, not just
+    /// "refetch"). Same channel, same "no listeners is fine" contract.
+    pub fn push(&self, event: Value) {
+        let _ = self.events.send(event.to_string());
     }
 }
 

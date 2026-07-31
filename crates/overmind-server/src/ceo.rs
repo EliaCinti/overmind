@@ -286,7 +286,10 @@ async fn post_system_message(
 }
 
 /// The org leader (an agent that reports to the human), if any — the "CEO".
-async fn leader_id(state: &AppState, company_id: &str) -> Result<Option<String>, CeoError> {
+pub(crate) async fn leader_id(
+    state: &AppState,
+    company_id: &str,
+) -> Result<Option<String>, CeoError> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT id FROM agents
          WHERE company_id = ? AND status = 'active' AND reports_to IS NULL
@@ -299,7 +302,7 @@ async fn leader_id(state: &AppState, company_id: &str) -> Result<Option<String>,
 }
 
 /// Resolve a teammate named in a plan (by name or title) to an active agent id.
-async fn resolve_teammate(
+pub(crate) async fn resolve_teammate(
     state: &AppState,
     company_id: &str,
     name: &str,
@@ -402,6 +405,9 @@ async fn run_agent_turn(
         .map(|m| format!("\n\nWhat the organization remembers:\n{m}"))
         .unwrap_or_default();
 
+    // Calls this agent sat in on are settled — it acts on them (ADR-0020).
+    let decisions_block = crate::meeting::decisions_block(state, agent_id).await;
+
     // Files the user attached — copied into the working directory below.
     let attachments: Vec<(String, String)> = sqlx::query_as(
         "SELECT filename, path FROM attachments
@@ -440,7 +446,7 @@ async fn run_agent_turn(
         .unwrap_or_default();
 
     let prompt = format!(
-        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\"}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Return an empty tasks array and no escalate when nothing is needed."
+        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets. Return an empty tasks array and omit escalate/meeting when nothing is needed."
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -452,40 +458,7 @@ async fn run_agent_turn(
     for (n, path) in &attachments {
         let _ = tokio::fs::copy(path, scratch.join(safe_name(n))).await;
     }
-    let agent_cmd =
-        state.config.agent_cmd.clone().unwrap_or_else(|| {
-            "claude -p \"$OVERMIND_TASK_PROMPT\" --output-format json".to_string()
-        });
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(&agent_cmd)
-        .current_dir(&scratch)
-        .env("OVERMIND_TASK_PROMPT", &prompt)
-        .env("OVERMIND_AGENT_TRAITS", &traits)
-        .env(
-            "OVERMIND_MEMORY_CONTEXT",
-            memory_context.as_deref().unwrap_or(""),
-        )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let child = cmd
-        .spawn()
-        .map_err(|e| CeoError::Invalid(format!("failed to spawn agent: {e}")))?;
-    let waited = tokio::time::timeout(
-        Duration::from_secs(state.config.session_timeout_secs),
-        child.wait_with_output(),
-    )
-    .await;
-    let output = match waited {
-        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Ok(Err(e)) => {
-            return Err(CeoError::Invalid(format!(
-                "failed to read agent output: {e}"
-            )));
-        }
-        Err(_) => return Err(CeoError::Invalid("agent turn timed out".into())),
-    };
+    let output = run_adapter(state, &scratch, &prompt, &traits, memory_context.as_deref()).await?;
 
     // Parse the plan. A missing/garbled plan degrades to "reply with the raw
     // output, open no tasks" rather than failing the turn.
@@ -596,11 +569,63 @@ async fn run_agent_turn(
             .await;
         }
     }
+
+    // A call the agent shouldn't make alone: it asks for a meeting. Nothing
+    // deliberates until the human approves it (ADR-0020). A malformed or
+    // impossible request is dropped rather than failing the whole turn.
+    if let Some(m) = plan.as_ref().and_then(|v| v.get("meeting"))
+        && let Some(req) = crate::meeting::Request::from_json(m)
+        && let Err(e) = crate::meeting::request(state, company_id, agent_id, &req).await
+    {
+        eprintln!("meeting requested by {name} could not be raised: {e}");
+    }
     Ok(())
 }
 
+/// Run the configured agent adapter with a prompt, in `cwd`, and return its raw
+/// stdout. Bounded by `session_timeout_secs` — an adapter that hangs can never
+/// hold a turn (or a meeting, ADR-0020) open forever. Shared by conversational
+/// turns and meetings.
+pub(crate) async fn run_adapter(
+    state: &AppState,
+    cwd: &std::path::Path,
+    prompt: &str,
+    traits: &str,
+    memory_context: Option<&str>,
+) -> Result<String, CeoError> {
+    let agent_cmd =
+        state.config.agent_cmd.clone().unwrap_or_else(|| {
+            "claude -p \"$OVERMIND_TASK_PROMPT\" --output-format json".to_string()
+        });
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(&agent_cmd)
+        .current_dir(cwd)
+        .env("OVERMIND_TASK_PROMPT", prompt)
+        .env("OVERMIND_AGENT_TRAITS", traits)
+        .env("OVERMIND_MEMORY_CONTEXT", memory_context.unwrap_or(""))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd
+        .spawn()
+        .map_err(|e| CeoError::Invalid(format!("failed to spawn agent: {e}")))?;
+    let waited = tokio::time::timeout(
+        Duration::from_secs(state.config.session_timeout_secs),
+        child.wait_with_output(),
+    )
+    .await;
+    match waited {
+        Ok(Ok(out)) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(Err(e)) => Err(CeoError::Invalid(format!(
+            "failed to read agent output: {e}"
+        ))),
+        Err(_) => Err(CeoError::Invalid("agent turn timed out".into())),
+    }
+}
+
 /// The last line of output that parses as a JSON object.
-fn last_json_object(output: &str) -> Option<Value> {
+pub(crate) fn last_json_object(output: &str) -> Option<Value> {
     for line in output.lines().rev() {
         let line = line.trim();
         if line.starts_with('{')

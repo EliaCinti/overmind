@@ -18,6 +18,11 @@ use crate::db::AppState;
 use crate::domain::{ExecutionKind, event_kind};
 use crate::governance;
 
+/// How a working agent asks for a meeting: a control file in its working
+/// directory (ADR-0020). A file, not stdout, because the last JSON line of a
+/// run belongs to the adapter's own result envelope.
+const MEETING_REQUEST_FILE: &str = "MEETING_REQUEST.json";
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
     #[error("{0} not found")]
@@ -176,8 +181,31 @@ pub async fn start_task(
             &json!({ "approval_id": approval_id, "agent_id": agent_id, "type": "task_start" }),
         )
         .await?;
+        // Reach the human the same way a meeting request does (ADR-0020): an
+        // approval nobody sees is an agent stuck waiting forever.
+        let who: Option<(String,)> = sqlx::query_as("SELECT name FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let who = who.map(|(n,)| n).unwrap_or_else(|| "An agent".into());
+        let notification = crate::notify::post(
+            &mut tx,
+            &company_id,
+            crate::notify::New {
+                kind: crate::notify::kind::APPROVAL_REQUESTED,
+                title: &format!("{who} wants to start a task"),
+                body: &format!(
+                    "Task: {title}\n\nThis agent is gated: it starts only once you approve."
+                ),
+                agent_id: Some(agent_id),
+                subject: Some(("task", task_id)),
+                approval_id: Some(&approval_id),
+            },
+        )
+        .await?;
         tx.commit().await?;
         state.notify(&company_id);
+        crate::notify::deliver(state, &company_id, &notification);
         return Ok(StartResult::ApprovalRequired { approval_id });
     }
 
@@ -285,6 +313,7 @@ pub async fn start_task(
         session_id: session_id.clone(),
         task_id: task_id.to_string(),
         company_id,
+        agent_id: agent_id.to_string(),
         worktree_dir: work_dir,
         title,
         description,
@@ -357,6 +386,7 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         session_id: session_id.to_string(),
         task_id: task_id.clone(),
         company_id: company_id.clone(),
+        agent_id: agent_id.clone(),
         worktree_dir: PathBuf::from(&workspace_path),
         title,
         description,
@@ -419,6 +449,7 @@ pub(crate) struct SessionContext {
     session_id: String,
     task_id: String,
     company_id: String,
+    agent_id: String,
     /// The agent's cwd: a git worktree for `code`, a scratch dir for `knowledge`.
     worktree_dir: PathBuf,
     title: String,
@@ -541,6 +572,9 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         })
         .unwrap_or_default();
 
+    // Calls this agent sat in on are settled — it works from them (ADR-0020).
+    let decisions_block = crate::meeting::decisions_block(&ctx.state, &ctx.agent_id).await;
+
     // How the agent is expected to deliver, per execution kind (ADR-0017).
     let deliver = match ctx.exec_kind {
         ExecutionKind::Code => {
@@ -550,15 +584,19 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             "Write your deliverable as one or more Markdown files in the current directory (e.g. ARTIFACT.md). Do not use git."
         }
     };
+    // Collaboration is expected: an agent that hits a call it should not make
+    // alone asks for a meeting instead of guessing (ADR-0020). Nothing happens
+    // until the human approves, so this is cheap to ask for and safe to ignore.
+    let meeting_hint = "\n\nIf finishing this needs a decision you should not take alone — it affects teammates' work, or you are blocked on a call above your role — write a file named MEETING_REQUEST.json in this directory: {\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}. It reaches the human for approval; do not wait for it, finish what you can.";
     let prompt = if resume {
         format!(
-            "You are resuming interrupted work on the task \"{}\".\n\n{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}",
-            ctx.title, ctx.description, memory_block
+            "You are resuming interrupted work on the task \"{}\".\n\n{}{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}",
+            ctx.title, ctx.description, memory_block, decisions_block
         )
     } else {
         format!(
-            "You are working on the task \"{}\".\n\n{}{}\n\n{deliver}",
-            ctx.title, ctx.description, memory_block
+            "You are working on the task \"{}\".\n\n{}{}{}\n\n{deliver}{meeting_hint}",
+            ctx.title, ctx.description, memory_block, decisions_block
         )
     };
 
@@ -758,7 +796,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                     .map(|t| t.is_file())
                     .unwrap_or(false);
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if !is_file || name.starts_with('.') {
+                // The meeting request is a control file, not a deliverable.
+                if !is_file || name.starts_with('.') || name == MEETING_REQUEST_FILE {
                     continue;
                 }
                 let (content, file_path, mime): (Option<String>, Option<String>, &str) =
@@ -857,6 +896,36 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     }
     tx.commit().await?;
     ctx.state.notify(&ctx.company_id);
+
+    // Collaboration (ADR-0020): while working, the agent may have hit a call it
+    // should not make alone and left a MEETING_REQUEST.json behind. Raising it
+    // notifies the human and waits for approval — nobody meets on their own.
+    // Best-effort: a malformed request never fails an otherwise done session.
+    let request_path = ctx.worktree_dir.join(MEETING_REQUEST_FILE);
+    if let Ok(text) = tokio::fs::read_to_string(&request_path).await {
+        // Remove it first, so it never lands in the diff or a resumed run.
+        let _ = tokio::fs::remove_file(&request_path).await;
+        match serde_json::from_str::<Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(crate::meeting::Request::from_json)
+        {
+            Some(req) => {
+                if let Err(e) =
+                    crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req).await
+                {
+                    eprintln!(
+                        "meeting requested by session {} refused: {e}",
+                        ctx.session_id
+                    );
+                }
+            }
+            None => eprintln!(
+                "session {} left an unreadable {MEETING_REQUEST_FILE}",
+                ctx.session_id
+            ),
+        }
+    }
 
     // Record what the organization just learned. Best-effort; never fatal.
     if f.session_status == "completed" {

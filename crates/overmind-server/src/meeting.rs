@@ -1,0 +1,918 @@
+//! ADR-0020 (builds on ADR-0019): inter-agent meetings.
+//!
+//! Agents collaborate on their own — a specialist opens a task for a teammate,
+//! escalates to the leader, works its own tasks. Sometimes that collaboration
+//! hits a call none of them should make alone. Then one of them **asks for a
+//! meeting**: it names the room and says why, in its own words.
+//!
+//! Nothing runs on that alone. The request raises a notification and an
+//! approval; the human decides. On approval — and only then — the agents
+//! deliberate among themselves: round-robin, at most `turn_cap` turns, always
+//! ending in a **recorded decision** (the chair must call it if nobody else
+//! does). The decision is audited, stored to organizational memory, and comes
+//! back as a notification.
+//!
+//! What this is *not*: a free-form group chat, and not something that spends a
+//! single token before you have said yes.
+
+use serde_json::{Value, json};
+
+use crate::audit;
+use crate::ceo::{CeoError, last_json_object, leader_id, resolve_teammate, run_adapter};
+use crate::db::AppState;
+use crate::domain::event_kind;
+use crate::notify;
+
+/// However long a caller asks for, a meeting never exceeds this many turns.
+const MAX_TURN_CAP: i64 = 12;
+
+/// The default when an agent asks for a meeting without saying how long.
+const DEFAULT_TURN_CAP: i64 = 6;
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn new_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+/// What an agent asks for when it wants colleagues in a room. The agent names
+/// people the way it knows them; the server resolves them against the roster.
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub topic: String,
+    /// Why the room is needed — this is what the human reads first.
+    pub reason: String,
+    pub participants: Vec<String>,
+    pub turn_cap: i64,
+}
+
+impl Request {
+    /// Parse the `meeting` object an agent emits — in a chat plan (ADR-0019) or
+    /// as `MEETING_REQUEST.json` in its working directory. Returns `None` for
+    /// anything without a topic: a meeting about nothing is not a request.
+    pub fn from_json(v: &Value) -> Option<Request> {
+        let topic = v.get("topic").and_then(Value::as_str)?.trim().to_string();
+        if topic.is_empty() {
+            return None;
+        }
+        let reason = v
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let participants = v
+            .get("participants")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let turn_cap = v
+            .get("turn_cap")
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_TURN_CAP);
+        Some(Request {
+            topic,
+            reason,
+            participants,
+            turn_cap,
+        })
+    }
+}
+
+/// An agent asks to bring colleagues together. Records the request, the
+/// approval that gates it, and the notification that reaches the human —
+/// atomically. Nothing deliberates until [`approve`] is called.
+///
+/// The convener is always in its own room. Named teammates are resolved by
+/// name or title; if none resolve, the org leader is brought in, because an
+/// agent asking for a meeting is at minimum asking for its boss.
+pub async fn request(
+    state: &AppState,
+    company_id: &str,
+    convener_agent_id: &str,
+    req: &Request,
+) -> Result<String, CeoError> {
+    let topic = req.topic.trim();
+    if topic.is_empty() {
+        return Err(CeoError::Invalid("a meeting needs a topic".into()));
+    }
+
+    // Build the room: the convener, then whoever it named, de-duplicated.
+    let mut room: Vec<String> = vec![convener_agent_id.to_string()];
+    for name in &req.participants {
+        if let Some(id) = resolve_teammate(state, company_id, name).await?
+            && !room.contains(&id)
+        {
+            room.push(id);
+        }
+    }
+    if room.len() < 2
+        && let Some(leader) = leader_id(state, company_id).await?
+        && !room.contains(&leader)
+    {
+        room.push(leader);
+    }
+    if room.len() < 2 {
+        return Err(CeoError::Invalid(
+            "a meeting needs at least two participants".into(),
+        ));
+    }
+    let turn_cap = req.turn_cap.clamp(1, MAX_TURN_CAP);
+
+    // Names for the human-readable notification.
+    let convener = agent_label(state, convener_agent_id).await?;
+    let mut labels = Vec::new();
+    for id in &room {
+        labels.push(agent_label(state, id).await?);
+    }
+    let roster = labels.join(", ");
+    let reason = if req.reason.trim().is_empty() {
+        "(no reason given)".to_string()
+    } else {
+        req.reason.trim().to_string()
+    };
+    let body = format!(
+        "Topic: {topic}\n\nWhy: {reason}\n\nIn the room: {roster}\n\nUp to {turn_cap} turns, then whoever chairs it must call the decision. Nothing runs until you approve."
+    );
+
+    let meeting_id = new_id();
+    let approval_id = new_id();
+    let mut tx = state.pool.begin().await?;
+    // The approval first: the meeting row points at it, and SQLite checks
+    // foreign keys as each statement runs, not at commit.
+    sqlx::query(
+        "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
+         VALUES (?, ?, 'meeting_request', 'pending', ?, ?, ?)",
+    )
+    .bind(&approval_id)
+    .bind(company_id)
+    .bind(json!({ "meeting_id": meeting_id }).to_string())
+    .bind(format!("{convener} asks to meet about \"{topic}\""))
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO meetings
+         (id, company_id, topic, reason, convener_agent_id, turn_cap, status, approval_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'requested', ?, ?)",
+    )
+    .bind(&meeting_id)
+    .bind(company_id)
+    .bind(topic)
+    .bind(&reason)
+    .bind(convener_agent_id)
+    .bind(turn_cap)
+    .bind(&approval_id)
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+    for (position, agent_id) in room.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO meeting_participants (meeting_id, agent_id, position) VALUES (?, ?, ?)",
+        )
+        .bind(&meeting_id)
+        .bind(agent_id)
+        .bind(position as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        event_kind::MEETING_REQUESTED,
+        &json!({
+            "meeting_id": meeting_id,
+            "convener_agent_id": convener_agent_id,
+            "topic": topic,
+            "turn_cap": turn_cap,
+            "participants": room,
+            "approval_id": approval_id,
+        }),
+    )
+    .await?;
+    let notification = notify::post(
+        &mut tx,
+        company_id,
+        notify::New {
+            kind: notify::kind::MEETING_REQUESTED,
+            title: &format!("{convener} wants to convene a meeting"),
+            body: &body,
+            agent_id: Some(convener_agent_id),
+            subject: Some(("meeting", &meeting_id)),
+            approval_id: Some(&approval_id),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    notify::deliver(state, company_id, &notification);
+
+    Ok(meeting_id)
+}
+
+/// Convene a meeting directly, without the approval gate — the human asking
+/// for it *is* the approval. Agents cannot reach this path; they go through
+/// [`request`].
+pub async fn convene(
+    state: &AppState,
+    company_id: &str,
+    topic: &str,
+    participant_ids: &[String],
+    turn_cap: i64,
+) -> Result<String, CeoError> {
+    let topic = topic.trim();
+    if topic.is_empty() {
+        return Err(CeoError::Invalid("a meeting needs a topic".into()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let participants: Vec<String> = participant_ids
+        .iter()
+        .filter(|id| seen.insert((*id).clone()))
+        .cloned()
+        .collect();
+    if participants.len() < 2 {
+        return Err(CeoError::Invalid(
+            "a meeting needs at least two participants".into(),
+        ));
+    }
+    for id in &participants {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM agents WHERE id = ? AND company_id = ?")
+                .bind(id)
+                .bind(company_id)
+                .fetch_optional(&state.pool)
+                .await?;
+        match row {
+            None => return Err(CeoError::NotFound("agent")),
+            Some((status,)) if status != "active" => {
+                return Err(CeoError::Invalid(format!("agent is {status}")));
+            }
+            _ => {}
+        }
+    }
+    let turn_cap = turn_cap.clamp(1, MAX_TURN_CAP);
+
+    let meeting_id = new_id();
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO meetings (id, company_id, topic, turn_cap, status, created_at)
+         VALUES (?, ?, ?, ?, 'open', ?)",
+    )
+    .bind(&meeting_id)
+    .bind(company_id)
+    .bind(topic)
+    .bind(turn_cap)
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+    for (position, agent_id) in participants.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO meeting_participants (meeting_id, agent_id, position) VALUES (?, ?, ?)",
+        )
+        .bind(&meeting_id)
+        .bind(agent_id)
+        .bind(position as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        event_kind::MEETING_CONVENED,
+        &json!({
+            "meeting_id": meeting_id,
+            "topic": topic,
+            "turn_cap": turn_cap,
+            "participants": participants,
+            "convened_by": "human",
+        }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    spawn_deliberation(state, company_id, &meeting_id);
+    Ok(meeting_id)
+}
+
+/// The human approved the request: the room opens and the agents deliberate.
+pub async fn approve(state: &AppState, meeting_id: &str) -> Result<(), CeoError> {
+    let row: Option<(String, String, String)> =
+        sqlx::query_as("SELECT company_id, status, topic FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((company_id, status, topic)) = row else {
+        return Err(CeoError::NotFound("meeting"));
+    };
+    if status != "requested" {
+        return Err(CeoError::Invalid(format!("meeting is already {status}")));
+    }
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("UPDATE meetings SET status = 'open' WHERE id = ? AND status = 'requested'")
+        .bind(meeting_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::MEETING_CONVENED,
+        &json!({ "meeting_id": meeting_id, "topic": topic, "convened_by": "approval" }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    spawn_deliberation(state, &company_id, meeting_id);
+    Ok(())
+}
+
+/// The human said no: the meeting never happens, and the agent that asked is
+/// told so in the same place it asked.
+pub async fn decline(
+    state: &AppState,
+    meeting_id: &str,
+    note: Option<&str>,
+) -> Result<(), CeoError> {
+    let row: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT company_id, status, topic, convener_agent_id FROM meetings WHERE id = ?",
+    )
+    .bind(meeting_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((company_id, status, topic, convener)) = row else {
+        return Err(CeoError::NotFound("meeting"));
+    };
+    if status != "requested" {
+        return Err(CeoError::Invalid(format!("meeting is already {status}")));
+    }
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE meetings SET status = 'declined', decided_at = ? WHERE id = ? AND status = 'requested'",
+    )
+    .bind(now())
+    .bind(meeting_id)
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::MEETING_DECLINED,
+        &json!({ "meeting_id": meeting_id, "note": note }),
+    )
+    .await?;
+    let body = match note {
+        Some(n) if !n.trim().is_empty() => {
+            format!("You declined the meeting on \"{topic}\": {}", n.trim())
+        }
+        _ => format!("You declined the meeting on \"{topic}\". It will not run."),
+    };
+    let notification = notify::post(
+        &mut tx,
+        &company_id,
+        notify::New {
+            kind: notify::kind::MEETING_DECLINED,
+            title: "Meeting declined",
+            body: &body,
+            agent_id: convener.as_deref(),
+            subject: Some(("meeting", meeting_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    notify::deliver(state, &company_id, &notification);
+    Ok(())
+}
+
+/// Run the deliberation in the background; the transcript and the decision
+/// land as they happen.
+fn spawn_deliberation(state: &AppState, company_id: &str, meeting_id: &str) {
+    let state = state.clone();
+    let company = company_id.to_string();
+    let id = meeting_id.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = run_meeting(&state, &company, &id).await {
+            eprintln!("meeting {id} failed: {e}");
+            // Never leave a meeting hanging open: record it and say so.
+            if let Err(e) = fail_meeting(&state, &company, &id, &e.to_string()).await {
+                eprintln!("could not mark meeting {id} failed: {e}");
+            }
+        }
+    });
+}
+
+/// "Iris (Security Engineer)" — how an agent is named to the human.
+async fn agent_label(state: &AppState, agent_id: &str) -> Result<String, CeoError> {
+    let row: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT a.name, a.title, ar.slug FROM agents a
+         JOIN archetypes ar ON ar.id = a.archetype_id WHERE a.id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((name, title, slug)) = row else {
+        return Err(CeoError::NotFound("agent"));
+    };
+    Ok(format!("{name} ({})", title.unwrap_or(slug)))
+}
+
+/// A participant, in speaking order.
+struct Speaker {
+    id: String,
+    name: String,
+    role: String,
+    traits: String,
+    brief: Option<String>,
+    is_leader: bool,
+}
+
+/// The participants of a meeting, in speaking order.
+async fn load_speakers(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+) -> Result<Vec<Speaker>, CeoError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT a.id, a.name, a.title, ar.slug, a.traits, a.custom_brief, a.reports_to
+         FROM meeting_participants mp
+         JOIN agents a ON a.id = mp.agent_id
+         JOIN archetypes ar ON ar.id = a.archetype_id
+         WHERE mp.meeting_id = ? AND a.company_id = ?
+         ORDER BY mp.position",
+    )
+    .bind(meeting_id)
+    .bind(company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, name, title, slug, traits, brief, reports_to)| Speaker {
+                id,
+                name,
+                role: title.unwrap_or(slug),
+                traits,
+                brief,
+                is_leader: reports_to.is_none(),
+            },
+        )
+        .collect())
+}
+
+/// Round-robin turns up to the cap, then a closing turn by the chair if nobody
+/// has decided yet.
+async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Result<(), CeoError> {
+    let meeting: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT topic, reason, turn_cap FROM meetings WHERE id = ? AND company_id = ?",
+    )
+    .bind(meeting_id)
+    .bind(company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((topic, reason, turn_cap)) = meeting else {
+        return Err(CeoError::NotFound("meeting"));
+    };
+    let speakers = load_speakers(state, company_id, meeting_id).await?;
+    if speakers.len() < 2 {
+        return Err(CeoError::Invalid(
+            "a meeting needs at least two participants".into(),
+        ));
+    }
+    // The chair: the org leader in the room, else whoever was listed first.
+    let chair = speakers.iter().position(|s| s.is_leader).unwrap_or(0);
+
+    let memory_context = state
+        .memory
+        .get_context(&state.config.data_dir.to_string_lossy(), &topic)
+        .await;
+
+    // One scratch dir for the whole meeting — agents deliberate here, they
+    // don't produce files (that is what tasks are for).
+    let room = state.config.data_dir.join("meetings").join(meeting_id);
+    tokio::fs::create_dir_all(&room)
+        .await
+        .map_err(|e| CeoError::Invalid(format!("cannot create meeting dir: {e}")))?;
+
+    let mut transcript: Vec<(String, String)> = Vec::new();
+    for ordinal in 0..turn_cap {
+        let speaker = &speakers[(ordinal as usize) % speakers.len()];
+        let prompt = turn_prompt(
+            &topic,
+            &reason,
+            speaker,
+            &speakers,
+            &transcript,
+            memory_context.as_deref(),
+            false,
+        );
+        let output = run_adapter(
+            state,
+            &room,
+            &prompt,
+            &speaker.traits,
+            memory_context.as_deref(),
+        )
+        .await?;
+        let turn = turn_json(&output);
+        let said = said_or_raw(turn.as_ref(), &output);
+        record_turn(state, company_id, meeting_id, &speaker.id, ordinal, &said).await?;
+        transcript.push((speaker.name.clone(), said));
+
+        // Someone settled it: the meeting ends early, on their decision.
+        if let Some(decision) = turn
+            .as_ref()
+            .and_then(|v| v.get("decision").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+        {
+            return conclude(state, company_id, meeting_id, &topic, decision).await;
+        }
+    }
+
+    // The cap is reached and nobody has called it: the chair closes.
+    let speaker = &speakers[chair];
+    let prompt = turn_prompt(
+        &topic,
+        &reason,
+        speaker,
+        &speakers,
+        &transcript,
+        memory_context.as_deref(),
+        true,
+    );
+    let output = run_adapter(
+        state,
+        &room,
+        &prompt,
+        &speaker.traits,
+        memory_context.as_deref(),
+    )
+    .await?;
+    let turn = turn_json(&output);
+    let said = said_or_raw(turn.as_ref(), &output);
+    record_turn(state, company_id, meeting_id, &speaker.id, turn_cap, &said).await?;
+
+    // The closing turn must decide. If the chair gives only prose, that prose
+    // is the call — a meeting never ends undecided while the chair spoke.
+    let decision = turn
+        .as_ref()
+        .and_then(|v| v.get("decision").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .unwrap_or(said);
+    if decision.trim().is_empty() {
+        return Err(CeoError::Invalid(
+            "the chair closed the meeting without a decision".into(),
+        ));
+    }
+    conclude(state, company_id, meeting_id, &topic, &decision).await
+}
+
+/// The agent's own contribution, picked out of its output.
+///
+/// Not simply the last JSON line: a real adapter prints its **own** result
+/// envelope (cost, usage, session id) after whatever the agent said, so the
+/// last object is usually the adapter's, not the agent's. We take the last one
+/// that actually looks like a turn.
+fn turn_json(output: &str) -> Option<Value> {
+    for line in output.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line)
+            && (v.get("say").is_some() || v.get("decision").is_some())
+        {
+            return Some(v);
+        }
+    }
+    // Nothing turn-shaped: fall back to the last object at all, so a lone
+    // `{"decision": ...}`-less reply still reaches the transcript.
+    last_json_object(output)
+}
+
+/// What the agent said this turn, degrading to its raw output if the JSON is
+/// missing or garbled — a malformed turn is still a turn, not a dead meeting.
+fn said_or_raw(turn: Option<&Value>, output: &str) -> String {
+    turn.and_then(|v| v.get("say").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| output.trim().to_string())
+}
+
+/// What an agent is asked at its turn. `closing` is the chair's final turn,
+/// where a decision is mandatory.
+///
+/// The prompt does most of the work of keeping a meeting *useful*. Round-robin
+/// agents drift into agreeing with each other — "+1", restating the last turn —
+/// and a room that only agrees reaches a decision without ever testing it. So
+/// each turn is asked for the thing only that role can see, agreement must
+/// carry its cost, and a decision has to be concrete enough to act on.
+fn turn_prompt(
+    topic: &str,
+    reason: &str,
+    speaker: &Speaker,
+    speakers: &[Speaker],
+    transcript: &[(String, String)],
+    memory_context: Option<&str>,
+    closing: bool,
+) -> String {
+    let room = speakers
+        .iter()
+        .map(|s| {
+            if s.id == speaker.id {
+                format!("- {} ({}) — you", s.name, s.role)
+            } else {
+                format!("- {} ({})", s.name, s.role)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let so_far = if transcript.is_empty() {
+        "(you speak first)".to_string()
+    } else {
+        transcript
+            .iter()
+            .map(|(who, what)| format!("{who}: {what}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let brief_line = speaker
+        .brief
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(|b| format!("\nYour brief: {b}"))
+        .unwrap_or_default();
+    let memory_block = memory_context
+        .map(|m| format!("\n\nWhat the organization remembers:\n{m}"))
+        .unwrap_or_default();
+
+    let why_line = if reason.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nWhy this room was called: {}", reason.trim())
+    };
+
+    let instruction = if closing {
+        "You are chairing this meeting and it has reached its turn limit. Close it. In \"say\", give the reasoning in one or two sentences: what the room actually converged on, and why it beats the alternative that was raised. In \"decision\", state the call itself — concrete and actionable, something a colleague could pick up tomorrow, not \"we should look into it\". A decision is REQUIRED — do not defer, do not ask for another meeting."
+    } else if transcript.is_empty() {
+        "You speak first. Do not restate the topic — everyone has read it. Frame the actual choice: the two or three real options on the table and the trade-off between them, seen from what your role is responsible for. Name the specific risk, cost or constraint that makes this a decision rather than an obvious call. Two or three sentences."
+    } else {
+        "Speak once, from what your role is responsible for — say the thing the others cannot see from where they sit. \
+         Do not agree without adding something: if you agree, name the condition, cost or risk that agreement carries. If you disagree, say why, concretely, and give the alternative you would take instead. \
+         Never restate a point already made; if you genuinely have nothing to add, say so in one line and defer. \
+         Set \"decision\" ONLY if the group has genuinely converged AND you can state a concrete, actionable call in one sentence. If you are the first to speak on it, you are almost certainly too early. Otherwise omit it and let the discussion continue."
+    };
+
+    format!(
+        "You are {name}, the {role} at an AI company, in a meeting with your colleagues.{brief_line}\n\n\
+         Meeting topic: {topic}{why_line}\n\n\
+         In the room:\n{room}\n\n\
+         The meeting so far:\n{so_far}{memory_block}\n\n\
+         {instruction}\n\n\
+         Respond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n\
+         {{\"say\": \"<your contribution>\", \"decision\": \"<the group's decision — omit unless settled>\"}}",
+        name = speaker.name,
+        role = speaker.role,
+    )
+}
+
+/// Append a contribution to the transcript. Turns are visible as they happen.
+async fn record_turn(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+    agent_id: &str,
+    ordinal: i64,
+    content: &str,
+) -> Result<(), CeoError> {
+    sqlx::query(
+        "INSERT INTO meeting_turns (id, meeting_id, agent_id, ordinal, content, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(new_id())
+    .bind(meeting_id)
+    .bind(agent_id)
+    .bind(ordinal)
+    .bind(content)
+    .bind(now())
+    .execute(&state.pool)
+    .await?;
+    state.notify(company_id);
+    Ok(())
+}
+
+/// The settled calls an agent sat in on, newest first. A meeting is only worth
+/// holding if it changes what happens next: this is how the decision follows
+/// each participant back into its own work — injected into the prompt of its
+/// next task run (ADR-0017) and of its next conversational turn (ADR-0019).
+pub async fn decisions_block(state: &AppState, agent_id: &str) -> String {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT m.topic, m.decision FROM meetings m
+         JOIN meeting_participants mp ON mp.meeting_id = m.id
+         WHERE mp.agent_id = ? AND m.status = 'decided' AND m.decision IS NOT NULL
+         ORDER BY m.decided_at DESC LIMIT 3",
+    )
+    .bind(agent_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    if rows.is_empty() {
+        return String::new();
+    }
+    let list = rows
+        .iter()
+        .map(|(topic, decision)| format!("- On \"{topic}\": {decision}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\n\nDecisions from meetings you took part in — these are settled, act on them and do not re-litigate:\n{list}"
+    )
+}
+
+/// Send every participant back to work with the decision in hand. The wakeup
+/// is a request, not a command: the scheduler still enforces autonomy and
+/// budget (ADR-0005/0012), so an agent that needs a human to start its work
+/// still needs one. What is guaranteed is that the decision is in front of it
+/// (see [`decisions_block`]).
+async fn wake_participants(
+    tx: &mut sqlx::SqliteConnection,
+    company_id: &str,
+    meeting_id: &str,
+    topic: &str,
+) -> Result<(), CeoError> {
+    let participants: Vec<(String,)> =
+        sqlx::query_as("SELECT agent_id FROM meeting_participants WHERE meeting_id = ?")
+            .bind(meeting_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    for (agent_id,) in participants {
+        let request_id = new_id();
+        sqlx::query(
+            "INSERT INTO agent_wakeup_requests (id, agent_id, source, reason, requested_at)
+             VALUES (?, ?, 'meeting', ?, ?)",
+        )
+        .bind(&request_id)
+        .bind(&agent_id)
+        .bind(format!("carry the decision on \"{topic}\" into your work"))
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+        audit::append(
+            tx,
+            Some(company_id),
+            None,
+            event_kind::WAKEUP_REQUESTED,
+            &json!({
+                "request_id": request_id,
+                "agent_id": agent_id,
+                "source": "meeting",
+                "meeting_id": meeting_id,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// End the meeting on a decision: recorded, audited, remembered, reported back
+/// to the human who allowed it — and pushed back into the work of everyone who
+/// was in the room.
+async fn conclude(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+    topic: &str,
+    decision: &str,
+) -> Result<(), CeoError> {
+    let convener: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT convener_agent_id FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let convener = convener.and_then(|(c,)| c);
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE meetings SET status = 'decided', decision = ?, decided_at = ?
+         WHERE id = ? AND status = 'open'",
+    )
+    .bind(decision)
+    .bind(now())
+    .bind(meeting_id)
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        event_kind::MEETING_DECIDED,
+        &json!({ "meeting_id": meeting_id, "decision": decision }),
+    )
+    .await?;
+    // Everyone who spoke now goes back to work with the decision in hand.
+    wake_participants(&mut tx, company_id, meeting_id, topic).await?;
+    let notification = notify::post(
+        &mut tx,
+        company_id,
+        notify::New {
+            kind: notify::kind::MEETING_DECIDED,
+            title: &format!("Decided: {topic}"),
+            body: decision,
+            agent_id: convener.as_deref(),
+            subject: Some(("meeting", meeting_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    notify::deliver(state, company_id, &notification);
+
+    // Why the company decided this outlives the meeting (ADR-0013).
+    // Best-effort: no memory server configured is a normal, silent no-op.
+    state
+        .memory
+        .store_decision(
+            decision,
+            &format!("Decided in a meeting on \"{topic}\"."),
+            company_id,
+        )
+        .await;
+    Ok(())
+}
+
+/// A meeting that could not run (adapter down, timeout) is closed as failed
+/// rather than left open forever — and you are told, because you approved it.
+async fn fail_meeting(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+    reason: &str,
+) -> Result<(), CeoError> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT topic, convener_agent_id FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let (topic, convener) = row.unwrap_or_else(|| ("the meeting".to_string(), None));
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE meetings SET status = 'failed', decided_at = ? WHERE id = ? AND status = 'open'",
+    )
+    .bind(now())
+    .bind(meeting_id)
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        event_kind::MEETING_FAILED,
+        &json!({ "meeting_id": meeting_id, "reason": reason }),
+    )
+    .await?;
+    let notification = notify::post(
+        &mut tx,
+        company_id,
+        notify::New {
+            kind: notify::kind::MEETING_FAILED,
+            title: &format!("Meeting could not run: {topic}"),
+            body: reason,
+            agent_id: convener.as_deref(),
+            subject: Some(("meeting", meeting_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    notify::deliver(state, company_id, &notification);
+    Ok(())
+}
