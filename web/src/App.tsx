@@ -21,6 +21,7 @@ import { TaskDetail } from "./components/TaskDetail";
 import { Toaster } from "./components/Toaster";
 import { HireAgentDialog } from "./components/HireAgentDialog";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
+import { ConnectRepoDialog } from "./components/ConnectRepoDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Spinner } from "./components/ui/primitives";
 
@@ -44,6 +45,7 @@ export default function App() {
   const [hireOpen, setHireOpen] = useState(false);
   const [hireManager, setHireManager] = useState<string | null>(null);
   const [taskOpen, setTaskOpen] = useState(false);
+  const [repoOpen, setRepoOpen] = useState(false);
   const [tick, setTick] = useState(0); // bumped on every live change → drives refetch
 
   // Notifications: toasts as they arrive, and a signal that opens the inbox.
@@ -118,9 +120,7 @@ export default function App() {
         [
           // A later word on the same subject retires the earlier one: once a
           // meeting is decided, "waiting on you" is a lie on screen.
-          ...current.filter(
-            (t) => t.id !== notification.id && !sameSubject(t, notification),
-          ),
+          ...current.filter((t) => t.id !== notification.id && !sameSubject(t, notification)),
           notification,
         ].slice(-4),
       );
@@ -140,11 +140,12 @@ export default function App() {
 
   const bump = () => setTick((n) => n + 1);
 
-  const selectedCompany = companies.find((c) => c.id === companyId) ?? null;
   // A runnable goal: the first goal of a project that has a primary workspace.
+  // Only `code` tasks need one — a company with no repo is fully usable for
+  // knowledge work (ADR-0017), so this gates the Code option, never the app.
   const runnableGoalId =
     projects.find((p) => p.workspaces.some((w) => w.is_primary))?.goals[0]?.id ?? null;
-  const needsWorkspace = !!companyId && runnableGoalId === null;
+  const hasRepo = runnableGoalId !== null;
 
   const afterCompanyCreated = async (id: string) => {
     const cs = await api.listCompanies();
@@ -169,10 +170,10 @@ export default function App() {
         onNewCompany={() => setCompanyId(null)}
         onHire={() => openHire(null)}
         onNewTask={() => setTaskOpen(true)}
-        canCreateTask={runnableGoalId !== null}
+        canCreateTask={!!companyId}
         view={view}
         onViewChange={setView}
-        showViews={!!companyId && !needsWorkspace}
+        showViews={!!companyId}
         onApprovalDecided={afterDecision}
         inboxSignal={inboxSignal}
         onOpenMeeting={openMeeting}
@@ -182,19 +183,20 @@ export default function App() {
         onToggleTheme={toggle}
       />
 
-      {!companyId || needsWorkspace ? (
-        <Onboarding
-          company={selectedCompany}
-          needsWorkspace={needsWorkspace}
-          onCompanyCreated={afterCompanyCreated}
-          onReady={() => companyId && loadCompany(companyId)}
-        />
+      {!companyId ? (
+        <Onboarding onDone={afterCompanyCreated} />
       ) : (
         <main className="flex flex-1 flex-col overflow-hidden pt-4">
           {view === "chat" ? (
             <Chat companyId={companyId} agents={agents} tick={tick} onChanged={bump} />
           ) : view === "board" ? (
-            <Board tasks={tasks} agents={agents} onOpenTask={setOpenTask} />
+            <Board
+              tasks={tasks}
+              agents={agents}
+              onOpenTask={setOpenTask}
+              hasRepo={hasRepo}
+              onConnectRepo={() => setRepoOpen(true)}
+            />
           ) : view === "meetings" ? (
             <Meetings
               companyId={companyId}
@@ -204,12 +206,7 @@ export default function App() {
               onSelect={setSelectedMeeting}
             />
           ) : (
-            <OrgChart
-              agents={agents}
-              budgets={budgets}
-              onChanged={bump}
-              onHireUnder={openHire}
-            />
+            <OrgChart agents={agents} budgets={budgets} onChanged={bump} onHireUnder={openHire} />
           )}
         </main>
       )}
@@ -248,6 +245,16 @@ export default function App() {
             companyId={companyId}
             goalId={runnableGoalId}
             onCreated={bump}
+            onConnectRepo={() => {
+              setTaskOpen(false);
+              setRepoOpen(true);
+            }}
+          />
+          <ConnectRepoDialog
+            open={repoOpen}
+            onOpenChange={setRepoOpen}
+            companyId={companyId}
+            onConnected={bump}
           />
         </>
       )}

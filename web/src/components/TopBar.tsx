@@ -46,7 +46,7 @@ export function TopBar({
   view: View;
   onViewChange: (v: View) => void;
   showViews: boolean;
-  onApprovalDecided: () => void;
+  onApprovalDecided: (approvalId?: string) => void;
   inboxSignal: number;
   onOpenMeeting: (meetingId: string) => void;
   connected: boolean;
