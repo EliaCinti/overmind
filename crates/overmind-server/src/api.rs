@@ -13,24 +13,49 @@ use crate::domain::{AgentTraits, TaskStatus, TraitsPatch, event_kind};
 /// The full application: JSON API under `/api`, the live-update WebSocket at
 /// `/ws`, and (when built) the SPA served at the root with history fallback.
 pub fn app(state: AppState) -> Router {
-    let mut router = Router::new()
-        .nest("/api", api_router())
-        .route("/ws", get(crate::ws::handler));
+    let mut router = Router::new().nest("/api", api_router()).route(
+        "/ws",
+        get(crate::ws::handler).layer(axum::middleware::from_fn(crate::ws::guard_origin)),
+    );
 
     // Serve the built frontend if present; unknown paths fall back to
     // index.html so client-side routing works. Absent in API-only/dev mode
     // (Vite's dev server proxies /api and /ws to us instead).
+    // CORS is a **development-only** affordance, and deliberately absent in
+    // production. Overmind has no authentication and its API starts tasks that
+    // run a CLI on this machine, so running "only on localhost" is not the
+    // protection it sounds like: the browser is the attack surface, not the
+    // network. With a permissive policy, any page you happen to have open can
+    // POST to 127.0.0.1:7070 and start a task here.
+    //
+    // Serving the SPA ourselves means the UI is same-origin and needs no CORS
+    // at all; without the layer, a cross-origin JSON request fails its
+    // preflight and the browser refuses it. In dev the UI lives on Vite's
+    // origin, so we allow exactly that one.
+    //
+    // If you ever "fix a CORS error" by widening this, put authentication in
+    // first (M10).
     if state.config.web_dir.is_dir() {
         let index = state.config.web_dir.join("index.html");
         router = router.fallback_service(
             tower_http::services::ServeDir::new(&state.config.web_dir)
                 .fallback(tower_http::services::ServeFile::new(index)),
         );
+    } else {
+        use tower_http::cors::{Any, CorsLayer};
+        let dev_origins = [
+            "http://localhost:5173".parse().expect("static origin"),
+            "http://127.0.0.1:5173".parse().expect("static origin"),
+        ];
+        router = router.layer(
+            CorsLayer::new()
+                .allow_origin(dev_origins)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
     }
 
-    router
-        .layer(tower_http::cors::CorsLayer::permissive())
-        .with_state(state)
+    router.with_state(state)
 }
 
 fn api_router() -> Router<AppState> {

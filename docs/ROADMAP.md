@@ -155,7 +155,7 @@ Everything on screen must speak the chosen language — not just the UI chrome. 
 ## Known gaps — carried deliberately, not forgotten
 
 - **Chat and meeting turns do not reserve budget.** Task checkout has enforced budget reservation since M6; conversational turns (M12) and meeting turns (M13) do not. A meeting can spend up to 13 adapter runs without the agent's monthly cap being consulted. With the CEO now proposing teams and teams holding meetings, **this is the most pressing hole.**
-- **No authentication of any kind.** Fine while bound to loopback; anything beyond that is unauthenticated access to an API that spawns processes. See M10 and `docs/adr/0014-docker-deployment.md`.
+- **No authentication of any kind.** For a single user on their own machine this is the right trade — the boundary is the machine, and anyone who has it can run the CLI directly. It stops being fine the moment the port is reachable by anyone else: the API spawns processes. Compose binds loopback only; the browser boundary (CORS + WebSocket origin) is held by `tests/browser_boundary.rs`. Real auth is M10, and it is what a shared or hosted Overmind needs first.
 - **Declared permissions are not policed** (`repo:write`, `web:read`, …) — honest by design until M10 sandboxing.
 - **No quorum on meeting requests** — one agent convenes. Deliberate: seconding would burn an adapter turn per invitee *before* the human answers. Mitigated by the M13.5 limits instead.
 

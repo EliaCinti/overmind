@@ -22,5 +22,5 @@ Paperclip ships Docker for two distinct jobs: **deployment** (one image, `docker
 ## Consequences
 
 - "Run anywhere" with `docker compose up --build`; the healthcheck hits `/api/health`.
-- The build wasn't verified on the machine that authored it (Docker daemon was down); it must be validated with a real `docker build` before relying on it. [To verify: `docker build -t overmind .`]
+- Verified: `docker build` succeeds (web + Rust release + runtime), the container serves the API (`/api/health`) and the SPA, and the bundled toolchain is present (git 2.39, gh 2.96, node 22, python3, ripgrep).
 - M10 gains a concrete direction: agent isolation via containers, and ARCHITECTURE.md's sandbox-exec note is superseded by this ADR.
