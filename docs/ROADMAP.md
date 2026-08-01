@@ -142,14 +142,15 @@ A company was born empty: you had to know what an "archetype" was before anythin
 - **UI:** the proposal is drawn as the org chart it would become — same geometry, provisional, each hire carrying its reason; dropping someone leaves them struck and quiet so you can see what you are refusing. First run offers the two roads, asymmetric on purpose.
 - **Accept:** the CEO proposes, nothing is hired until you accept, a dropped member stays dropped, the tree is wired ✓ — `tests/org_proposal.rs`.
 
-## M16 — Italian, and the language as a first-class setting `in progress`
+## M16 — Italian, and the language as a first-class setting `done`
 Everything on screen must speak the chosen language — not just the UI chrome. What you read comes from **three places**, and only one is a dictionary.
 
 - ✅ **A · The language exists and is remembered.** Stored **on the company**, not the browser: the server needs it to instruct agents. Migration + endpoint + a language menu in the top bar (names in their own language — *Italiano*, *English* — **never flags**: flags are countries, not languages). Sets `<html lang>`.
 - ✅ **B · Agents speak it.** One line in the task, chat and meeting prompts. Smallest change, largest visible effect: the CEO, the meetings and the team proposals all switch language.
-- 🟡 **C · The interface.** `lib/i18n.ts` shipped — a nested dictionary, a typed `useT()` (an unknown key fails the build), English fallback per string, and `useFormats()` for money and dates. Top bar, org chart and the team proposal are translated; **Chat, Board, Meetings, the inbox and the dialogs are not yet**. The remaining work is mechanical.
-- ☐ **D · Server-generated prose.** Notifications carry a `kind` + **structured params** instead of a composed sentence; the UI writes the sentence in the right language. Old rows keep `title`/`body` as a fallback. This is what makes the system translatable *by construction* rather than translated after the fact.
-- ✅ Alongside: **currency and dates** — budgets render as `20,00 €` under `it-IT`, `€20.00` under `en-US`.
+- ✅ **C · The interface.** `lib/i18n.ts` — a nested dictionary, a typed `useT()` (an unknown key fails the build), English fallback per string. Every surface: chat, board, meetings, inbox, org chart, task detail, all four dialogs, onboarding. Enum-shaped tables (`status`, `priority`, `autonomy`) are keyed by the server's own values, so `` t(`status.${task.status}`) `` type-checks and **a status added server-side fails the build until every language names it**.
+- ✅ **D · Server-generated prose.** Notifications carry `kind` + **structured params** instead of a composed sentence; the client writes the sentence. Agent-authored prose (a reason, a decision) travels inside the params untouched — it is already in the right language. `title`/`body` stay as the durable record and the fallback for rows written before the column and for kinds a client does not know. This is what makes the system translatable *by construction* rather than translated after the fact.
+- ✅ Alongside: **currency and time** — `20,00 €` under `it-IT`, `€20.00` under `en-US`; relative time is worded by `Intl.RelativeTimeFormat`, which knows "un minuto fa" but "2 minuti fa" and every other language's rules that a table of `{n}m ago` strings would get wrong.
+- ✅ **First run follows the browser.** Before a company exists there is no company language to read, so onboarding uses `navigator.languages` and the company is created speaking it.
 - Two layout defects the longer Italian surfaced and fixed: buttons wrapped their own labels (`whitespace-nowrap` is now on the primitive), and the top bar overflowed — the language control is icon-only, as a rarely-used setting should be.
 - **Accept:** switch to Italian and the chrome, the inbox and the CEO's replies are all Italian; reload and it holds.
 

@@ -1925,14 +1925,15 @@ async fn list_notifications(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
     );
     let sql = if q.unread {
-        "SELECT id, kind, title, body, agent_id, subject_type, subject_id, approval_id, read_at, created_at
+        "SELECT id, kind, title, body, params, agent_id, subject_type, subject_id, approval_id, read_at, created_at
          FROM notifications WHERE company_id = ? AND read_at IS NULL
          ORDER BY created_at DESC LIMIT ?"
     } else {
-        "SELECT id, kind, title, body, agent_id, subject_type, subject_id, approval_id, read_at, created_at
+        "SELECT id, kind, title, body, params, agent_id, subject_type, subject_id, approval_id, read_at, created_at
          FROM notifications WHERE company_id = ? ORDER BY created_at DESC LIMIT ?"
     };
     let rows: Vec<Row> = sqlx::query_as(sql)
@@ -1954,6 +1955,7 @@ async fn list_notifications(
                 kind,
                 title,
                 body,
+                params,
                 agent_id,
                 subject_type,
                 subject_id,
@@ -1963,6 +1965,10 @@ async fn list_notifications(
             )| {
                 json!({
                     "id": id, "kind": kind, "title": title, "body": body,
+                    // Rows written before M16 have no params; the client falls
+                    // back to the stored title and body for those.
+                    "params": params
+                        .and_then(|p: String| serde_json::from_str::<Value>(&p).ok()),
                     "agent_id": agent_id, "subject_type": subject_type, "subject_id": subject_id,
                     "approval_id": approval_id, "read_at": read_at, "created_at": created_at,
                 })

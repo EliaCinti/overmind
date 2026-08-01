@@ -241,6 +241,15 @@ pub async fn request(
             kind: notify::kind::MEETING_REQUESTED,
             title: &format!("{convener} wants to convene a meeting"),
             body: &body,
+            // `reason` is the convener's own words — passed through, never
+            // re-worded. Everything else is scaffolding the client can phrase.
+            params: json!({
+                "agent": convener,
+                "topic": topic,
+                "reason": reason,
+                "roster": roster,
+                "turnCap": turn_cap,
+            }),
             agent_id: Some(convener_agent_id),
             subject: Some(("meeting", &meeting_id)),
             approval_id: Some(&approval_id),
@@ -424,6 +433,10 @@ pub async fn decline(
             kind: notify::kind::MEETING_DECLINED,
             title: "Meeting declined",
             body: &body,
+            params: json!({
+                "topic": topic,
+                "note": note.map(str::trim).filter(|n| !n.is_empty()),
+            }),
             agent_id: convener.as_deref(),
             subject: Some(("meeting", meeting_id)),
             approval_id: None,
@@ -558,19 +571,17 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot create meeting dir: {e}")))?;
 
+    let agenda = Agenda {
+        language: &language,
+        topic: &topic,
+        reason: &reason,
+        speakers: &speakers,
+        memory_context: memory_context.as_deref(),
+    };
     let mut transcript: Vec<(String, String)> = Vec::new();
     for ordinal in 0..turn_cap {
         let speaker = &speakers[(ordinal as usize) % speakers.len()];
-        let prompt = turn_prompt(
-            &language,
-            &topic,
-            &reason,
-            speaker,
-            &speakers,
-            &transcript,
-            memory_context.as_deref(),
-            false,
-        );
+        let prompt = turn_prompt(&agenda, speaker, &transcript, false);
         let output = run_adapter(
             state,
             &room,
@@ -610,16 +621,7 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
 
     // The cap is reached and nobody has called it: the chair closes.
     let speaker = &speakers[chair];
-    let prompt = turn_prompt(
-        &language,
-        &topic,
-        &reason,
-        speaker,
-        &speakers,
-        &transcript,
-        memory_context.as_deref(),
-        true,
-    );
+    let prompt = turn_prompt(&agenda, speaker, &transcript, true);
     let output = run_adapter(
         state,
         &room,
@@ -690,16 +692,30 @@ fn said_or_raw(turn: Option<&Value>, output: &str) -> String {
 /// and a room that only agrees reaches a decision without ever testing it. So
 /// each turn is asked for the thing only that role can see, agreement must
 /// carry its cost, and a decision has to be concrete enough to act on.
+/// What every turn of one meeting shares. The room, the topic and what the
+/// organization remembers do not change between turns — only who is speaking
+/// and what has been said so far.
+struct Agenda<'a> {
+    language: &'a str,
+    topic: &'a str,
+    reason: &'a str,
+    speakers: &'a [Speaker],
+    memory_context: Option<&'a str>,
+}
+
 fn turn_prompt(
-    language: &str,
-    topic: &str,
-    reason: &str,
+    agenda: &Agenda<'_>,
     speaker: &Speaker,
-    speakers: &[Speaker],
     transcript: &[(String, String)],
-    memory_context: Option<&str>,
     closing: bool,
 ) -> String {
+    let Agenda {
+        language,
+        topic,
+        reason,
+        speakers,
+        memory_context,
+    } = *agenda;
     let room = speakers
         .iter()
         .map(|s| {
@@ -938,6 +954,9 @@ async fn conclude(
             kind: notify::kind::MEETING_DECIDED,
             title: &format!("Decided: {topic}"),
             body: decision,
+            // The decision is the room's own wording; only the label around it
+            // is ours.
+            params: json!({ "topic": topic, "decision": decision }),
             agent_id: convener.as_deref(),
             subject: Some(("meeting", meeting_id)),
             approval_id: None,
@@ -1005,6 +1024,7 @@ async fn drop_meeting(
             kind: notify::kind::MEETING_DROPPED,
             title: &format!("No decision needed: {topic}"),
             body: &format!("{who} closed the room: {why}"),
+            params: json!({ "agent": who, "topic": topic, "why": why }),
             agent_id: convener.as_deref(),
             subject: Some(("meeting", meeting_id)),
             approval_id: None,
@@ -1055,6 +1075,7 @@ async fn fail_meeting(
             kind: notify::kind::MEETING_FAILED,
             title: &format!("Meeting could not run: {topic}"),
             body: reason,
+            params: json!({ "topic": topic, "reason": reason }),
             agent_id: convener.as_deref(),
             subject: Some(("meeting", meeting_id)),
             approval_id: None,

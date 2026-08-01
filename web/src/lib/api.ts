@@ -71,8 +71,11 @@ export interface AgentBudget {
 export interface Notification {
   id: string;
   kind: string;
+  /** Server-composed English. The fallback when `params` is absent (M16). */
   title: string;
   body: string;
+  /** The values the sentence is made of, so we can word it in any language. */
+  params: Record<string, string | number | null> | null;
   agent_id: string | null;
   subject_type: string | null;
   subject_id: string | null;

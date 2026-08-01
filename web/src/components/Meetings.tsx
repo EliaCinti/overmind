@@ -5,7 +5,8 @@ import type { Meeting, MeetingDetail, MeetingStatus } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/primitives";
-import { cn, timeAgo } from "../lib/utils";
+import { useFormats, useT } from "../lib/i18n";
+import { cn } from "../lib/utils";
 
 /**
  * Meetings (ADR-0020): agents ask for a room when a call needs more than one
@@ -25,6 +26,8 @@ export function Meetings({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
 }) {
+  const t = useT();
+  const { timeAgo } = useFormats();
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [busy, setBusy] = useState(false);
@@ -78,11 +81,8 @@ export function Meetings({
       <div className="flex h-full items-center justify-center px-6 pb-6">
         <div className="max-w-sm text-center">
           <Users className="mx-auto h-8 w-8 text-muted-foreground/40" />
-          <p className="mt-3 text-sm font-medium">No meetings yet</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Agents ask for one when they hit a call none of them should make alone. You approve it
-            first — nothing runs before that.
-          </p>
+          <p className="mt-3 text-sm font-medium">{t("meetings.emptyTitle")}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{t("meetings.emptyBody")}</p>
         </div>
       </div>
     );
@@ -108,8 +108,10 @@ export function Meetings({
               <StatusPill status={m.status} />
             </div>
             <p className="mt-1 truncate text-xs text-muted-foreground">
-              {m.convener_name ? `${m.convener_name} asked` : "You convened"} ·{" "}
-              {timeAgo(m.created_at)}
+              {m.convener_name
+                ? t("meetings.asked", { name: m.convener_name })
+                : t("meetings.youConvened")}{" "}
+              · {timeAgo(m.created_at)}
             </p>
           </button>
         ))}
@@ -119,7 +121,7 @@ export function Meetings({
       <div className="flex min-w-0 flex-1 flex-col overflow-y-auto rounded-lg border border-border bg-card">
         {!detail ? (
           <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
-            Select a meeting
+            {t("meetings.select")}
           </div>
         ) : (
           <>
@@ -130,7 +132,7 @@ export function Meetings({
               </div>
               {detail.meeting.reason && (
                 <p className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">
-                  <span className="font-medium text-foreground">Why: </span>
+                  <span className="font-medium text-foreground">{t("meetings.why")}</span>
                   {detail.meeting.reason}
                 </p>
               )}
@@ -142,15 +144,16 @@ export function Meetings({
                   </Badge>
                 ))}
                 <span className="mono ml-1 text-xs text-muted-foreground">
-                  cap {detail.meeting.turn_cap}
+                  {t("meetings.cap", { n: detail.meeting.turn_cap })}
                 </span>
               </div>
 
               {detail.meeting.status === "requested" && detail.meeting.approval_id && (
                 <div className="mt-4 flex items-center gap-2 rounded-md border border-primary/40 bg-primary/[0.04] p-3">
                   <p className="flex-1 text-sm">
-                    {detail.meeting.convener_name ?? "An agent"} is waiting on you. Nothing has run
-                    yet.
+                    {t("meetings.waiting", {
+                      name: detail.meeting.convener_name ?? t("meetings.anAgent"),
+                    })}
                   </p>
                   <Button
                     size="sm"
@@ -159,7 +162,7 @@ export function Meetings({
                     onClick={() => decide(detail.meeting.approval_id!, "reject")}
                   >
                     <X className="h-4 w-4" />
-                    Reject
+                    {t("common.reject")}
                   </Button>
                   <Button
                     size="sm"
@@ -168,7 +171,7 @@ export function Meetings({
                     onClick={() => decide(detail.meeting.approval_id!, "approve")}
                   >
                     <Check className="h-4 w-4" />
-                    Approve
+                    {t("common.approve")}
                   </Button>
                 </div>
               )}
@@ -177,7 +180,7 @@ export function Meetings({
             {/* transcript */}
             <div className="flex flex-1 flex-col gap-3 px-5 py-4">
               {detail.turns.length === 0 && detail.meeting.status !== "requested" && (
-                <p className="text-sm text-muted-foreground">No turns yet.</p>
+                <p className="text-sm text-muted-foreground">{t("meetings.noTurns")}</p>
               )}
               {detail.turns.map((t) => (
                 <motion.div
@@ -200,7 +203,7 @@ export function Meetings({
               {detail.meeting.status === "open" && (
                 <div className="flex items-center gap-2 pl-10 text-xs text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  deliberating…
+                  {t("meetings.deliberating")}
                 </div>
               )}
             </div>
@@ -210,13 +213,12 @@ export function Meetings({
                 <div className="flex items-center gap-2">
                   <Gavel className="h-4 w-4 text-status-done" />
                   <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Decision
+                    {t("meetings.decision")}
                   </p>
                 </div>
                 <p className="mt-1.5 whitespace-pre-wrap text-sm">{detail.meeting.decision}</p>
                 <p className="mt-2 text-xs text-muted-foreground">
-                  Everyone in the room carries this into their work · {""}
-                  {timeAgo(detail.meeting.decided_at)}
+                  {t("meetings.carried")} · {timeAgo(detail.meeting.decided_at)}
                 </p>
               </div>
             )}
@@ -228,14 +230,16 @@ export function Meetings({
 }
 
 function StatusPill({ status }: { status: MeetingStatus }) {
-  const map: Record<MeetingStatus, { label: string; tone: string; Icon?: typeof Users }> = {
-    requested: { label: "Waiting on you", tone: "var(--color-status-todo)", Icon: Users },
-    open: { label: "In session", tone: "var(--color-status-in_progress)", Icon: Loader2 },
-    decided: { label: "Decided", tone: "var(--color-status-done)", Icon: Gavel },
-    declined: { label: "Declined", tone: "var(--color-muted-foreground)", Icon: Ban },
-    failed: { label: "Failed", tone: "var(--color-destructive)", Icon: AlertTriangle },
+  const t = useT();
+  const map: Record<MeetingStatus, { tone: string; Icon?: typeof Users }> = {
+    requested: { tone: "var(--color-status-todo)", Icon: Users },
+    open: { tone: "var(--color-status-in_progress)", Icon: Loader2 },
+    decided: { tone: "var(--color-status-done)", Icon: Gavel },
+    declined: { tone: "var(--color-muted-foreground)", Icon: Ban },
+    failed: { tone: "var(--color-destructive)", Icon: AlertTriangle },
   };
-  const { label, tone, Icon } = map[status];
+  const { tone, Icon } = map[status];
+  const label = t(`meetingStatus.${status}`);
   return (
     <Badge tone={tone} className="shrink-0">
       {Icon && <Icon className={cn("h-3 w-3", status === "open" && "animate-spin")} />}

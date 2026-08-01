@@ -289,6 +289,7 @@ pub async fn start_task(
                 body: &format!(
                     "Task: {title}\n\nThis agent is gated: it starts only once you approve."
                 ),
+                params: serde_json::json!({ "agent": who, "task": title }),
                 agent_id: Some(agent_id),
                 subject: Some(("task", task_id)),
                 approval_id: Some(&approval_id),

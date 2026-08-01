@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { X } from "lucide-react";
 import type { Notification } from "../lib/api";
+import { useNotificationText, useT } from "../lib/i18n";
 
 /**
  * Live notifications, surfaced the moment they arrive over `/ws` (ADR-0020).
@@ -37,6 +38,8 @@ function Toast({
   onDismiss: (id: string) => void;
   onOpen: () => void;
 }) {
+  const t = useT();
+  const text = useNotificationText()(toast);
   // Anything that needs a decision stays until you deal with it.
   const sticky = !!toast.approval_id;
   useEffect(() => {
@@ -56,11 +59,11 @@ function Toast({
     >
       <button onClick={onOpen} className="block w-full px-4 py-3 text-left">
         <div className="flex items-start gap-2">
-          <p className="min-w-0 flex-1 text-sm font-medium">{toast.title}</p>
+          <p className="min-w-0 flex-1 text-sm font-medium">{text.title}</p>
           <span
             role="button"
             tabIndex={0}
-            aria-label="Dismiss"
+            aria-label={t("common.dismiss")}
             onClick={(e) => {
               e.stopPropagation();
               onDismiss(toast.id);
@@ -77,10 +80,10 @@ function Toast({
           </span>
         </div>
         <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-          {toast.body}
+          {text.body}
         </p>
         {sticky && (
-          <p className="mt-2 text-xs font-medium text-primary">Waiting on you — click to decide</p>
+          <p className="mt-2 text-xs font-medium text-primary">{t("inbox.toastWaiting")}</p>
         )}
       </button>
     </motion.div>

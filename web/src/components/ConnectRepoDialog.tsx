@@ -3,6 +3,7 @@ import { connectRepo } from "../lib/repo";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Field, Input } from "./ui/primitives";
+import { useT } from "../lib/i18n";
 
 /**
  * Connect a git repo to a company — the one thing `code` tasks need and
@@ -23,6 +24,7 @@ export function ConnectRepoDialog({
   companyId: string;
   onConnected: () => void;
 }) {
+  const t = useT();
   const [cwd, setCwd] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +39,7 @@ export function ConnectRepoDialog({
       onOpenChange(false);
       setCwd("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to connect the repository");
+      setError(e instanceof Error ? e.message : t("repo.failed"));
     } finally {
       setBusy(false);
     }
@@ -47,16 +49,16 @@ export function ConnectRepoDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Connect a git repo"
-      description="Agents work here — each code run gets its own isolated worktree."
+      title={t("repo.title")}
+      description={t("repo.desc")}
     >
       <div className="flex flex-col gap-4">
-        <Field label="Repository path" hint="An absolute path to a git repository on this machine.">
+        <Field label={t("repo.path")} hint={t("repo.pathHint")}>
           <Input
             autoFocus
             value={cwd}
             onChange={(e) => setCwd(e.target.value)}
-            placeholder="/Users/you/code/my-project"
+            placeholder={t("repo.pathPlaceholder")}
             className="mono"
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
@@ -64,10 +66,10 @@ export function ConnectRepoDialog({
         {error && <p className="text-sm text-destructive">{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button variant="primary" onClick={submit} disabled={busy || !cwd.trim()}>
-            {busy ? "Connecting…" : "Connect"}
+            {busy ? t("repo.submitting") : t("repo.submit")}
           </Button>
         </div>
       </div>

@@ -20,7 +20,6 @@ import {
 } from "lucide-react";
 import type { Agent, AgentBudget, OrgProposal } from "../lib/api";
 import { api } from "../lib/api";
-import { AUTONOMY_LABEL } from "../lib/status";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
 import { cn } from "../lib/utils";
@@ -160,6 +159,7 @@ function Node({
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
   const Icon = ICONS[agent.archetype] ?? Bot;
   const paused = agent.status === "paused";
@@ -188,29 +188,34 @@ function Node({
             {paused && (
               <Badge tone="var(--color-status-cancelled)">
                 <Pause className="h-3 w-3" />
-                paused
+                {t("org.paused")}
               </Badge>
             )}
             {agent.requires_approval && (
               <Badge tone="var(--color-status-in_review)">
                 <ShieldCheck className="h-3 w-3" />
-                approval
+                {t("org.approvalBadge")}
               </Badge>
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            {agent.archetype} · {AUTONOMY_LABEL[agent.traits.autonomy]}
+            {agent.archetype} · {t(`autonomy.${agent.traits.autonomy}`)}
           </p>
         </div>
         <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
-          <Button size="icon" variant="ghost" onClick={() => setEditing((v) => !v)} title="Edit">
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setEditing((v) => !v)}
+            title={t("org.edit")}
+          >
             <Pencil className="h-4 w-4" />
           </Button>
           <Button
             size="icon"
             variant="ghost"
             onClick={() => onHireUnder(agent.id)}
-            title="Hire a report"
+            title={t("org.hireReport")}
           >
             <UserPlus className="h-4 w-4" />
           </Button>
@@ -268,6 +273,7 @@ function EditRow({
   onDone: () => void;
   onChanged: () => void;
 }) {
+  const t = useT();
   const [title, setTitle] = useState(agent.title ?? "");
   const [manager, setManager] = useState(agent.reports_to ?? "");
   const [busy, setBusy] = useState(false);
@@ -282,7 +288,7 @@ function EditRow({
       await p;
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(e instanceof Error ? e.message : t("common.failed"));
     } finally {
       setBusy(false);
     }
@@ -306,22 +312,22 @@ function EditRow({
     >
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-          Title
+          {t("org.title")}
           <Input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Senior Engineer"
+            placeholder={t("org.titlePlaceholder")}
             className="h-9"
           />
         </label>
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-          Reports to
+          {t("org.reportsTo")}
           <select
             value={manager}
             onChange={(e) => setManager(e.target.value)}
             className="h-9 rounded-md border border-input bg-background px-2.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <option value="">You (owner)</option>
+            <option value="">{t("org.youOwner")}</option>
             {managerOptions.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
@@ -334,7 +340,7 @@ function EditRow({
 
       {/* Governance actions */}
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <span className="text-xs font-medium text-muted-foreground">Governance</span>
+        <span className="text-xs font-medium text-muted-foreground">{t("org.governance")}</span>
         <Button
           size="sm"
           variant="outline"
@@ -345,11 +351,11 @@ function EditRow({
         >
           {agent.status === "paused" ? (
             <>
-              <Play className="h-4 w-4" /> Resume
+              <Play className="h-4 w-4" /> {t("org.resume")}
             </>
           ) : (
             <>
-              <Pause className="h-4 w-4" /> Pause
+              <Pause className="h-4 w-4" /> {t("org.pause")}
             </>
           )}
         </Button>
@@ -360,30 +366,30 @@ function EditRow({
           onClick={() => run(api.setApprovalGate(agent.id, !agent.requires_approval))}
         >
           <ShieldCheck className="h-4 w-4" />
-          {agent.requires_approval ? "Drop approval gate" : "Require approval"}
+          {agent.requires_approval ? t("org.dropApproval") : t("org.requireApproval")}
         </Button>
         <Button
           size="sm"
           variant="destructive"
           disabled={busy}
           onClick={() => {
-            if (confirm(`Terminate ${agent.name}? This is permanent.`))
+            if (confirm(t("org.terminateConfirm", { name: agent.name })))
               run(api.terminateAgent(agent.id));
           }}
         >
           <Ban className="h-4 w-4" />
-          Terminate
+          {t("org.terminate")}
         </Button>
       </div>
 
       <div className="flex justify-end gap-2">
         <Button size="sm" variant="ghost" onClick={onDone}>
           <X className="h-4 w-4" />
-          Cancel
+          {t("common.cancel")}
         </Button>
         <Button size="sm" variant="primary" onClick={save} disabled={busy}>
           <Check className="h-4 w-4" />
-          Save title / manager
+          {t("org.saveEdits")}
         </Button>
       </div>
     </motion.div>

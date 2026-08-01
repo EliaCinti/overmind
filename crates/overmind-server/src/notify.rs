@@ -36,6 +36,13 @@ pub struct New<'a> {
     pub kind: &'a str,
     pub title: &'a str,
     pub body: &'a str,
+    /// The values the sentence is made of — `{"agent": "Aria", "topic": …}` —
+    /// so a client can word it in the reader's language instead of receiving
+    /// finished English (M16). `title`/`body` remain the fallback.
+    ///
+    /// Agent-authored prose belongs in here verbatim: it is already in the
+    /// company's language and must not be re-worded by anyone.
+    pub params: Value,
     /// Who is telling you. `None` for the system itself.
     pub agent_id: Option<&'a str>,
     /// What to open when you act on it, e.g. `("meeting", id)`.
@@ -59,14 +66,15 @@ pub async fn post(
     };
     sqlx::query(
         "INSERT INTO notifications
-         (id, company_id, kind, title, body, agent_id, subject_type, subject_id, approval_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (id, company_id, kind, title, body, params, agent_id, subject_type, subject_id, approval_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(company_id)
     .bind(n.kind)
     .bind(n.title)
     .bind(n.body)
+    .bind(n.params.to_string())
     .bind(n.agent_id)
     .bind(subject_type)
     .bind(subject_id)
@@ -80,6 +88,7 @@ pub async fn post(
         "kind": n.kind,
         "title": n.title,
         "body": n.body,
+        "params": n.params,
         "agent_id": n.agent_id,
         "subject_type": subject_type,
         "subject_id": subject_id,

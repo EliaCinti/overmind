@@ -242,6 +242,31 @@ async fn an_agent_asks_for_a_meeting_and_nothing_runs_until_you_say_so() {
         "the notification says who is asking: {n}"
     );
     assert!(n["body"].as_str().unwrap_or("").contains("Why:"), "{n}");
+    // …and it carries the *parts* the sentence was made of, so a client can
+    // word it in the company's language instead of showing our English (M16).
+    // The convener's own reason travels through untouched.
+    assert_eq!(
+        n["params"]["agent"],
+        json!("Bruno (backend-developer)"),
+        "{n}"
+    );
+    assert_eq!(
+        n["params"]["topic"],
+        json!("How do we secure the login flow"),
+        "{n}"
+    );
+    assert_eq!(
+        n["params"]["reason"],
+        json!("The fix changes auth and deploy, so it lands on Guard work too"),
+        "{n}"
+    );
+    assert!(
+        n["params"]["roster"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Guard"),
+        "{n}"
+    );
     assert_eq!(n["subject_type"], json!("meeting"));
     assert_eq!(n["subject_id"], json!(meeting_id));
     let approval_id = n["approval_id"].as_str().expect("actionable").to_string();

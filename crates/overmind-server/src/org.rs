@@ -234,6 +234,12 @@ pub async fn propose(
             kind: notify::kind::ORG_PROPOSED,
             title: &format!("{who} proposes a team"),
             body: &body,
+            params: json!({
+                "agent": who,
+                "count": proposal.members.len(),
+                "roster": roster,
+                "summary": summary,
+            }),
             agent_id: Some(proposed_by),
             subject: Some(("org_proposal", &proposal_id)),
             approval_id: Some(&approval_id),
@@ -440,6 +446,7 @@ pub async fn reject(
                 }
                 _ => "You declined the proposed team.".to_string(),
             },
+            params: json!({ "note": note.map(str::trim).filter(|n| !n.is_empty()) }),
             agent_id: Some(&proposed_by),
             subject: Some(("org_proposal", proposal_id)),
             approval_id: None,

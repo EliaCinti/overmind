@@ -5,6 +5,7 @@ import { Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "luci
 import type { Agent, Attachment, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
+import { useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
 /**
@@ -27,6 +28,7 @@ export function Chat({
   /** Bump the app-wide live tick (so the board reflects new tasks at once). */
   onChanged: () => void;
 }) {
+  const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -102,10 +104,15 @@ export function Chat({
       onChanged();
     } catch (e) {
       setPending(false);
-      const msg = e instanceof ApiError ? e.message : "Could not reach the agent.";
+      const msg = e instanceof ApiError ? e.message : t("chat.unreachable");
       setMessages((m) => [
         ...m,
-        { id: `err-${Date.now()}`, role: "system", content: msg, created_at: new Date().toISOString() },
+        {
+          id: `err-${Date.now()}`,
+          role: "system",
+          content: msg,
+          created_at: new Date().toISOString(),
+        },
       ]);
     } finally {
       setSending(false);
@@ -120,7 +127,7 @@ export function Chat({
       {/* agent picker — "You're talking to [agent]" above the thread (Claude-style dropdown) */}
       {candidates.length > 0 && (
         <div className="flex items-center gap-1 border-b border-border py-2.5">
-          <span className="pl-1 text-sm text-muted-foreground">You're talking to</span>
+          <span className="pl-1 text-sm text-muted-foreground">{t("chat.talkingTo")}</span>
           <DropdownMenu.Root>
             <DropdownMenu.Trigger asChild>
               <button
@@ -130,7 +137,7 @@ export function Chat({
                 <span className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-[10px] font-semibold text-primary">
                   {initials(agent?.name ?? "?")}
                 </span>
-                <span className="font-medium">{agent?.name ?? "Select agent"}</span>
+                <span className="font-medium">{agent?.name ?? t("chat.selectAgent")}</span>
                 {agent?.title && <span className="text-muted-foreground">· {agent.title}</span>}
                 <ChevronDown className="h-4 w-4 text-muted-foreground" />
               </button>
@@ -142,7 +149,7 @@ export function Chat({
                 className="z-50 min-w-[248px] rounded-xl border border-border bg-card p-1.5 text-card-foreground shadow-lg"
               >
                 <DropdownMenu.Label className="px-2.5 pb-1 pt-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Talk to
+                  {t("chat.talkTo")}
                 </DropdownMenu.Label>
                 {candidates.map((a) => (
                   <DropdownMenu.Item
@@ -162,9 +169,13 @@ export function Chat({
                           </span>
                         )}
                       </span>
-                      {a.title && <span className="truncate text-xs text-muted-foreground">{a.title}</span>}
+                      {a.title && (
+                        <span className="truncate text-xs text-muted-foreground">{a.title}</span>
+                      )}
                     </span>
-                    {a.id === currentId && <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />}
+                    {a.id === currentId && (
+                      <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />
+                    )}
                   </DropdownMenu.Item>
                 ))}
               </DropdownMenu.Content>
@@ -177,7 +188,9 @@ export function Chat({
         {messages.length === 0 && !pending ? (
           <EmptyState agent={agent} isLeader={agent?.reports_to === null} />
         ) : (
-          messages.map((m) => <MessageRow key={m.id} message={m} agent={agent} companyId={companyId} />)
+          messages.map((m) => (
+            <MessageRow key={m.id} message={m} agent={agent} companyId={companyId} />
+          ))
         )}
         {pending && <Typing agent={agent} />}
         <div ref={bottomRef} />
@@ -197,7 +210,7 @@ export function Chat({
                   type="button"
                   onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
                   className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-                  aria-label={`Remove ${f.name}`}
+                  aria-label={t("chat.remove", { name: f.name })}
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -222,7 +235,7 @@ export function Chat({
             size="icon"
             onClick={() => fileRef.current?.click()}
             disabled={noAgents}
-            aria-label="Attach files"
+            aria-label={t("chat.attach")}
             className="h-11 w-11 rounded-xl"
           >
             <Paperclip className="h-4.5 w-4.5" />
@@ -239,7 +252,9 @@ export function Chat({
             rows={1}
             disabled={noAgents}
             placeholder={
-              noAgents ? "Hire an agent to talk to first…" : `Message ${agent?.name ?? "the agent"}…`
+              noAgents
+                ? t("chat.placeholderNoAgents")
+                : t("chat.placeholder", { name: agent?.name ?? t("chat.theAgent") })
             }
             className={cn(
               "max-h-40 min-h-11 flex-1 resize-none rounded-xl border border-input bg-background px-3.5 py-2.5 text-sm",
@@ -252,7 +267,7 @@ export function Chat({
             size="icon"
             onClick={() => void send()}
             disabled={!canSend}
-            aria-label="Send message"
+            aria-label={t("chat.send")}
             className="h-11 w-11 rounded-xl"
           >
             <SendHorizontal className="h-4.5 w-4.5" />
@@ -260,8 +275,8 @@ export function Chat({
         </div>
         <p className="mt-1.5 px-1 text-[11px] text-muted-foreground/70">
           {agent?.reports_to === null
-            ? "The CEO decomposes what you ask into tasks and dispatches the team."
-            : `${agent?.name ?? "This agent"} can act in their role and pull in teammates when it affects them.`}
+            ? t("chat.hintLeader")
+            : t("chat.hintTeammate", { name: agent?.name ?? t("chat.thisAgent") })}
         </p>
       </div>
     </div>
@@ -269,19 +284,20 @@ export function Chat({
 }
 
 function EmptyState({ agent, isLeader }: { agent: Agent | null; isLeader?: boolean }) {
+  const t = useT();
   return (
     <div className="flex h-full flex-col items-center justify-center py-16 text-center">
       <span className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
         <Sparkles className="h-6 w-6" />
       </span>
       <h2 className="text-lg font-semibold tracking-tight">
-        Talk to {agent?.name ?? "your team"}
+        {t("chat.emptyTitle", { name: agent?.name ?? t("chat.emptyTeam") })}
         {agent?.title ? <span className="text-muted-foreground"> · {agent.title}</span> : null}
       </h2>
       <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
         {isLeader
-          ? "Describe what you want — a decision, a piece of research, a change to ship. The CEO breaks it down, opens the right tasks, and puts the team on it."
-          : `Ask ${agent?.name ?? "this agent"} directly. They reply in their role, open tasks, and loop in teammates (or the CEO) when your request affects them.`}
+          ? t("chat.emptyLeader")
+          : t("chat.emptyTeammate", { name: agent?.name ?? t("chat.thisAgent") })}
       </p>
     </div>
   );
@@ -296,6 +312,7 @@ function MessageRow({
   agent: Agent | null;
   companyId: string;
 }) {
+  const fallbackAgentName = useT()("chat.agent");
   if (message.role === "system") {
     return (
       <div className="flex justify-center">
@@ -315,11 +332,11 @@ function MessageRow({
       transition={{ duration: 0.18, ease: "easeOut" }}
       className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}
     >
-      {!isUser && <Avatar name={agent?.name ?? "Agent"} className="mt-6" />}
+      {!isUser && <Avatar name={agent?.name ?? fallbackAgentName} className="mt-6" />}
       <div className={cn("flex max-w-[82%] flex-col gap-1", isUser && "items-end")}>
         {!isUser && (
           <span className="px-1 text-xs font-medium text-muted-foreground">
-            {agent?.name ?? "Agent"}
+            {agent?.name ?? fallbackAgentName}
             {agent?.title ? <span className="font-normal"> · {agent.title}</span> : null}
           </span>
         )}
@@ -376,9 +393,10 @@ function AttachmentView({ companyId, att }: { companyId: string; att: Attachment
 }
 
 function Typing({ agent }: { agent: Agent | null }) {
+  const fallbackAgentName = useT()("chat.agent");
   return (
     <div className="flex gap-3">
-      <Avatar name={agent?.name ?? "Agent"} />
+      <Avatar name={agent?.name ?? fallbackAgentName} />
       <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3.5">
         {[0, 1, 2].map((i) => (
           <motion.span

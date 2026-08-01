@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Field, Input } from "./ui/primitives";
 import { connectRepo } from "../lib/repo";
+import { useT } from "../lib/i18n";
 
 /**
  * First run. Name a company — that is the only required step; the company is
@@ -67,6 +68,7 @@ function StepShell({
 }
 
 function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
+  const t = useT();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +80,7 @@ function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
     try {
       onCreated(await api.createCompany(name.trim()));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(e instanceof Error ? e.message : t("common.failed"));
       setBusy(false);
     }
   };
@@ -86,23 +88,23 @@ function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
   return (
     <StepShell
       icon={<Building2 className="h-6 w-6" />}
-      step="Step 1 of 2"
-      title="Name your company"
-      subtitle="An organization of AI agents that work for you."
+      step={t("onboard.step1")}
+      title={t("onboard.nameTitle")}
+      subtitle={t("onboard.nameSubtitle")}
     >
       <div className="flex flex-col gap-4">
-        <Field label="Company name">
+        <Field label={t("onboard.companyName")}>
           <Input
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Acme Labs"
+            placeholder={t("onboard.companyPlaceholder")}
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
         </Field>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button variant="primary" onClick={submit} disabled={busy || !name.trim()}>
-          {busy ? "Creating…" : "Continue"}
+          {busy ? t("onboard.creating") : t("onboard.continue")}
           <ArrowRight className="h-4 w-4" />
         </Button>
       </div>
@@ -111,6 +113,7 @@ function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
 }
 
 function RepoStep({ company, onDone }: { company: Company; onDone: () => void }) {
+  const t = useT();
   const [cwd, setCwd] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,7 +126,7 @@ function RepoStep({ company, onDone }: { company: Company; onDone: () => void })
       await connectRepo(company.id, cwd.trim());
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(e instanceof Error ? e.message : t("common.failed"));
       setBusy(false);
     }
   };
@@ -131,24 +134,24 @@ function RepoStep({ company, onDone }: { company: Company; onDone: () => void })
   return (
     <StepShell
       icon={<FolderGit2 className="h-6 w-6" />}
-      step="Step 2 of 2 · optional"
-      title="Connect a git repo"
-      subtitle="Only for agents that write code — each run gets its own isolated worktree. Research, documents and decisions need no repo."
+      step={t("onboard.step2")}
+      title={t("onboard.repoTitle")}
+      subtitle={t("onboard.repoSubtitle")}
     >
       <div className="flex flex-col gap-4">
-        <Field label="Repository path" hint="An absolute path to a git repository on this machine.">
+        <Field label={t("repo.path")} hint={t("repo.pathHint")}>
           <Input
             autoFocus
             value={cwd}
             onChange={(e) => setCwd(e.target.value)}
-            placeholder="/Users/you/code/my-project"
+            placeholder={t("repo.pathPlaceholder")}
             className="mono"
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
         </Field>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button variant="primary" onClick={submit} disabled={busy || !cwd.trim()}>
-          {busy ? "Setting up…" : "Finish setup"}
+          {busy ? t("onboard.settingUp") : t("onboard.finish")}
           <ArrowRight className="h-4 w-4" />
         </Button>
         <button
@@ -156,7 +159,7 @@ function RepoStep({ company, onDone }: { company: Company; onDone: () => void })
           disabled={busy}
           className="-mt-1 self-center rounded-md px-2 py-1 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
         >
-          Skip — no code work yet
+          {t("onboard.skip")}
         </button>
       </div>
     </StepShell>

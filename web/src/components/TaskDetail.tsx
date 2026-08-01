@@ -3,10 +3,11 @@ import { AnimatePresence, motion } from "motion/react";
 import { X, Play, GitBranch, CircleDollarSign, Bot, ChevronRight, FileText } from "lucide-react";
 import type { Agent, Artifact, Session, Task, TaskSessionRef, TaskStatus } from "../lib/api";
 import { api } from "../lib/api";
-import { STATUS_LABEL, STATUS_VAR, STATUS_LABEL as SL, TRANSITIONS } from "../lib/status";
+import { STATUS_VAR, TRANSITIONS } from "../lib/status";
 import { Button } from "./ui/button";
 import { Badge, Dot, Spinner } from "./ui/primitives";
-import { cn, formatCents, timeAgo } from "../lib/utils";
+import { useFormats, useT } from "../lib/i18n";
+import { cn } from "../lib/utils";
 
 export function TaskDetail({
   task,
@@ -40,7 +41,13 @@ export function TaskDetail({
             exit={{ x: "100%" }}
             transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
           >
-            <Inner task={task} agents={agents} tick={tick} onClose={onClose} onChanged={onChanged} />
+            <Inner
+              task={task}
+              agents={agents}
+              tick={tick}
+              onClose={onClose}
+              onChanged={onChanged}
+            />
           </motion.aside>
         </>
       )}
@@ -61,6 +68,8 @@ function Inner({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const t = useT();
+  const { formatCents, timeAgo } = useFormats();
   const [sessions, setSessions] = useState<TaskSessionRef[]>([]);
   const [session, setSession] = useState<Session | null>(null);
   const [diff, setDiff] = useState<string | null>(null);
@@ -108,7 +117,7 @@ function Inner({
       await fn();
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Action failed");
+      setError(e instanceof Error ? e.message : t("task.actionFailed"));
     } finally {
       setBusy(false);
     }
@@ -135,9 +144,11 @@ function Inner({
           <div className="mb-1.5 flex items-center gap-2">
             <Badge tone={STATUS_VAR[task.status]}>
               <Dot tone={STATUS_VAR[task.status]} />
-              {STATUS_LABEL[task.status]}
+              {t(`status.${task.status}`)}
             </Badge>
-            <span className="text-xs text-muted-foreground">{task.priority} priority</span>
+            <span className="text-xs text-muted-foreground">
+              {t("task.priorityLabel", { p: t(`priority.${task.priority}`) })}
+            </span>
           </div>
           <h2 className="text-lg font-semibold leading-tight">{task.title}</h2>
         </div>
@@ -153,13 +164,18 @@ function Inner({
         {/* Actions */}
         <section className="flex flex-col gap-3">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Actions
+            {t("task.actions")}
           </h3>
           <div className="flex flex-wrap gap-2">
             {task.status === "todo" && (
-              <Button variant="primary" size="sm" onClick={() => setPickAgent((v) => !v)} disabled={busy}>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setPickAgent((v) => !v)}
+                disabled={busy}
+              >
                 <Play className="h-4 w-4" />
-                Start with agent
+                {t("task.startWithAgent")}
               </Button>
             )}
             {moves.map((to) => (
@@ -170,11 +186,11 @@ function Inner({
                 onClick={() => transition(to)}
                 disabled={busy}
               >
-                Move to {SL[to]}
+                {t("task.moveTo", { status: t(`status.${to}`) })}
               </Button>
             ))}
             {moves.length === 0 && task.status !== "todo" && (
-              <span className="text-sm text-muted-foreground">Terminal state — no moves.</span>
+              <span className="text-sm text-muted-foreground">{t("task.terminal")}</span>
             )}
           </div>
 
@@ -189,7 +205,7 @@ function Inner({
                 <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/40 p-2">
                   {activeAgents.length === 0 && (
                     <span className="px-2 py-1 text-sm text-muted-foreground">
-                      No active agents — hire one first.
+                      {t("task.noActiveAgents")}
                     </span>
                   )}
                   {activeAgents.map((a) => (
@@ -216,7 +232,7 @@ function Inner({
           <section className="flex flex-col gap-3">
             <div className="flex items-center justify-between">
               <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Latest run
+                {t("task.latestRun")}
               </h3>
               <SessionStatus status={session.status} />
             </div>
@@ -232,7 +248,9 @@ function Inner({
                 <CircleDollarSign className="h-3.5 w-3.5" />
                 {formatCents(session.cost_cents)}
               </span>
-              <span>{timeAgo(session.finished_at ?? session.started_at ?? session.created_at)}</span>
+              <span>
+                {timeAgo(session.finished_at ?? session.started_at ?? session.created_at)}
+              </span>
             </div>
 
             {session.last_error && (
@@ -253,7 +271,7 @@ function Inner({
               ) : diff === null ? (
                 <Button size="sm" variant="outline" onClick={loadDiff}>
                   <GitBranch className="h-4 w-4" />
-                  View diff
+                  {t("task.viewDiff")}
                 </Button>
               ) : (
                 <DiffView diff={diff} />
@@ -263,14 +281,12 @@ function Inner({
         )}
 
         {sessions.length > 1 && (
-          <p className="text-xs text-muted-foreground">
-            {sessions.length} runs on this task.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("task.runs", { n: sessions.length })}</p>
         )}
 
         {busy && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Spinner className="h-4 w-4" /> Working…
+            <Spinner className="h-4 w-4" /> {t("common.working")}
           </div>
         )}
       </div>
@@ -279,6 +295,7 @@ function Inner({
 }
 
 function SessionStatus({ status }: { status: string }) {
+  const t = useT();
   const tone =
     status === "completed"
       ? "var(--color-status-done)"
@@ -288,15 +305,18 @@ function SessionStatus({ status }: { status: string }) {
   return (
     <Badge tone={tone}>
       <Dot tone={tone} className={status === "running" ? "animate-pulse" : ""} />
-      {status}
+      {status === "running" || status === "completed" || status === "failed"
+        ? t(`sessionStatus.${status}`)
+        : status}
     </Badge>
   );
 }
 
 /** Minimal syntax coloring for a unified diff. */
 function DiffView({ diff }: { diff: string }) {
+  const t = useT();
   if (!diff.trim()) {
-    return <p className="text-sm text-muted-foreground">No changes in the worktree.</p>;
+    return <p className="text-sm text-muted-foreground">{t("task.noChanges")}</p>;
   }
   return (
     <pre className="mono max-h-96 overflow-auto rounded-md border border-border bg-muted/50 p-3 text-xs leading-relaxed">
@@ -319,15 +339,16 @@ function DiffView({ diff }: { diff: string }) {
 
 /** Documents a knowledge run produced (ADR-0017), newest first. */
 function ArtifactsView({ artifacts }: { artifacts: Artifact[] | null }) {
+  const t = useT();
   if (artifacts === null) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Spinner className="h-4 w-4" /> Loading documents…
+        <Spinner className="h-4 w-4" /> {t("task.loadingDocs")}
       </div>
     );
   }
   if (artifacts.length === 0) {
-    return <p className="text-sm text-muted-foreground">No documents produced yet.</p>;
+    return <p className="text-sm text-muted-foreground">{t("task.noDocs")}</p>;
   }
   return (
     <div className="flex flex-col gap-3">

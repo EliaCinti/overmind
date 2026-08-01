@@ -13,12 +13,12 @@ import {
 } from "lucide-react";
 import type { Agent, Archetype, AgentTraits, Autonomy, ReviewStrictness } from "../lib/api";
 import { api } from "../lib/api";
-import { AUTONOMY_LABEL, STRICTNESS_LABEL, autonomySentence } from "../lib/status";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Field, Input, Textarea } from "./ui/primitives";
 import { Chip, Segmented } from "./ui/controls";
-import { cn, formatCents } from "../lib/utils";
+import { useFormats, useT } from "../lib/i18n";
+import { cn } from "../lib/utils";
 
 const ICONS: Record<string, typeof Bot> = {
   "security-engineer": Shield,
@@ -50,6 +50,8 @@ export function HireAgentDialog({
   defaultManager: string | null;
   onHired: () => void;
 }) {
+  const t = useT();
+  const { formatCents } = useFormats();
   const [level, setLevel] = useState<Level>("pick");
   const [picked, setPicked] = useState<Archetype | null>(null);
   const [name, setName] = useState("");
@@ -107,17 +109,14 @@ export function HireAgentDialog({
       onOpenChange(false);
       setTimeout(reset, 200);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to hire");
+      setError(e instanceof Error ? e.message : t("hire.failed"));
     } finally {
       setBusy(false);
     }
   };
 
   // Focus-area suggestions = the archetype's defaults, so tuning stays click-first.
-  const focusOptions = useMemo(
-    () => picked?.default_traits.focus_areas ?? [],
-    [picked],
-  );
+  const focusOptions = useMemo(() => picked?.default_traits.focus_areas ?? [], [picked]);
 
   return (
     <Dialog
@@ -126,11 +125,11 @@ export function HireAgentDialog({
         onOpenChange(o);
         if (!o) setTimeout(reset, 200);
       }}
-      title="Hire an agent"
+      title={t("hire.title")}
       description={
         level === "pick"
-          ? "Pick a role to start — everything is preconfigured."
-          : `${picked?.name} · ${level === "tune" ? "tune the details" : "expert mode"}`
+          ? t("hire.pickDesc")
+          : `${picked?.name} · ${level === "tune" ? t("hire.tune") : t("hire.expert")}`
       }
       className="max-w-2xl"
     >
@@ -179,25 +178,25 @@ export function HireAgentDialog({
             {level === "tune" ? (
               <>
                 <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  <Field label="Name">
+                  <Field label={t("hire.name")}>
                     <Input value={name} onChange={(e) => setName(e.target.value)} />
                   </Field>
-                  <Field label="Title" hint="Optional job title.">
+                  <Field label={t("hire.jobTitle")} hint={t("hire.jobTitleHint")}>
                     <Input
                       value={title}
                       onChange={(e) => setTitle(e.target.value)}
-                      placeholder="e.g. Senior Engineer"
+                      placeholder={t("hire.jobTitlePlaceholder")}
                     />
                   </Field>
                 </div>
 
-                <Field label="Reports to" hint="Where this agent sits in the org.">
+                <Field label={t("hire.reportsTo")} hint={t("hire.reportsToHint")}>
                   <select
                     value={manager}
                     onChange={(e) => setManager(e.target.value)}
                     className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
-                    <option value="">You (owner)</option>
+                    <option value="">{t("hire.youOwner")}</option>
                     {managerOptions.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.name}
@@ -207,7 +206,7 @@ export function HireAgentDialog({
                   </select>
                 </Field>
 
-                <Field label="Focus areas" hint="What this agent pays attention to.">
+                <Field label={t("hire.focus")} hint={t("hire.focusHint")}>
                   <div className="flex flex-wrap gap-2">
                     {focusOptions.map((f) => (
                       <Chip
@@ -222,27 +221,29 @@ export function HireAgentDialog({
                 </Field>
 
                 <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  <Field label="Autonomy">
+                  <Field label={t("hire.autonomy")}>
                     <Segmented<Autonomy>
                       value={traits.autonomy}
                       onChange={(v) => setTraits({ ...traits, autonomy: v })}
                       options={(
                         ["propose_only", "act_with_approval", "act_within_budget"] as Autonomy[]
-                      ).map((v) => ({ value: v, label: AUTONOMY_LABEL[v] }))}
+                      ).map((v) => ({ value: v, label: t(`autonomy.${v}`) }))}
                     />
                   </Field>
-                  <Field label="Review strictness">
+                  <Field label={t("hire.strictness")}>
                     <Segmented<ReviewStrictness>
                       value={traits.review_strictness}
                       onChange={(v) => setTraits({ ...traits, review_strictness: v })}
-                      options={(
-                        ["lenient", "standard", "strict"] as ReviewStrictness[]
-                      ).map((v) => ({ value: v, label: STRICTNESS_LABEL[v] }))}
+                      options={(["lenient", "standard", "strict"] as ReviewStrictness[]).map(
+                        (v) => ({ value: v, label: t(`strictness.${v}`) }),
+                      )}
                     />
                   </Field>
                 </div>
 
-                <Field label={`Monthly budget · ${formatCents(traits.monthly_budget_cents)}`}>
+                <Field
+                  label={t("hire.budget", { amount: formatCents(traits.monthly_budget_cents) })}
+                >
                   <input
                     type="range"
                     min={500}
@@ -256,7 +257,7 @@ export function HireAgentDialog({
                   />
                 </Field>
 
-                <Field label="Model">
+                <Field label={t("hire.model")}>
                   <Segmented
                     value={traits.model}
                     onChange={(v) => setTraits({ ...traits, model: v })}
@@ -265,20 +266,21 @@ export function HireAgentDialog({
                 </Field>
               </>
             ) : (
-              <Field
-                label="Custom brief"
-                hint="Added on top of the structured config. It can add guidance but never override the enforced limits above."
-              >
+              <Field label={t("hire.brief")} hint={t("hire.briefHint")}>
                 <Textarea
                   value={brief}
                   onChange={(e) => setBrief(e.target.value)}
-                  placeholder="e.g. Pay special attention to our authentication module and flag any use of deprecated crypto."
+                  placeholder={t("hire.briefPlaceholder")}
                   className="min-h-32"
                 />
               </Field>
             )}
 
-            <LivePreview traits={traits} name={name || picked.name} hasBrief={brief.trim().length > 0} />
+            <LivePreview
+              traits={traits}
+              name={name || picked.name}
+              hasBrief={brief.trim().length > 0}
+            />
 
             {error && <p className="text-sm text-destructive">{error}</p>}
 
@@ -287,17 +289,17 @@ export function HireAgentDialog({
                 variant="ghost"
                 onClick={() => setLevel(level === "expert" ? "tune" : "pick")}
               >
-                Back
+                {t("common.back")}
               </Button>
               <div className="flex gap-2">
                 {level === "tune" && (
                   <Button variant="outline" onClick={() => setLevel("expert")}>
                     <Sparkles className="h-4 w-4" />
-                    Expert mode
+                    {t("hire.expertMode")}
                   </Button>
                 )}
                 <Button variant="primary" onClick={submit} disabled={busy}>
-                  {busy ? "Hiring…" : "Hire agent"}
+                  {busy ? t("hire.submitting") : t("hire.submit")}
                 </Button>
               </div>
             </div>
@@ -318,19 +320,22 @@ function LivePreview({
   name: string;
   hasBrief: boolean;
 }) {
+  const t = useT();
+  const { formatCents } = useFormats();
   return (
     <div className={cn("rounded-md border border-border bg-muted/40 p-3.5 text-sm")}>
       <p className="leading-relaxed">
-        <span className="font-medium">{name}</span> {autonomySentence(traits.autonomy)}, reviewing
-        with <span className="font-medium">{STRICTNESS_LABEL[traits.review_strictness]}</span>{" "}
-        strictness on{" "}
+        <span className="font-medium">{name}</span> {t(`autonomySays.${traits.autonomy}`)}
+        {t("hire.previewReviewing")}
+        <span className="font-medium">{t(`strictness.${traits.review_strictness}`)}</span>
+        {t("hire.previewStrictness")}
         <span className="font-medium">
-          {traits.focus_areas.length ? traits.focus_areas.join(", ") : "no specific focus"}
+          {traits.focus_areas.length ? traits.focus_areas.join(", ") : t("hire.previewNoFocus")}
         </span>
-        . Capped at{" "}
-        <span className="mono">{formatCents(traits.monthly_budget_cents)}</span>/mo on{" "}
-        <span className="mono">{traits.model}</span>.
-        {hasBrief && " Plus your custom brief."}
+        {t("hire.previewCapped")}
+        <span className="mono">{formatCents(traits.monthly_budget_cents)}</span>
+        {t("hire.previewPerMonth")}
+        <span className="mono">{traits.model}</span>.{hasBrief && t("hire.previewBrief")}
       </p>
     </div>
   );

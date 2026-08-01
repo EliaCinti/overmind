@@ -14,6 +14,7 @@ import type {
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
 import { LanguageProvider } from "./components/LanguageProvider";
+import { browserLanguage } from "./lib/i18n";
 import { useTheme } from "./lib/theme";
 import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
@@ -147,8 +148,11 @@ export default function App() {
   const bump = () => setTick((n) => n + 1);
 
   // The language belongs to the company (M16): switching company switches
-  // language, because it is that organization's working language.
-  const language: LanguageCode = companies.find((c) => c.id === companyId)?.language ?? "en";
+  // language, because it is that organization's working language. Before the
+  // first company exists there is nothing to read it off, so the setup screens
+  // follow the browser.
+  const language: LanguageCode =
+    companies.find((c) => c.id === companyId)?.language ?? browserLanguage();
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);
@@ -166,6 +170,8 @@ export default function App() {
   const hasRepo = runnableGoalId !== null;
 
   const afterCompanyCreated = async (id: string) => {
+    // A new company keeps speaking whatever the setup screens spoke.
+    await api.setCompanyLanguage(id, browserLanguage()).catch(() => {});
     const cs = await api.listCompanies();
     setCompanies(cs);
     setCompanyId(id);

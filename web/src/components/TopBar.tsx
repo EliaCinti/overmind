@@ -177,13 +177,14 @@ function Logo() {
 }
 
 function ConnectionDot({ connected }: { connected: boolean }) {
+  const t = useT();
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         connected ? "text-status-done" : "text-muted-foreground",
       )}
-      title={connected ? "Live updates connected" : "Reconnecting…"}
+      title={connected ? t("nav.liveConnected") : t("nav.reconnecting")}
     >
       {connected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
     </span>
@@ -192,6 +193,7 @@ function ConnectionDot({ connected }: { connected: boolean }) {
 
 /** Shows whether organizational memory (Wadachi/MCP) is connected. */
 function MemoryIndicator() {
+  const t = useT();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   useEffect(() => {
     api
@@ -206,16 +208,17 @@ function MemoryIndicator() {
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         enabled ? "text-primary" : "text-muted-foreground/50",
       )}
-      title={enabled ? "Organizational memory connected (Wadachi)" : "Memory not configured"}
+      title={enabled ? t("nav.memoryOn") : t("nav.memoryOff")}
     >
       <BrainCircuit className="h-3.5 w-3.5" />
-      memory
+      {t("nav.memory")}
     </span>
   );
 }
 
 /** Periodically verifies the audit hash chain and shows a trust badge. */
 function AuditIndicator({ tick }: { tick: number }) {
+  const t = useT();
   const [valid, setValid] = useState<boolean | null>(null);
   useEffect(() => {
     api
@@ -230,10 +233,10 @@ function AuditIndicator({ tick }: { tick: number }) {
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         valid ? "text-status-done" : "text-destructive",
       )}
-      title={valid ? "Audit chain verified" : "Audit chain BROKEN"}
+      title={valid ? t("nav.auditOk") : t("nav.auditBroken")}
     >
       {valid ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-      audit
+      {t("nav.audit")}
     </span>
   );
 }

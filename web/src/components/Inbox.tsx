@@ -4,7 +4,7 @@ import type { Approval, Notification } from "../lib/api";
 import { api } from "../lib/api";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
-import { timeAgo } from "../lib/utils";
+import { useFormats, useNotificationText, useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
 /**
@@ -28,6 +28,9 @@ export function Inbox({
   openSignal: number;
   onOpenMeeting: (meetingId: string) => void;
 }) {
+  const t = useT();
+  const { timeAgo } = useFormats();
+  const notificationText = useNotificationText();
   const [items, setItems] = useState<Notification[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [unread, setUnread] = useState(0);
@@ -80,7 +83,7 @@ export function Inbox({
       <button
         onClick={() => setOpen(true)}
         className="relative inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
-        title={unread ? `${unread} unread` : "Inbox"}
+        title={unread ? t("nav.unread", { n: unread }) : t("nav.inbox")}
       >
         <Bell className="h-4.5 w-4.5" />
         {unread > 0 && (
@@ -100,43 +103,39 @@ export function Inbox({
       <Dialog
         open={open}
         onOpenChange={setOpen}
-        title="Inbox"
+        title={t("nav.inbox")}
         description={
           waiting
-            ? `${waiting} waiting on your decision`
+            ? t("nav.waitingOnYou", { n: waiting })
             : unread
-              ? `${unread} unread`
-              : "Nothing waiting on you."
+              ? t("nav.unread", { n: unread })
+              : t("nav.nothingWaiting")
         }
         className="max-w-xl"
       >
         <div className="flex flex-col gap-2">
           {items.length === 0 && (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              Nothing yet. When an agent needs you — to convene a meeting, to start a gated task —
-              it lands here.
-            </p>
+            <p className="py-8 text-center text-sm text-muted-foreground">{t("inbox.empty")}</p>
           )}
 
           {items.map((n) => {
             const approval = pendingApproval(n.approval_id);
+            const text = notificationText(n);
             return (
               <div
                 key={n.id}
                 className={cn(
                   "rounded-md border p-3 transition",
-                  approval
-                    ? "border-primary/40 bg-primary/[0.04]"
-                    : "border-border bg-card",
+                  approval ? "border-primary/40 bg-primary/[0.04]" : "border-border bg-card",
                   !n.read_at && !approval && "border-l-2 border-l-primary",
                 )}
               >
                 <div className="flex items-start gap-3">
                   <KindIcon kind={n.kind} />
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium">{n.title}</p>
+                    <p className="text-sm font-medium">{text.title}</p>
                     <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-                      {n.body}
+                      {text.body}
                     </p>
                     <p className="mt-1.5 text-[11px] text-muted-foreground/70">
                       {timeAgo(n.created_at)}
@@ -154,7 +153,7 @@ export function Inbox({
                         onOpenMeeting(n.subject_id!);
                       }}
                     >
-                      View meeting
+                      {t("common.viewMeeting")}
                     </Button>
                   )}
                   {approval && (
@@ -166,7 +165,7 @@ export function Inbox({
                         onClick={() => decide(n, "reject")}
                       >
                         <X className="h-4 w-4" />
-                        Reject
+                        {t("common.reject")}
                       </Button>
                       <Button
                         size="sm"
@@ -175,7 +174,7 @@ export function Inbox({
                         onClick={() => decide(n, "approve")}
                       >
                         <Check className="h-4 w-4" />
-                        Approve
+                        {t("common.approve")}
                       </Button>
                     </>
                   )}
@@ -190,7 +189,7 @@ export function Inbox({
               className="mt-1 inline-flex items-center justify-center gap-1.5 self-end rounded-md px-2 py-1 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
             >
               <CheckCheck className="h-3.5 w-3.5" />
-              Mark all read
+              {t("common.markAllRead")}
             </button>
           )}
         </div>
