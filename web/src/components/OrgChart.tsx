@@ -23,7 +23,8 @@ import { api } from "../lib/api";
 import { AUTONOMY_LABEL } from "../lib/status";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
-import { cn, formatCents } from "../lib/utils";
+import { cn } from "../lib/utils";
+import { useT, useFormats } from "../lib/i18n";
 import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
 
 const ICONS: Record<string, typeof Bot> = {
@@ -51,6 +52,7 @@ export function OrgChart({
   onHireUnder: (managerId: string | null) => void;
   onTalkToCeo: () => void;
 }) {
+  const t = useT();
   const active = agents.filter((a) => a.status !== "terminated");
   // First run: the founding CEO and nobody else, nothing proposed yet.
   const ceo = active.find((a) => a.reports_to === null);
@@ -76,14 +78,12 @@ export function OrgChart({
             <Crown className="h-4.5 w-4.5" />
           </span>
           <div className="min-w-0">
-            <p className="font-medium">You</p>
-            <p className="text-xs text-muted-foreground">
-              Owner · everyone ultimately reports here
-            </p>
+            <p className="font-medium">{t("org.you")}</p>
+            <p className="text-xs text-muted-foreground">{t("org.ownerLine")}</p>
           </div>
           <Button size="sm" variant="outline" className="ml-auto" onClick={() => onHireUnder(null)}>
             <UserPlus className="h-4 w-4" />
-            Hire
+            {t("nav.hire")}
           </Button>
         </div>
 
@@ -97,9 +97,7 @@ export function OrgChart({
           onHireUnder={onHireUnder}
         />
         {active.length === 0 && (
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            No agents yet. Hire your first one to build the org.
-          </p>
+          <p className="mt-6 text-center text-sm text-muted-foreground">{t("org.empty")}</p>
         )}
       </div>
     </div>
@@ -235,6 +233,7 @@ function Node({
 
 /** Month-to-date spend (+ in-flight reservation) against the cap. */
 function BudgetBar({ budget }: { budget: AgentBudget }) {
+  const { formatCents } = useFormats();
   const used = budget.spent_cents + budget.reserved_cents;
   const pct = Math.min(100, (used / budget.budget_cents) * 100);
   const tone =

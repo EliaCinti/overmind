@@ -4,6 +4,7 @@ import type {
   AgentBudget,
   Archetype,
   Company,
+  LanguageCode,
   Notification,
   OrgProposal,
   ProjectDetail,
@@ -12,6 +13,7 @@ import type {
 } from "./lib/api";
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
+import { LanguageProvider } from "./components/LanguageProvider";
 import { useTheme } from "./lib/theme";
 import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
@@ -144,6 +146,18 @@ export default function App() {
 
   const bump = () => setTick((n) => n + 1);
 
+  // The language belongs to the company (M16): switching company switches
+  // language, because it is that organization's working language.
+  const language: LanguageCode = companies.find((c) => c.id === companyId)?.language ?? "en";
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
+  const changeLanguage = async (code: LanguageCode) => {
+    if (!companyId) return;
+    await api.setCompanyLanguage(companyId, code);
+    setCompanies(await api.listCompanies());
+  };
+
   // A runnable goal: the first goal of a project that has a primary workspace.
   // Only `code` tasks need one — a company with no repo is fully usable for
   // knowledge work (ADR-0017), so this gates the Code option, never the app.
@@ -166,109 +180,113 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen flex-col">
-      <TopBar
-        companies={companies}
-        companyId={companyId}
-        onSelectCompany={setCompanyId}
-        onNewCompany={() => setCompanyId(null)}
-        onHire={() => openHire(null)}
-        onNewTask={() => setTaskOpen(true)}
-        canCreateTask={!!companyId}
-        view={view}
-        onViewChange={setView}
-        showViews={!!companyId}
-        onApprovalDecided={afterDecision}
-        inboxSignal={inboxSignal}
-        onOpenMeeting={openMeeting}
-        connected={connected}
-        tick={tick}
-        theme={theme}
-        onToggleTheme={toggle}
-      />
+    <LanguageProvider language={language}>
+      <div className="flex h-screen flex-col">
+        <TopBar
+          companies={companies}
+          companyId={companyId}
+          onSelectCompany={setCompanyId}
+          onNewCompany={() => setCompanyId(null)}
+          onHire={() => openHire(null)}
+          onNewTask={() => setTaskOpen(true)}
+          canCreateTask={!!companyId}
+          view={view}
+          onViewChange={setView}
+          showViews={!!companyId}
+          onApprovalDecided={afterDecision}
+          inboxSignal={inboxSignal}
+          onOpenMeeting={openMeeting}
+          connected={connected}
+          tick={tick}
+          language={language}
+          onChangeLanguage={changeLanguage}
+          theme={theme}
+          onToggleTheme={toggle}
+        />
 
-      {!companyId ? (
-        <Onboarding onDone={afterCompanyCreated} />
-      ) : (
-        <main className="flex flex-1 flex-col overflow-hidden pt-4">
-          {view === "chat" ? (
-            <Chat companyId={companyId} agents={agents} tick={tick} onChanged={bump} />
-          ) : view === "board" ? (
-            <Board
-              tasks={tasks}
-              agents={agents}
-              onOpenTask={setOpenTask}
-              hasRepo={hasRepo}
-              onConnectRepo={() => setRepoOpen(true)}
-            />
-          ) : view === "meetings" ? (
-            <Meetings
+        {!companyId ? (
+          <Onboarding onDone={afterCompanyCreated} />
+        ) : (
+          <main className="flex flex-1 flex-col overflow-hidden pt-4">
+            {view === "chat" ? (
+              <Chat companyId={companyId} agents={agents} tick={tick} onChanged={bump} />
+            ) : view === "board" ? (
+              <Board
+                tasks={tasks}
+                agents={agents}
+                onOpenTask={setOpenTask}
+                hasRepo={hasRepo}
+                onConnectRepo={() => setRepoOpen(true)}
+              />
+            ) : view === "meetings" ? (
+              <Meetings
+                companyId={companyId}
+                tick={tick}
+                onChanged={bump}
+                selectedId={selectedMeeting}
+                onSelect={setSelectedMeeting}
+              />
+            ) : (
+              <OrgChart
+                agents={agents}
+                budgets={budgets}
+                proposal={proposals.find((p) => p.status === "proposed") ?? null}
+                onChanged={bump}
+                onHireUnder={openHire}
+                onTalkToCeo={() => setView("chat")}
+              />
+            )}
+          </main>
+        )}
+
+        <TaskDetail
+          task={openTask}
+          agents={agents}
+          tick={tick}
+          onClose={() => setOpenTask(null)}
+          onChanged={bump}
+        />
+
+        <Toaster
+          toasts={toasts}
+          onDismiss={(id) => setToasts((current) => current.filter((t) => t.id !== id))}
+          onOpen={() => {
+            setToasts([]);
+            setInboxSignal((n) => n + 1);
+          }}
+        />
+
+        {companyId && (
+          <>
+            <HireAgentDialog
+              open={hireOpen}
+              onOpenChange={setHireOpen}
               companyId={companyId}
-              tick={tick}
-              onChanged={bump}
-              selectedId={selectedMeeting}
-              onSelect={setSelectedMeeting}
-            />
-          ) : (
-            <OrgChart
+              archetypes={archetypes}
               agents={agents}
-              budgets={budgets}
-              proposal={proposals.find((p) => p.status === "proposed") ?? null}
-              onChanged={bump}
-              onHireUnder={openHire}
-              onTalkToCeo={() => setView("chat")}
+              defaultManager={hireManager}
+              onHired={bump}
             />
-          )}
-        </main>
-      )}
-
-      <TaskDetail
-        task={openTask}
-        agents={agents}
-        tick={tick}
-        onClose={() => setOpenTask(null)}
-        onChanged={bump}
-      />
-
-      <Toaster
-        toasts={toasts}
-        onDismiss={(id) => setToasts((current) => current.filter((t) => t.id !== id))}
-        onOpen={() => {
-          setToasts([]);
-          setInboxSignal((n) => n + 1);
-        }}
-      />
-
-      {companyId && (
-        <>
-          <HireAgentDialog
-            open={hireOpen}
-            onOpenChange={setHireOpen}
-            companyId={companyId}
-            archetypes={archetypes}
-            agents={agents}
-            defaultManager={hireManager}
-            onHired={bump}
-          />
-          <CreateTaskDialog
-            open={taskOpen}
-            onOpenChange={setTaskOpen}
-            companyId={companyId}
-            goalId={runnableGoalId}
-            onCreated={bump}
-            onConnectRepo={() => {
-              setTaskOpen(false);
-              setRepoOpen(true);
-            }}
-          />
-          <ConnectRepoDialog
-            open={repoOpen}
-            onOpenChange={setRepoOpen}
-            companyId={companyId}
-            onConnected={bump}
-          />
-        </>
-      )}
-    </div>
+            <CreateTaskDialog
+              open={taskOpen}
+              onOpenChange={setTaskOpen}
+              companyId={companyId}
+              goalId={runnableGoalId}
+              onCreated={bump}
+              onConnectRepo={() => {
+                setTaskOpen(false);
+                setRepoOpen(true);
+              }}
+            />
+            <ConnectRepoDialog
+              open={repoOpen}
+              onOpenChange={setRepoOpen}
+              companyId={companyId}
+              onConnected={bump}
+            />
+          </>
+        )}
+      </div>
+    </LanguageProvider>
   );
 }

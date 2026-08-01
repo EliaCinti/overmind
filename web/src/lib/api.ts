@@ -27,9 +27,13 @@ export interface Archetype {
   default_traits: AgentTraits;
 }
 
+export type LanguageCode = "en" | "it";
+
 export interface Company {
   id: string;
   name: string;
+  /** The language the company works in — UI *and* what the agents write (M16). */
+  language: LanguageCode;
   created_at: string;
 }
 
@@ -290,6 +294,10 @@ export interface HireAgentBody {
 export const api = {
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
   createCompany: (name: string) => req<Company>("POST", "/companies", { name }),
+  setCompanyLanguage: (companyId: string, language: LanguageCode) =>
+    req<{ id: string; language: LanguageCode }>("POST", `/companies/${companyId}/language`, {
+      language,
+    }),
 
   listArchetypes: () =>
     req<{ archetypes: Archetype[] }>("GET", "/archetypes").then((r) => r.archetypes),

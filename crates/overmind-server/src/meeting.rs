@@ -546,6 +546,10 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
         .memory
         .get_context(&state.config.data_dir.to_string_lossy(), &topic)
         .await;
+    // The company's language (M16): a room must not deliberate in English
+    // under an Italian interface.
+    let language =
+        crate::i18n::prompt_line(&crate::i18n::company_language(state, company_id).await);
 
     // One scratch dir for the whole meeting — agents deliberate here, they
     // don't produce files (that is what tasks are for).
@@ -558,6 +562,7 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
     for ordinal in 0..turn_cap {
         let speaker = &speakers[(ordinal as usize) % speakers.len()];
         let prompt = turn_prompt(
+            &language,
             &topic,
             &reason,
             speaker,
@@ -606,6 +611,7 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
     // The cap is reached and nobody has called it: the chair closes.
     let speaker = &speakers[chair];
     let prompt = turn_prompt(
+        &language,
         &topic,
         &reason,
         speaker,
@@ -685,6 +691,7 @@ fn said_or_raw(turn: Option<&Value>, output: &str) -> String {
 /// each turn is asked for the thing only that role can see, agreement must
 /// carry its cost, and a decision has to be concrete enough to act on.
 fn turn_prompt(
+    language: &str,
     topic: &str,
     reason: &str,
     speaker: &Speaker,
@@ -749,7 +756,7 @@ fn turn_prompt(
          The meeting so far:\n{so_far}{memory_block}\n\n\
          {instruction}\n\n\
          Respond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n\
-         {{\"say\": \"<your contribution>\", \"decision\": \"<the group's decision — omit unless settled>\", \"no_decision_needed\": \"<omit unless this room is pointless>\"}}",
+         {{\"say\": \"<your contribution>\", \"decision\": \"<the group's decision — omit unless settled>\", \"no_decision_needed\": \"<omit unless this room is pointless>\"}}{language}",
         name = speaker.name,
         role = speaker.role,
     )

@@ -142,14 +142,15 @@ A company was born empty: you had to know what an "archetype" was before anythin
 - **UI:** the proposal is drawn as the org chart it would become — same geometry, provisional, each hire carrying its reason; dropping someone leaves them struck and quiet so you can see what you are refusing. First run offers the two roads, asymmetric on purpose.
 - **Accept:** the CEO proposes, nothing is hired until you accept, a dropped member stays dropped, the tree is wired ✓ — `tests/org_proposal.rs`.
 
-## M16 — Italian, and the language as a first-class setting `todo`
+## M16 — Italian, and the language as a first-class setting `in progress`
 Everything on screen must speak the chosen language — not just the UI chrome. What you read comes from **three places**, and only one is a dictionary.
 
-- ☐ **A · The language exists and is remembered.** Stored **on the company**, not the browser: the server needs it to instruct agents. Migration + endpoint + a language menu in the top bar (names in their own language — *Italiano*, *English* — **never flags**: flags are countries, not languages). Sets `<html lang>`.
-- ☐ **B · Agents speak it.** One line in the task, chat and meeting prompts. Smallest change, largest visible effect: the CEO, the meetings and the team proposals all switch language.
-- ☐ **C · The interface.** `lib/i18n.ts` — a nested dictionary and a `useT()` hook, no library for ~250 strings. The long, mechanical slice: ~15 components.
+- ✅ **A · The language exists and is remembered.** Stored **on the company**, not the browser: the server needs it to instruct agents. Migration + endpoint + a language menu in the top bar (names in their own language — *Italiano*, *English* — **never flags**: flags are countries, not languages). Sets `<html lang>`.
+- ✅ **B · Agents speak it.** One line in the task, chat and meeting prompts. Smallest change, largest visible effect: the CEO, the meetings and the team proposals all switch language.
+- 🟡 **C · The interface.** `lib/i18n.ts` shipped — a nested dictionary, a typed `useT()` (an unknown key fails the build), English fallback per string, and `useFormats()` for money and dates. Top bar, org chart and the team proposal are translated; **Chat, Board, Meetings, the inbox and the dialogs are not yet**. The remaining work is mechanical.
 - ☐ **D · Server-generated prose.** Notifications carry a `kind` + **structured params** instead of a composed sentence; the UI writes the sentence in the right language. Old rows keep `title`/`body` as a fallback. This is what makes the system translatable *by construction* rather than translated after the fact.
-- Alongside: **currency and dates**. Budgets render as `$20.00` while the product is priced in euro, and dates are US-formatted.
+- ✅ Alongside: **currency and dates** — budgets render as `20,00 €` under `it-IT`, `€20.00` under `en-US`.
+- Two layout defects the longer Italian surfaced and fixed: buttons wrapped their own labels (`whitespace-nowrap` is now on the primitive), and the top bar overflowed — the language control is icon-only, as a rarely-used setting should be.
 - **Accept:** switch to Italian and the chrome, the inbox and the CEO's replies are all Italian; reload and it holds.
 
 ## Known gaps — carried deliberately, not forgotten

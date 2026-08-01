@@ -20,6 +20,7 @@ import type { OrgProposal as Proposal, OrgProposalMember } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
+import { useT } from "../lib/i18n";
 
 const ICONS: Record<string, typeof Bot> = {
   "chief-executive": Sparkles,
@@ -46,6 +47,7 @@ export function OrgProposalPanel({
   proposal: Proposal;
   onChanged: () => void;
 }) {
+  const t = useT();
   const [busy, setBusy] = useState<string | null>(null);
   const [deciding, setDeciding] = useState(false);
 
@@ -93,7 +95,7 @@ export function OrgProposalPanel({
           </span>
           <div className="min-w-0">
             <h2 id="proposal-heading" className="text-base font-semibold">
-              {who} proposes a team of {kept.length}
+              {t("proposal.heading", { ceo: who, n: kept.length })}
             </h2>
             <p className="mt-1.5 max-w-[68ch] text-sm leading-relaxed text-muted-foreground">
               {proposal.summary}
@@ -115,23 +117,20 @@ export function OrgProposalPanel({
       <footer className="flex flex-wrap items-center gap-3 border-t border-primary/20 bg-primary/[0.04] px-5 py-3.5">
         <p className="min-w-0 flex-1 text-sm text-muted-foreground">
           {kept.length === 0 ? (
-            <span className="text-destructive">
-              You dropped everyone — put someone back, or decline the proposal.
-            </span>
+            <span className="text-destructive">{t("proposal.allDropped")}</span>
+          ) : proposal.members.length === kept.length ? (
+            t("proposal.hires", { n: kept.length })
           ) : (
-            <>
-              Approving hires <span className="font-medium text-foreground">{kept.length}</span>
-              {proposal.members.length !== kept.length && (
-                <> and skips {proposal.members.length - kept.length}</>
-              )}
-              . Nobody has been hired yet.
-            </>
+            t("proposal.hiresAndSkips", {
+              n: kept.length,
+              skipped: proposal.members.length - kept.length,
+            })
           )}
         </p>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" disabled={deciding} onClick={() => decide("reject")}>
             <X className="h-4 w-4" />
-            Decline
+            {t("common.decline")}
           </Button>
           <Button
             variant="primary"
@@ -140,7 +139,7 @@ export function OrgProposalPanel({
             onClick={() => decide("approve")}
           >
             <Check className="h-4 w-4" />
-            {deciding ? "Hiring…" : `Hire ${kept.length}`}
+            {deciding ? t("proposal.hiring") : t("proposal.hire", { n: kept.length })}
           </Button>
         </div>
       </footer>
@@ -188,6 +187,7 @@ function ProposedNode({
   busy: boolean;
   onToggle: () => void;
 }) {
+  const t = useT();
   const Icon = ICONS[member.archetype] ?? Bot;
   const out = member.excluded;
 
@@ -257,7 +257,7 @@ function ProposedNode({
           {out && (
             <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
               <CornerDownRight className="h-3.5 w-3.5" />
-              Skipped. Anyone reporting to them will report to the CEO instead.
+              {t("proposal.skipped")}
             </p>
           )}
         </div>
@@ -265,7 +265,11 @@ function ProposedNode({
         <button
           onClick={onToggle}
           disabled={busy}
-          aria-label={out ? `Put ${member.name} back` : `Skip ${member.name}`}
+          aria-label={
+            out
+              ? t("proposal.putBack", { name: member.name })
+              : t("proposal.skipOne", { name: member.name })
+          }
           className={cn(
             "shrink-0 rounded-md p-1.5 transition disabled:opacity-40",
             "text-muted-foreground/70 hover:bg-muted hover:text-foreground",
@@ -295,6 +299,7 @@ export function TwoRoads({
   onTalkToCeo: () => void;
   onHire: () => void;
 }) {
+  const t = useT();
   return (
     <motion.section
       initial={{ opacity: 0, y: 8 }}
@@ -307,23 +312,21 @@ export function TwoRoads({
           <Sparkles className="h-5 w-5" />
         </span>
         <div className="min-w-0">
-          <h2 className="text-base font-semibold">
-            {ceoName} is your CEO, and the company is otherwise empty.
-          </h2>
+          <h2 className="text-base font-semibold">{t("org.twoRoadsTitle", { ceo: ceoName })}</h2>
           <p className="mt-1.5 max-w-[64ch] text-sm leading-relaxed text-muted-foreground">
             Tell {ceoName} what you want to build and it will design the team — who to hire, in what
             role, reporting to whom — and put the chart in front of you before anyone is hired.
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
             <Button variant="primary" onClick={onTalkToCeo}>
-              Tell {ceoName} the idea
+              {t("org.tellTheIdea", { ceo: ceoName })}
             </Button>
             <button
               onClick={onHire}
               className="inline-flex items-center gap-1.5 rounded-md px-1 py-1 text-sm text-muted-foreground underline-offset-4 transition hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <UserPlus className="h-4 w-4" />
-              or build the team yourself
+              {t("org.orBuildYourself")}
             </button>
           </div>
         </div>

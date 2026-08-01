@@ -349,3 +349,101 @@ async fn you_can_build_the_team_yourself_instead() {
     .await;
     assert!(list["proposals"].as_array().expect("proposals").is_empty());
 }
+
+// ---------- M16: the company's language reaches the agents ----------
+
+#[tokio::test]
+async fn the_company_language_is_chosen_and_reaches_the_agent() {
+    // A stub that writes the prompt it was handed into the deliverable, so the
+    // test reads what the agent actually saw rather than what we hoped to send.
+    const ECHO: &str = r#"#!/bin/sh
+printf '%s' "$OVERMIND_TASK_PROMPT" > ARTIFACT.md
+echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+    let (app, company_id, ceo_id) = setup(ECHO).await;
+
+    // A new company works in English until told otherwise.
+    let (_, companies) = send(&app, "GET", "/api/companies", None).await;
+    assert_eq!(companies["companies"][0]["language"], json!("en"));
+
+    // Nonsense is refused rather than stored and later fed into a prompt.
+    let (s, _) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/language"),
+        Some(json!({ "language": "klingon" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // Switch to Italian.
+    let (s, _) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/language"),
+        Some(json!({ "language": "it" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, companies) = send(&app, "GET", "/api/companies", None).await;
+    assert_eq!(
+        companies["companies"][0]["language"],
+        json!("it"),
+        "it must persist"
+    );
+
+    // The instruction is now in front of the agent doing the work.
+    let (_, task) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/tasks"),
+        Some(json!({ "title": "Confronta i proiettori", "execution_kind": "knowledge" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    let (_, started) = send(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": ceo_id })),
+    )
+    .await;
+    let session_id = started["session_id"].as_str().expect("session").to_string();
+    for _ in 0..100 {
+        let (_, sess) = send(&app, "GET", &format!("/api/sessions/{session_id}"), None).await;
+        match sess["status"].as_str().unwrap_or("") {
+            "completed" | "failed" => break,
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    }
+    let (_, artifacts) = send(
+        &app,
+        "GET",
+        &format!("/api/tasks/{task_id}/artifacts"),
+        None,
+    )
+    .await;
+    let prompt = artifacts["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .find(|a| a["title"] == json!("ARTIFACT.md"))
+        .and_then(|a| a["content"].as_str())
+        .expect("the echoed prompt");
+
+    assert!(
+        prompt.contains("in Italian"),
+        "the agent was never told which language to write in: {prompt}"
+    );
+    assert!(
+        prompt.contains("Keep identifiers, code, file paths"),
+        "and told what NOT to translate: {prompt}"
+    );
+}

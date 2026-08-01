@@ -686,6 +686,9 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
 
     // Calls this agent sat in on are settled — it works from them (ADR-0020).
     let decisions_block = crate::meeting::decisions_block(&ctx.state, &ctx.agent_id).await;
+    // The company's language (M16): what the agent writes must match the UI.
+    let language =
+        crate::i18n::prompt_line(&crate::i18n::company_language(&ctx.state, &ctx.company_id).await);
 
     // How the agent is expected to deliver, per execution kind (ADR-0017).
     let deliver = match ctx.exec_kind {
@@ -710,12 +713,12 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
 
     let prompt = if resume {
         format!(
-            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}",
+            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}{language}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     } else {
         format!(
-            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}\n\n{deliver}{meeting_hint}",
+            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}\n\n{deliver}{meeting_hint}{language}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     };

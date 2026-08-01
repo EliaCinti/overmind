@@ -63,6 +63,8 @@ fn api_router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/companies", post(create_company).get(list_companies))
         .route("/archetypes", get(list_archetypes))
+        .route("/companies/{company_id}/language", post(set_language))
+        .route("/languages", get(list_languages))
         .route(
             "/companies/{company_id}/agents",
             post(hire_agent).get(list_agents),
@@ -308,6 +310,7 @@ async fn create_company(
         Json(json!({
             "id": id,
             "name": req.name.trim(),
+            "language": crate::i18n::DEFAULT,
             "created_at": created_at,
             "ceo": ceo,
         })),
@@ -315,13 +318,15 @@ async fn create_company(
 }
 
 async fn list_companies(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT id, name, created_at FROM companies ORDER BY created_at")
+    let rows: Vec<(String, String, String, String)> =
+        sqlx::query_as("SELECT id, name, language, created_at FROM companies ORDER BY created_at")
             .fetch_all(&state.pool)
             .await?;
     let companies: Vec<Value> = rows
         .into_iter()
-        .map(|(id, name, created_at)| json!({ "id": id, "name": name, "created_at": created_at }))
+        .map(|(id, name, language, created_at)| {
+            json!({ "id": id, "name": name, "language": language, "created_at": created_at })
+        })
         .collect();
     Ok(Json(json!({ "companies": companies })))
 }
@@ -1686,6 +1691,47 @@ async fn get_meeting(
             })
         }).collect::<Vec<_>>(),
     })))
+}
+
+#[derive(Deserialize)]
+struct SetLanguage {
+    language: String,
+}
+
+/// Choose the language the company works in (M16). It governs the interface
+/// *and* what the agents write, which is why it lives here and not in the
+/// browser: a per-tab preference cannot instruct an agent.
+async fn set_language(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<SetLanguage>,
+) -> Result<Json<Value>, ApiError> {
+    if !crate::i18n::is_supported(&req.language) {
+        return Err(ApiError::Invalid(format!(
+            "unsupported language `{}`",
+            req.language
+        )));
+    }
+    let done = sqlx::query("UPDATE companies SET language = ? WHERE id = ?")
+        .bind(&req.language)
+        .bind(&company_id)
+        .execute(&state.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("company"));
+    }
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": company_id, "language": req.language })))
+}
+
+/// The languages on offer, each named in its own language.
+async fn list_languages() -> Json<Value> {
+    Json(json!({
+        "languages": crate::i18n::SUPPORTED
+            .iter()
+            .map(|(code, name)| json!({ "code": code, "name": name }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 // ---------- org proposals: the CEO designs a team, you decide (M15) ----------

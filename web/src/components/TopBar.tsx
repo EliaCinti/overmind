@@ -10,11 +10,13 @@ import {
   WifiOff,
   BrainCircuit,
 } from "lucide-react";
-import type { Company, View } from "../lib/api";
+import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Segmented } from "./ui/controls";
 import { Inbox } from "./Inbox";
+import { LanguageMenu } from "./LanguageMenu";
+import { useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
 export function TopBar({
@@ -33,6 +35,8 @@ export function TopBar({
   onOpenMeeting,
   connected,
   tick,
+  language,
+  onChangeLanguage,
   theme,
   onToggleTheme,
 }: {
@@ -51,9 +55,12 @@ export function TopBar({
   onOpenMeeting: (meetingId: string) => void;
   connected: boolean;
   tick: number;
+  language: LanguageCode;
+  onChangeLanguage: (code: LanguageCode) => void;
   theme: string;
   onToggleTheme: () => void;
 }) {
+  const t = useT();
   return (
     <header className="flex items-center gap-3 border-b border-border px-6 py-3">
       <div className="flex items-center gap-2">
@@ -65,16 +72,18 @@ export function TopBar({
 
       <select
         value={companyId ?? ""}
-        onChange={(e) => (e.target.value === "__new" ? onNewCompany() : onSelectCompany(e.target.value))}
-        className="h-9 rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onChange={(e) =>
+          e.target.value === "__new" ? onNewCompany() : onSelectCompany(e.target.value)
+        }
+        className="h-9 max-w-40 shrink rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        {companies.length === 0 && <option value="">No company</option>}
+        {companies.length === 0 && <option value="">{t("nav.noCompany")}</option>}
         {companies.map((c) => (
           <option key={c.id} value={c.id}>
             {c.name}
           </option>
         ))}
-        <option value="__new">+ New company…</option>
+        <option value="__new">{t("nav.newCompany")}</option>
       </select>
 
       {showViews && (
@@ -83,10 +92,10 @@ export function TopBar({
             value={view}
             onChange={onViewChange}
             options={[
-              { value: "chat", label: "Chat" },
-              { value: "board", label: "Board" },
-              { value: "meetings", label: "Meetings" },
-              { value: "org", label: "Org" },
+              { value: "chat", label: t("nav.chat") },
+              { value: "board", label: t("nav.board") },
+              { value: "meetings", label: t("nav.meetings") },
+              { value: "org", label: t("nav.org") },
             ]}
           />
         </div>
@@ -109,15 +118,21 @@ export function TopBar({
           <>
             <Button variant="outline" size="sm" onClick={onHire}>
               <UserPlus className="h-4 w-4" />
-              Hire
+              {t("nav.hire")}
             </Button>
             <Button variant="primary" size="sm" onClick={onNewTask} disabled={!canCreateTask}>
               <Plus className="h-4 w-4" />
-              New task
+              {t("nav.newTask")}
             </Button>
           </>
         )}
-        <Button variant="ghost" size="icon" onClick={onToggleTheme} aria-label="Toggle theme">
+        {companyId && <LanguageMenu language={language} onChange={onChangeLanguage} />}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onToggleTheme}
+          aria-label={t("nav.toggleTheme")}
+        >
           {theme === "dark" ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
         </Button>
       </div>
@@ -131,7 +146,14 @@ function Logo() {
   return (
     <svg viewBox="0 0 220 220" className="h-7 w-7" fill="none" role="img" aria-label="Overmind">
       <defs>
-        <linearGradient id="om-track" x1="40" y1="110" x2="154" y2="110" gradientUnits="userSpaceOnUse">
+        <linearGradient
+          id="om-track"
+          x1="40"
+          y1="110"
+          x2="154"
+          y2="110"
+          gradientUnits="userSpaceOnUse"
+        >
           <stop offset="0" stopColor="#6d6386" stopOpacity="0.3" />
           <stop offset="0.55" stopColor="#7c5cff" stopOpacity="0.75" />
           <stop offset="1" stopColor="#9d7bff" stopOpacity="1" />
