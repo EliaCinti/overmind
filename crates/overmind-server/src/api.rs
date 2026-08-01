@@ -1479,12 +1479,13 @@ async fn list_meetings(
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
         Option<String>,
     );
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT m.id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap, m.status,
-                m.decision, m.approval_id, m.created_at, m.decided_at
+                m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at
          FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
          WHERE m.company_id = ? ORDER BY m.created_at DESC",
     )
@@ -1503,6 +1504,7 @@ async fn list_meetings(
                 turn_cap,
                 status,
                 decision,
+                decline_note,
                 approval_id,
                 created_at,
                 decided_at,
@@ -1511,7 +1513,7 @@ async fn list_meetings(
                     "id": id, "topic": topic, "reason": reason,
                     "convener_agent_id": convener_agent_id, "convener_name": convener_name,
                     "turn_cap": turn_cap, "status": status, "decision": decision,
-                    "approval_id": approval_id,
+                    "decline_note": decline_note, "approval_id": approval_id,
                     "created_at": created_at, "decided_at": decided_at,
                 })
             },
@@ -1536,12 +1538,13 @@ async fn get_meeting(
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
         String,
         Option<String>,
     );
     let row: Option<MeetingRow> = sqlx::query_as(
         "SELECT m.id, m.company_id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap,
-                m.status, m.decision, m.approval_id, m.created_at, m.decided_at
+                m.status, m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at
          FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
          WHERE m.id = ?",
     )
@@ -1558,6 +1561,7 @@ async fn get_meeting(
         turn_cap,
         status,
         decision,
+        decline_note,
         approval_id,
         created_at,
         decided_at,
@@ -1586,7 +1590,7 @@ async fn get_meeting(
             "id": id, "company_id": company_id, "topic": topic, "reason": reason,
             "convener_agent_id": convener_agent_id, "convener_name": convener_name,
             "turn_cap": turn_cap, "status": status, "decision": decision,
-            "approval_id": approval_id,
+            "decline_note": decline_note, "approval_id": approval_id,
             "created_at": created_at, "decided_at": decided_at,
         },
         "participants": participants.into_iter().map(|(id, name, title)| {

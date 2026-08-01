@@ -29,6 +29,15 @@ const MAX_TURN_CAP: i64 = 12;
 /// The default when an agent asks for a meeting without saying how long.
 const DEFAULT_TURN_CAP: i64 = 6;
 
+/// An agent may have **one** meeting request waiting on the human at a time.
+/// Autonomy is not the right to interrupt without limit: until you have
+/// answered the last one, the agent works with what it has.
+const MAX_PENDING_PER_AGENT: i64 = 1;
+
+/// And the company as a whole may not queue more than this. Ten agents each
+/// asking once is still ten interruptions.
+const MAX_PENDING_PER_COMPANY: i64 = 3;
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -104,6 +113,31 @@ pub async fn request(
     let topic = req.topic.trim();
     if topic.is_empty() {
         return Err(CeoError::Invalid("a meeting needs a topic".into()));
+    }
+
+    // Restraint (M13.5). Checked before any work: an agent that is already
+    // waiting on you does not get to ask again, and the inbox has a ceiling.
+    let (mine,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM meetings WHERE convener_agent_id = ? AND status = 'requested'",
+    )
+    .bind(convener_agent_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if mine >= MAX_PENDING_PER_AGENT {
+        return Err(CeoError::Invalid(
+            "you already have a meeting request waiting on the human; carry on with what you have until it is answered".into(),
+        ));
+    }
+    let (queued,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM meetings WHERE company_id = ? AND status = 'requested'",
+    )
+    .bind(company_id)
+    .fetch_one(&state.pool)
+    .await?;
+    if queued >= MAX_PENDING_PER_COMPANY {
+        return Err(CeoError::Invalid(format!(
+            "the company already has {queued} meeting requests waiting on the human"
+        )));
     }
 
     // Build the room: the convener, then whoever it named, de-duplicated.
@@ -357,9 +391,14 @@ pub async fn decline(
         return Err(CeoError::Invalid(format!("meeting is already {status}")));
     }
     let mut tx = state.pool.begin().await?;
+    // The note is stored on the meeting, not only in the notification: it has
+    // to reach the agent that asked (see `decisions_block`), or the same
+    // request comes straight back on its next turn.
     sqlx::query(
-        "UPDATE meetings SET status = 'declined', decided_at = ? WHERE id = ? AND status = 'requested'",
+        "UPDATE meetings SET status = 'declined', decline_note = ?, decided_at = ?
+         WHERE id = ? AND status = 'requested'",
     )
+    .bind(note.map(str::trim).filter(|n| !n.is_empty()))
     .bind(now())
     .bind(meeting_id)
     .execute(&mut *tx)
@@ -538,7 +577,20 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
         let turn = turn_json(&output);
         let said = said_or_raw(turn.as_ref(), &output);
         record_turn(state, company_id, meeting_id, &speaker.id, ordinal, &said).await?;
-        transcript.push((speaker.name.clone(), said));
+        transcript.push((speaker.name.clone(), said.clone()));
+
+        // The room concludes there was nothing to decide. Cheaper and more
+        // honest than forcing a decision out of a meeting that should not have
+        // been called — and it is the self-correction that makes asking for a
+        // meeting safe: a wrong room costs one turn, not a fake settled call.
+        if let Some(why) = turn
+            .as_ref()
+            .and_then(|v| v.get("no_decision_needed").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+        {
+            return drop_meeting(state, company_id, meeting_id, &topic, &speaker.name, why).await;
+        }
 
         // Someone settled it: the meeting ends early, on their decision.
         if let Some(decision) = turn
@@ -686,7 +738,8 @@ fn turn_prompt(
         "Speak once, from what your role is responsible for — say the thing the others cannot see from where they sit. \
          Do not agree without adding something: if you agree, name the condition, cost or risk that agreement carries. If you disagree, say why, concretely, and give the alternative you would take instead. \
          Never restate a point already made; if you genuinely have nothing to add, say so in one line and defer. \
-         Set \"decision\" ONLY if the group has genuinely converged AND you can state a concrete, actionable call in one sentence. If you are the first to speak on it, you are almost certainly too early. Otherwise omit it and let the discussion continue."
+         Set \"decision\" ONLY if the group has genuinely converged AND you can state a concrete, actionable call in one sentence. If you are the first to speak on it, you are almost certainly too early. Otherwise omit it and let the discussion continue. \
+         If this room should not have been called at all — the question answers itself, or it is one person's call to make — set \"no_decision_needed\" with one line saying why, and the meeting closes without a decision. That is a good outcome, not a failure."
     };
 
     format!(
@@ -696,7 +749,7 @@ fn turn_prompt(
          The meeting so far:\n{so_far}{memory_block}\n\n\
          {instruction}\n\n\
          Respond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n\
-         {{\"say\": \"<your contribution>\", \"decision\": \"<the group's decision — omit unless settled>\"}}",
+         {{\"say\": \"<your contribution>\", \"decision\": \"<the group's decision — omit unless settled>\", \"no_decision_needed\": \"<omit unless this room is pointless>\"}}",
         name = speaker.name,
         role = speaker.role,
     )
@@ -727,12 +780,18 @@ async fn record_turn(
     Ok(())
 }
 
-/// The settled calls an agent sat in on, newest first. A meeting is only worth
-/// holding if it changes what happens next: this is how the decision follows
-/// each participant back into its own work — injected into the prompt of its
-/// next task run (ADR-0017) and of its next conversational turn (ADR-0019).
+/// What past meetings mean for this agent's next piece of work: the calls it
+/// must act on, and the requests you turned down.
+///
+/// Both halves matter. A decision is only worth the meeting if it changes what
+/// happens next. And a **refusal is invisible to the agent that asked** unless
+/// it is put here — the decline notification goes to the human, so without this
+/// the agent re-requests the same meeting on its very next turn, forever.
+///
+/// Injected into the prompt of the next task run (ADR-0017) and of the next
+/// conversational turn (ADR-0019).
 pub async fn decisions_block(state: &AppState, agent_id: &str) -> String {
-    let rows: Vec<(String, String)> = sqlx::query_as(
+    let decided: Vec<(String, String)> = sqlx::query_as(
         "SELECT m.topic, m.decision FROM meetings m
          JOIN meeting_participants mp ON mp.meeting_id = m.id
          WHERE mp.agent_id = ? AND m.status = 'decided' AND m.decision IS NOT NULL
@@ -742,17 +801,45 @@ pub async fn decisions_block(state: &AppState, agent_id: &str) -> String {
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
-    if rows.is_empty() {
-        return String::new();
-    }
-    let list = rows
-        .iter()
-        .map(|(topic, decision)| format!("- On \"{topic}\": {decision}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "\n\nDecisions from meetings you took part in — these are settled, act on them and do not re-litigate:\n{list}"
+
+    // Only the convener is told: it is the one who would otherwise ask again.
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT topic, decline_note FROM meetings
+         WHERE convener_agent_id = ? AND status IN ('declined', 'dropped')
+         ORDER BY decided_at DESC LIMIT 3",
     )
+    .bind(agent_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let mut out = String::new();
+    if !decided.is_empty() {
+        let list = decided
+            .iter()
+            .map(|(topic, decision)| format!("- On \"{topic}\": {decision}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push_str(&format!(
+            "\n\nDecisions from meetings you took part in — these are settled, act on them and do not re-litigate:\n{list}"
+        ));
+    }
+    if !refused.is_empty() {
+        let list = refused
+            .iter()
+            .map(
+                |(topic, note)| match note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                    Some(n) => format!("- \"{topic}\" — {n}"),
+                    None => format!("- \"{topic}\" — no reason given"),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        out.push_str(&format!(
+            "\n\nMeetings you asked for that did NOT happen. Do not ask again for these — take the call yourself, or say plainly that you are blocked:\n{list}"
+        ));
+    }
+    out
 }
 
 /// Send every participant back to work with the decision in hand. The wakeup
@@ -864,6 +951,62 @@ async fn conclude(
             company_id,
         )
         .await;
+    Ok(())
+}
+
+/// The room decided there was nothing to decide. Recorded as `dropped`, not
+/// `decided`: a dropped meeting must never be injected into anyone's work as a
+/// settled call. The convener is told (via `decisions_block`) so it does not
+/// call the same room again.
+async fn drop_meeting(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+    topic: &str,
+    who: &str,
+    why: &str,
+) -> Result<(), CeoError> {
+    let convener: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT convener_agent_id FROM meetings WHERE id = ?")
+            .bind(meeting_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let convener = convener.and_then(|(c,)| c);
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE meetings SET status = 'dropped', decline_note = ?, decided_at = ?
+         WHERE id = ? AND status = 'open'",
+    )
+    .bind(format!("{who}: {why}"))
+    .bind(now())
+    .bind(meeting_id)
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        event_kind::MEETING_DROPPED,
+        &json!({ "meeting_id": meeting_id, "by": who, "reason": why }),
+    )
+    .await?;
+    let notification = notify::post(
+        &mut tx,
+        company_id,
+        notify::New {
+            kind: notify::kind::MEETING_DROPPED,
+            title: &format!("No decision needed: {topic}"),
+            body: &format!("{who} closed the room: {why}"),
+            agent_id: convener.as_deref(),
+            subject: Some(("meeting", meeting_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    notify::deliver(state, company_id, &notification);
     Ok(())
 }
 

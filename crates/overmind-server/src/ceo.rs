@@ -446,7 +446,7 @@ async fn run_agent_turn(
         .unwrap_or_default();
 
     let prompt = format!(
-        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets. Return an empty tasks array and omit escalate/meeting when nothing is needed."
+        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Return an empty tasks array and omit escalate/meeting when nothing is needed."
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -462,7 +462,7 @@ async fn run_agent_turn(
 
     // Parse the plan. A missing/garbled plan degrades to "reply with the raw
     // output, open no tasks" rather than failing the turn.
-    let plan = last_json_object(&output);
+    let plan = plan_json(&output);
     let reply = plan
         .as_ref()
         .and_then(|v| v.get("reply").and_then(Value::as_str))
@@ -622,6 +622,27 @@ pub(crate) async fn run_adapter(
         ))),
         Err(_) => Err(CeoError::Invalid("agent turn timed out".into())),
     }
+}
+
+/// The agent's own plan, picked out of its output.
+///
+/// Not simply the last JSON object: an adapter prints its **own** result
+/// envelope (cost, usage, session id) after whatever the agent said, so the
+/// last object on stdout is usually the adapter's, not the agent's. We take
+/// the last one that actually looks like a plan.
+fn plan_json(output: &str) -> Option<Value> {
+    for line in output.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(line)
+            && (v.get("reply").is_some() || v.get("tasks").is_some() || v.get("meeting").is_some())
+        {
+            return Some(v);
+        }
+    }
+    last_json_object(output)
 }
 
 /// The last line of output that parses as a JSON object.

@@ -205,6 +205,7 @@ pub mod event_kind {
     pub const MEETING_CONVENED: &str = "meeting.convened";
     pub const MEETING_DECIDED: &str = "meeting.decided";
     pub const MEETING_DECLINED: &str = "meeting.declined";
+    pub const MEETING_DROPPED: &str = "meeting.dropped";
     pub const MEETING_FAILED: &str = "meeting.failed";
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";

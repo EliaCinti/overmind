@@ -20,6 +20,8 @@ pub mod kind {
     pub const MEETING_REQUESTED: &str = "meeting.requested";
     pub const MEETING_DECIDED: &str = "meeting.decided";
     pub const MEETING_DECLINED: &str = "meeting.declined";
+    /// The room met and concluded there was nothing to decide.
+    pub const MEETING_DROPPED: &str = "meeting.dropped";
     pub const MEETING_FAILED: &str = "meeting.failed";
     /// A gated agent wants to start a task and needs you (ADR-0012).
     pub const APPROVAL_REQUESTED: &str = "approval.requested";

@@ -753,3 +753,292 @@ async fn a_meeting_needs_a_topic_and_two_participants() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "unknown participant");
 }
+
+/// M14 / ADR-0005: the agent's characterization must reach the work itself.
+/// This stub writes the prompt it was handed into the deliverable, so the test
+/// can assert on what the agent actually saw.
+const ECHO_PROMPT_STUB: &str = r#"#!/bin/sh
+printf '%s' "$OVERMIND_TASK_PROMPT" > ARTIFACT.md
+echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+
+#[tokio::test]
+async fn a_working_agent_is_told_who_it_is() {
+    let env = setup(ECHO_PROMPT_STUB).await;
+
+    // Two agents, deliberately different: role, focus areas and brief.
+    let (_, media) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(json!({
+            "name": "Nova",
+            "archetype": "researcher",
+            "title": "Media & A/V quality",
+            "reports_to": env.leader_id,
+            "custom_brief": "Judge everything by what reaches the viewer's eyes and ears.",
+            "traits": { "focus_areas": ["calibration", "acoustics", "picture quality"] },
+        })),
+    )
+    .await;
+    let media_id = media["id"].as_str().expect("media agent id").to_string();
+
+    let prompt_of = |agent_id: String, title: &'static str| {
+        let app = env.app.clone();
+        let company_id = env.company_id.clone();
+        async move {
+            let task_id = run_knowledge_task(&app, &company_id, &agent_id, title).await;
+            let (_, artifacts) = send(
+                &app,
+                "GET",
+                &format!("/api/tasks/{task_id}/artifacts"),
+                None,
+            )
+            .await;
+            artifacts["artifacts"]
+                .as_array()
+                .expect("artifacts")
+                .iter()
+                .find(|a| a["title"] == json!("ARTIFACT.md"))
+                .and_then(|a| a["content"].as_str())
+                .expect("the echoed prompt")
+                .to_string()
+        }
+    };
+
+    let media_prompt = prompt_of(media_id, "Pick the projector").await;
+    let plain_prompt = prompt_of(env.specialist_id.clone(), "Pick the projector").await;
+
+    // The specialist knows who it is...
+    assert!(
+        media_prompt.contains("You are Nova, the Media & A/V quality"),
+        "no persona in the prompt: {media_prompt}"
+    );
+    assert!(
+        media_prompt.contains("calibration") && media_prompt.contains("acoustics"),
+        "focus areas missing: {media_prompt}"
+    );
+    assert!(
+        media_prompt.contains("viewer's eyes and ears"),
+        "custom_brief missing: {media_prompt}"
+    );
+
+    // ...and two different agents no longer get the same instructions.
+    assert_ne!(
+        media_prompt, plain_prompt,
+        "role-blind: different agents received an identical prompt"
+    );
+    assert!(
+        plain_prompt.contains("You are Bruno,"),
+        "the plain agent has a persona too: {plain_prompt}"
+    );
+}
+
+// ---------- M13.5: restraint — autonomous, but not free to flood you ----------
+
+/// Asks for a meeting on every single turn. Without restraint this is the
+/// "10k requests" agent.
+const ALWAYS_ASKS_STUB: &str = r#"#!/bin/sh
+case "$OVERMIND_TASK_PROMPT" in
+  *"in a meeting with your colleagues"*)
+    echo '{"say":"Fine.","decision":"Do it."}' ;;
+  *)
+    echo '{"reply":"We should meet.","tasks":[],"meeting":{"topic":"Yet another room","reason":"I would like company","participants":["Guard"],"turn_cap":2}}' ;;
+esac
+"#;
+
+#[tokio::test]
+async fn an_agent_may_keep_only_one_request_waiting_on_you() {
+    let env = setup(ALWAYS_ASKS_STUB).await;
+    let uri = format!(
+        "/api/companies/{}/agents/{}/conversation/messages",
+        env.company_id, env.specialist_id
+    );
+
+    // Three turns, three attempts to convene.
+    for i in 0..3 {
+        send(
+            &env.app,
+            "POST",
+            &uri,
+            Some(json!({ "content": format!("turn {i}") })),
+        )
+        .await;
+        wait_for_meeting(&env.app, &env.company_id).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let (_, list) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/meetings", env.company_id),
+        None,
+    )
+    .await;
+    let pending = list["meetings"]
+        .as_array()
+        .expect("meetings")
+        .iter()
+        .filter(|m| m["status"] == json!("requested"))
+        .count();
+    assert_eq!(
+        pending, 1,
+        "one pending request per agent, got {pending}: {list}"
+    );
+}
+
+/// Asks for a meeting from chat, and echoes the prompt it is given when it
+/// works a task — so the test can read what the agent actually saw.
+const ASKS_THEN_ECHOES_STUB: &str = r#"#!/bin/sh
+case "$OVERMIND_TASK_PROMPT" in
+  *"You are working on the task"*)
+    printf '%s' "$OVERMIND_TASK_PROMPT" > ARTIFACT.md ;;
+  *"in a meeting with your colleagues"*)
+    echo '{"say":"Fine.","decision":"Do it."}' ;;
+  *)
+    echo '{"reply":"We should meet.","tasks":[],"meeting":{"topic":"Which font for the label","reason":"I would like company","participants":["Guard"],"turn_cap":2}}' ;;
+esac
+echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+
+#[tokio::test]
+async fn a_declined_request_reaches_the_agent_that_asked() {
+    let env = setup(ASKS_THEN_ECHOES_STUB).await;
+    send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.specialist_id
+        ),
+        Some(json!({ "content": "start" })),
+    )
+    .await;
+    let meeting = wait_for_meeting(&env.app, &env.company_id).await;
+    let meeting_id = meeting["id"].as_str().expect("id").to_string();
+
+    // You decline, with a reason.
+    send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/approvals/{}/decision",
+            meeting["approval_id"].as_str().expect("approval")
+        ),
+        Some(json!({ "decision": "reject", "note": "decide it yourself, it is your call" })),
+    )
+    .await;
+    let m = wait_for_status(&env.app, &meeting_id, "declined").await;
+    assert_eq!(
+        m["meeting"]["decline_note"],
+        json!("decide it yourself, it is your call"),
+        "the reason must be stored on the meeting, not only in the notification"
+    );
+
+    // The real point: your refusal, and your reason, are in front of the agent
+    // the next time it works. Without this it re-asks on its very next turn.
+    let task_id = run_knowledge_task(
+        &env.app,
+        &env.company_id,
+        &env.specialist_id,
+        "Carry on alone",
+    )
+    .await;
+    let (_, artifacts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{task_id}/artifacts"),
+        None,
+    )
+    .await;
+    let prompt = artifacts["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .find(|a| a["title"] == json!("ARTIFACT.md"))
+        .and_then(|a| a["content"].as_str())
+        .expect("the echoed prompt")
+        .to_string();
+
+    assert!(
+        prompt.contains("Meetings you asked for that did NOT happen"),
+        "the refusal never reached the agent: {prompt}"
+    );
+    assert!(
+        prompt.contains("Which font for the label"),
+        "which meeting was refused: {prompt}"
+    );
+    assert!(
+        prompt.contains("decide it yourself"),
+        "your reason must travel with it: {prompt}"
+    );
+    assert!(
+        prompt.contains("only ONE request waiting"),
+        "the agent is told the limit exists, not just blocked by it: {prompt}"
+    );
+}
+
+/// The room is asked to meet, looks at the topic, and says it is pointless.
+const DROPS_THE_ROOM_STUB: &str = r#"#!/bin/sh
+case "$OVERMIND_TASK_PROMPT" in
+  *"in a meeting with your colleagues"*)
+    echo '{"say":"This is my call to make, we do not need a room.","no_decision_needed":"it is a single-owner decision"}' ;;
+  *)
+    echo '{"reply":"Calling a room.","tasks":[],"meeting":{"topic":"Which font for the label","reason":"seemed worth discussing","participants":["Guard"],"turn_cap":4}}' ;;
+esac
+"#;
+
+#[tokio::test]
+async fn a_pointless_room_closes_without_inventing_a_decision() {
+    let env = setup(DROPS_THE_ROOM_STUB).await;
+    send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.specialist_id
+        ),
+        Some(json!({ "content": "go" })),
+    )
+    .await;
+    let meeting = wait_for_meeting(&env.app, &env.company_id).await;
+    let meeting_id = meeting["id"].as_str().expect("id").to_string();
+    send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/approvals/{}/decision",
+            meeting["approval_id"].as_str().expect("approval")
+        ),
+        Some(json!({ "decision": "approve" })),
+    )
+    .await;
+
+    let m = wait_for_status(&env.app, &meeting_id, "dropped").await;
+    assert!(
+        m["meeting"]["decision"].is_null(),
+        "a dropped room must NOT produce a decision: {m}"
+    );
+    assert!(
+        m["meeting"]["decline_note"]
+            .as_str()
+            .unwrap_or("")
+            .contains("single-owner"),
+        "the reason it was dropped is recorded: {m}"
+    );
+    assert_eq!(
+        m["turns"].as_array().map(Vec::len),
+        Some(1),
+        "it closes on the first turn, not at the cap"
+    );
+
+    let kinds = audit_kinds(&env.app).await;
+    assert!(kinds.iter().any(|k| k == "meeting.dropped"), "{kinds:?}");
+    assert!(
+        !kinds.iter().any(|k| k == "meeting.decided"),
+        "nothing was decided: {kinds:?}"
+    );
+
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}

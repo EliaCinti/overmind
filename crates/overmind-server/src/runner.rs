@@ -23,6 +23,81 @@ use crate::governance;
 /// run belongs to the adapter's own result envelope.
 const MEETING_REQUEST_FILE: &str = "MEETING_REQUEST.json";
 
+/// Who the agent is, compiled for the prompt (ADR-0005 / M14).
+///
+/// The characterization is structured data — archetype, title, focus areas,
+/// brief — and ADR-0005 says it must compile into the agent's *prompt context*.
+/// Until M14 it only reached conversational turns: a task run got a prompt with
+/// no persona at all, so a "Media & A/V quality" agent and a backend developer
+/// were handed identical instructions for the same task.
+pub(crate) struct Persona {
+    pub name: String,
+    /// Job title if set, else the archetype's human name.
+    pub role: String,
+    pub focus_areas: Vec<String>,
+    pub brief: Option<String>,
+}
+
+impl Persona {
+    /// The "who you are" block that opens a task prompt. Empty only if the
+    /// agent could not be loaded — never silently role-blind.
+    fn block(&self) -> String {
+        let mut s = format!("You are {}, the {} of an AI company.", self.name, self.role);
+        if !self.focus_areas.is_empty() {
+            s.push_str(&format!(
+                " What you are relied on for: {}.",
+                self.focus_areas.join(", ")
+            ));
+        }
+        if let Some(brief) = self
+            .brief
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            s.push_str(&format!("\nYour brief: {brief}"));
+        }
+        s.push_str("\n\nWork in role: bring the judgement your role is hired for, and say so when the task strays outside it.");
+        s
+    }
+}
+
+/// (name, title, archetype name, traits JSON, custom_brief)
+type PersonaRow = (String, Option<String>, String, String, Option<String>);
+
+/// Load an agent's characterization for the prompt. Best-effort by design:
+/// a missing archetype row must not stop work, it just costs the persona.
+async fn load_persona(state: &AppState, agent_id: &str) -> Option<Persona> {
+    let row: Option<PersonaRow> = sqlx::query_as(
+        "SELECT a.name, a.title, ar.name, a.traits, a.custom_brief
+         FROM agents a JOIN archetypes ar ON ar.id = a.archetype_id
+         WHERE a.id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let (name, title, archetype_name, traits, brief) = row?;
+    let focus_areas = serde_json::from_str::<Value>(&traits)
+        .ok()
+        .and_then(|v| {
+            v.get("focus_areas").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    Some(Persona {
+        name,
+        role: title.unwrap_or(archetype_name),
+        focus_areas,
+        brief,
+    })
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
     #[error("{0} not found")]
@@ -314,6 +389,7 @@ pub async fn start_task(
         task_id: task_id.to_string(),
         company_id,
         agent_id: agent_id.to_string(),
+        persona: load_persona(state, agent_id).await,
         worktree_dir: work_dir,
         title,
         description,
@@ -387,6 +463,7 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         task_id: task_id.clone(),
         company_id: company_id.clone(),
         agent_id: agent_id.clone(),
+        persona: load_persona(state, &agent_id).await,
         worktree_dir: PathBuf::from(&workspace_path),
         title,
         description,
@@ -450,6 +527,8 @@ pub(crate) struct SessionContext {
     task_id: String,
     company_id: String,
     agent_id: String,
+    /// Who is doing the work (ADR-0005). `None` only if the agent row vanished.
+    persona: Option<Persona>,
     /// The agent's cwd: a git worktree for `code`, a scratch dir for `knowledge`.
     worktree_dir: PathBuf,
     title: String,
@@ -587,15 +666,23 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     // Collaboration is expected: an agent that hits a call it should not make
     // alone asks for a meeting instead of guessing (ADR-0020). Nothing happens
     // until the human approves, so this is cheap to ask for and safe to ignore.
-    let meeting_hint = "\n\nIf finishing this needs a decision you should not take alone — it affects teammates' work, or you are blocked on a call above your role — write a file named MEETING_REQUEST.json in this directory: {\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}. It reaches the human for approval; do not wait for it, finish what you can.";
+    let meeting_hint = "\n\nIf finishing this needs a decision you should not take alone — it affects teammates' work, or you are blocked on a call above your role — write a file named MEETING_REQUEST.json in this directory: {\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}. It reaches the human for approval; do not wait for it, finish what you can.\nAsk sparingly: you may have only ONE request waiting on the human at a time, and every request costs them an interruption. If you can take the call yourself, take it.";
+    // Who is doing the work (ADR-0005 / M14). Without this the prompt is
+    // role-blind: every agent gets identical instructions for the same task.
+    let persona_block = ctx
+        .persona
+        .as_ref()
+        .map(|p| format!("{}\n\n", p.block()))
+        .unwrap_or_default();
+
     let prompt = if resume {
         format!(
-            "You are resuming interrupted work on the task \"{}\".\n\n{}{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}",
+            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     } else {
         format!(
-            "You are working on the task \"{}\".\n\n{}{}{}\n\n{deliver}{meeting_hint}",
+            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}\n\n{deliver}{meeting_hint}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     };
