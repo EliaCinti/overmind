@@ -6,13 +6,7 @@ export type Autonomy = "propose_only" | "act_with_approval" | "act_within_budget
 export type ReviewStrictness = "lenient" | "standard" | "strict";
 
 export type TaskStatus =
-  | "backlog"
-  | "todo"
-  | "in_progress"
-  | "in_review"
-  | "blocked"
-  | "done"
-  | "cancelled";
+  "backlog" | "todo" | "in_progress" | "in_review" | "blocked" | "done" | "cancelled";
 
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
@@ -116,6 +110,35 @@ export interface MeetingDetail {
   meeting: Meeting & { company_id: string };
   participants: { id: string; name: string; title: string | null }[];
   turns: MeetingTurn[];
+}
+
+export type OrgProposalStatus = "proposed" | "accepted" | "rejected";
+
+/** One hire the CEO suggests. `reports_to` is another member's *name*. */
+export interface OrgProposalMember {
+  id: string;
+  position: number;
+  name: string;
+  archetype: string;
+  title: string | null;
+  reports_to: string | null;
+  brief: string | null;
+  rationale: string | null;
+  excluded: boolean;
+  hired_agent_id: string | null;
+}
+
+/** A team the CEO drew up (M15). Nobody is hired until you accept. */
+export interface OrgProposal {
+  id: string;
+  summary: string;
+  proposed_by_name: string | null;
+  status: OrgProposalStatus;
+  decline_note: string | null;
+  approval_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+  members: OrgProposalMember[];
 }
 
 export interface Project {
@@ -275,10 +298,8 @@ export const api = {
     req<{ agents: Agent[] }>("GET", `/companies/${companyId}/agents`).then((r) => r.agents),
   hireAgent: (companyId: string, body: HireAgentBody) =>
     req<Agent>("POST", `/companies/${companyId}/agents`, body),
-  reassignAgent: (
-    agentId: string,
-    body: { reports_to?: string | null; title?: string },
-  ) => req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
+  reassignAgent: (agentId: string, body: { reports_to?: string | null; title?: string }) =>
+    req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
   pauseAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/pause`),
   resumeAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/resume`),
   terminateAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/terminate`),
@@ -304,10 +325,19 @@ export const api = {
   readAllNotifications: (companyId: string) =>
     req<{ read: number }>("POST", `/companies/${companyId}/notifications/read`),
 
-  listMeetings: (companyId: string) =>
-    req<{ meetings: Meeting[] }>("GET", `/companies/${companyId}/meetings`).then(
-      (r) => r.meetings,
+  listOrgProposals: (companyId: string) =>
+    req<{ proposals: OrgProposal[] }>("GET", `/companies/${companyId}/org-proposals`).then(
+      (r) => r.proposals,
     ),
+  setProposalMemberExcluded: (proposalId: string, memberId: string, excluded: boolean) =>
+    req<{ id: string; excluded: boolean }>(
+      "POST",
+      `/org-proposals/${proposalId}/members/${memberId}`,
+      { excluded },
+    ),
+
+  listMeetings: (companyId: string) =>
+    req<{ meetings: Meeting[] }>("GET", `/companies/${companyId}/meetings`).then((r) => r.meetings),
   getMeeting: (meetingId: string) => req<MeetingDetail>("GET", `/meetings/${meetingId}`),
 
   budgetSummary: (companyId: string) =>
@@ -359,13 +389,9 @@ export const api = {
   getSessionDiff: (id: string) =>
     fetch(`/api/sessions/${id}/diff`).then((r) => (r.ok ? r.text() : "")),
   listTaskSessions: (taskId: string) =>
-    req<{ sessions: TaskSessionRef[] }>("GET", `/tasks/${taskId}/sessions`).then(
-      (r) => r.sessions,
-    ),
+    req<{ sessions: TaskSessionRef[] }>("GET", `/tasks/${taskId}/sessions`).then((r) => r.sessions),
   listTaskArtifacts: (taskId: string) =>
-    req<{ artifacts: Artifact[] }>("GET", `/tasks/${taskId}/artifacts`).then(
-      (r) => r.artifacts,
-    ),
+    req<{ artifacts: Artifact[] }>("GET", `/tasks/${taskId}/artifacts`).then((r) => r.artifacts),
 
   requestWakeup: (agentId: string, reason?: string) =>
     req<{ id: string }>("POST", `/agents/${agentId}/wakeup`, { reason }),

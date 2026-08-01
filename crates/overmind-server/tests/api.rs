@@ -215,6 +215,8 @@ async fn full_lifecycle_with_audit_trail() {
         kinds,
         vec![
             "company.created",
+            // The founding CEO (M15): a company is never empty.
+            "agent.hired",
             "agent.hired",
             "project.created",
             "goal.created",
@@ -230,7 +232,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["valid"], json!(true), "report: {report}");
-    assert_eq!(report["events_checked"], json!(9));
+    assert_eq!(report["events_checked"], json!(10));
 }
 
 #[tokio::test]

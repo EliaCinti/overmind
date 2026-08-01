@@ -77,6 +77,15 @@ fn api_router() -> Router<AppState> {
         )
         .route("/meetings/{meeting_id}", get(get_meeting))
         .route(
+            "/companies/{company_id}/org-proposals",
+            get(list_org_proposals),
+        )
+        .route("/org-proposals/{proposal_id}", get(get_org_proposal))
+        .route(
+            "/org-proposals/{proposal_id}/members/{member_id}",
+            post(set_member_excluded),
+        )
+        .route(
             "/companies/{company_id}/notifications",
             get(list_notifications),
         )
@@ -247,11 +256,36 @@ async fn create_company(
         &json!({ "name": req.name.trim() }),
     )
     .await?;
+
+    // A company is never empty (M15). It is founded with a CEO — the org
+    // leader (`reports_to` NULL, ADR-0019), on the strongest model, allowed to
+    // take on anything within its budget. You can talk to it from the first
+    // second and have it build the rest of the team, or ignore it and hire
+    // everyone yourself.
+    let ceo = hire(
+        &mut tx,
+        &id,
+        &HireAgent {
+            name: crate::db::random_ceo_name().to_string(),
+            archetype: crate::db::CEO_ARCHETYPE.to_string(),
+            traits: TraitsPatch::default(),
+            custom_brief: None,
+            title: Some("CEO".to_string()),
+            reports_to: None,
+        },
+    )
+    .await?;
+
     tx.commit().await?;
     state.notify(&id);
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": id, "name": req.name.trim(), "created_at": created_at })),
+        Json(json!({
+            "id": id,
+            "name": req.name.trim(),
+            "created_at": created_at,
+            "ceo": ceo,
+        })),
     ))
 }
 
@@ -294,19 +328,20 @@ async fn list_archetypes(State(state): State<AppState>) -> Result<Json<Value>, A
 // ---------- agents ----------
 
 #[derive(Deserialize)]
-struct HireAgent {
-    name: String,
+pub(crate) struct HireAgent {
+    pub name: String,
     /// Archetype slug (UX Level 1 "pick").
-    archetype: String,
+    pub archetype: String,
     /// Structured overrides on the archetype defaults (UX Level 2 "tune").
     #[serde(default)]
-    traits: TraitsPatch,
+    pub traits: TraitsPatch,
     /// Free-form additions (UX Level 3 "expert") — additive only.
-    custom_brief: Option<String>,
+    pub custom_brief: Option<String>,
     /// Free-text job title, e.g. "Senior Backend Engineer" (org chart).
-    title: Option<String>,
+    pub title: Option<String>,
     /// The agent this one reports to (must be an agent in the same company).
-    reports_to: Option<String>,
+    /// `None` means "under the org leader" — an org has exactly one root.
+    pub reports_to: Option<String>,
 }
 
 async fn hire_agent(
@@ -314,11 +349,7 @@ async fn hire_agent(
     Path(company_id): Path<String>,
     Json(req): Json<HireAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if req.name.trim().is_empty() {
-        return Err(ApiError::Invalid("agent name must not be empty".into()));
-    }
     let mut tx = state.pool.begin().await?;
-
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
         .fetch_optional(&mut *tx)
@@ -326,7 +357,24 @@ async fn hire_agent(
     if company.is_none() {
         return Err(ApiError::NotFound("company"));
     }
+    let hired = hire(&mut tx, &company_id, &req).await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok((StatusCode::CREATED, Json(hired)))
+}
 
+/// Hire one agent inside an open transaction, and return the row as the API
+/// shapes it. Shared by the endpoint, the founding CEO (M15) and — later — the
+/// CEO's proposed organization, so all three produce identical records:
+/// archetype defaults + patch, first config revision, audit event.
+pub(crate) async fn hire(
+    tx: &mut sqlx::SqliteConnection,
+    company_id: &str,
+    req: &HireAgent,
+) -> Result<Value, ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::Invalid("agent name must not be empty".into()));
+    }
     let archetype: Option<(String, String)> =
         sqlx::query_as("SELECT id, default_traits FROM archetypes WHERE slug = ?")
             .bind(&req.archetype)
@@ -337,21 +385,37 @@ async fn hire_agent(
     };
 
     let defaults: AgentTraits = serde_json::from_str(&default_traits)?;
-    let traits = defaults.apply(req.traits);
+    let traits = defaults.apply(req.traits.clone());
     let traits_json = serde_json::to_string(&traits)?;
 
     // A manager, if given, must be an existing agent in this company.
-    if let Some(mgr) = &req.reports_to {
-        let ok: Option<(String,)> =
-            sqlx::query_as("SELECT id FROM agents WHERE id = ? AND company_id = ?")
-                .bind(mgr)
-                .bind(&company_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if ok.is_none() {
-            return Err(ApiError::NotFound("manager agent"));
+    // If none is given, the new hire reports to the org leader — an
+    // organization has one root (ADR-0019 reads the leader as `reports_to IS
+    // NULL`), so defaulting to "no manager" would quietly create a second one.
+    // Only the founding CEO itself is allowed to have no manager.
+    let reports_to: Option<String> = match &req.reports_to {
+        Some(mgr) => {
+            let ok: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM agents WHERE id = ? AND company_id = ?")
+                    .bind(mgr)
+                    .bind(company_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if ok.is_none() {
+                return Err(ApiError::NotFound("manager agent"));
+            }
+            Some(mgr.clone())
         }
-    }
+        None => sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM agents
+             WHERE company_id = ? AND status = 'active' AND reports_to IS NULL
+             ORDER BY created_at LIMIT 1",
+        )
+        .bind(company_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|(id,)| id),
+    };
     let title = req
         .title
         .as_deref()
@@ -364,13 +428,13 @@ async fn hire_agent(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .bind(&id)
-    .bind(&company_id)
+    .bind(company_id)
     .bind(&archetype_id)
     .bind(req.name.trim())
     .bind(&traits_json)
     .bind(&req.custom_brief)
     .bind(title)
-    .bind(&req.reports_to)
+    .bind(&reports_to)
     .bind(&created_at)
     .execute(&mut *tx)
     .await?;
@@ -378,16 +442,15 @@ async fn hire_agent(
     let snapshot = crate::governance::agent_snapshot(
         req.name.trim(),
         title,
-        req.reports_to.as_deref(),
+        reports_to.as_deref(),
         &serde_json::to_value(&traits)?,
         req.custom_brief.as_deref(),
         false,
     );
-    crate::governance::record_revision(&mut tx, &company_id, &id, "hire", &json!({}), &snapshot)
-        .await?;
+    crate::governance::record_revision(tx, company_id, &id, "hire", &json!({}), &snapshot).await?;
     audit::append(
-        &mut tx,
-        Some(&company_id),
+        tx,
+        Some(company_id),
         None,
         event_kind::AGENT_HIRED,
         &json!({
@@ -395,16 +458,12 @@ async fn hire_agent(
             "name": req.name.trim(),
             "archetype": req.archetype,
             "title": title,
-            "reports_to": req.reports_to,
+            "reports_to": reports_to,
             "traits": serde_json::to_value(&traits)?,
         }),
     )
     .await?;
-    tx.commit().await?;
-    state.notify(&company_id);
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
+    Ok(json!({
             "id": id,
             "company_id": company_id,
             "name": req.name.trim(),
@@ -412,11 +471,10 @@ async fn hire_agent(
             "traits": serde_json::to_value(&traits)?,
             "custom_brief": req.custom_brief,
             "title": title,
-            "reports_to": req.reports_to,
+            "reports_to": reports_to,
             "status": "active",
             "created_at": created_at,
-        })),
-    ))
+    }))
 }
 
 /// (id, name, traits, custom_brief, status, title, reports_to, requires_approval, archetype slug)
@@ -1605,6 +1663,166 @@ async fn get_meeting(
     })))
 }
 
+// ---------- org proposals: the CEO designs a team, you decide (M15) ----------
+
+/// The proposals of a company, newest first, each with its members.
+async fn list_org_proposals(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT p.id, p.summary, a.name, p.status, p.decline_note, p.approval_id,
+                p.created_at, p.decided_at
+         FROM org_proposals p LEFT JOIN agents a ON a.id = p.proposed_by
+         WHERE p.company_id = ? ORDER BY p.created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut proposals = Vec::new();
+    for (id, summary, by, status, note, approval_id, created_at, decided_at) in rows {
+        let members = proposal_members(&state, &id).await?;
+        proposals.push(json!({
+            "id": id, "summary": summary, "proposed_by_name": by, "status": status,
+            "decline_note": note, "approval_id": approval_id,
+            "created_at": created_at, "decided_at": decided_at,
+            "members": members,
+        }));
+    }
+    Ok(Json(json!({ "proposals": proposals })))
+}
+
+async fn get_org_proposal(
+    State(state): State<AppState>,
+    Path(proposal_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT p.id, p.summary, a.name, p.status, p.decline_note, p.approval_id,
+                p.created_at, p.decided_at
+         FROM org_proposals p LEFT JOIN agents a ON a.id = p.proposed_by
+         WHERE p.id = ?",
+    )
+    .bind(&proposal_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((id, summary, by, status, note, approval_id, created_at, decided_at)) = row else {
+        return Err(ApiError::NotFound("org proposal"));
+    };
+    let members = proposal_members(&state, &id).await?;
+    Ok(Json(json!({
+        "proposal": {
+            "id": id, "summary": summary, "proposed_by_name": by, "status": status,
+            "decline_note": note, "approval_id": approval_id,
+            "created_at": created_at, "decided_at": decided_at,
+        },
+        "members": members,
+    })))
+}
+
+/// (id, position, name, archetype, title, reports_to, brief, rationale, excluded, hired)
+type ProposalMemberRow = (
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+);
+
+async fn proposal_members(state: &AppState, proposal_id: &str) -> Result<Vec<Value>, ApiError> {
+    let rows: Vec<ProposalMemberRow> = sqlx::query_as(
+        "SELECT id, position, name, archetype, title, reports_to, brief, rationale,
+                excluded, hired_agent_id
+         FROM org_proposal_members WHERE proposal_id = ? ORDER BY position",
+    )
+    .bind(proposal_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                position,
+                name,
+                archetype,
+                title,
+                reports_to,
+                brief,
+                rationale,
+                excluded,
+                hired,
+            )| {
+                json!({
+                    "id": id, "position": position, "name": name, "archetype": archetype,
+                    "title": title, "reports_to": reports_to, "brief": brief,
+                    "rationale": rationale, "excluded": excluded != 0, "hired_agent_id": hired,
+                })
+            },
+        )
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct SetExcluded {
+    excluded: bool,
+}
+
+/// Drop a member from a proposal (or put them back) before accepting the rest.
+/// Only while it is still `proposed`: an accepted chart is history.
+async fn set_member_excluded(
+    State(state): State<AppState>,
+    Path((proposal_id, member_id)): Path<(String, String)>,
+    Json(req): Json<SetExcluded>,
+) -> Result<Json<Value>, ApiError> {
+    let status: Option<(String,)> = sqlx::query_as("SELECT status FROM org_proposals WHERE id = ?")
+        .bind(&proposal_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((status,)) = status else {
+        return Err(ApiError::NotFound("org proposal"));
+    };
+    if status != "proposed" {
+        return Err(ApiError::Conflict(format!("proposal is already {status}")));
+    }
+    let done = sqlx::query(
+        "UPDATE org_proposal_members SET excluded = ? WHERE id = ? AND proposal_id = ?",
+    )
+    .bind(i64::from(req.excluded))
+    .bind(&member_id)
+    .bind(&proposal_id)
+    .execute(&state.pool)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("proposal member"));
+    }
+    Ok(Json(json!({ "id": member_id, "excluded": req.excluded })))
+}
+
 // ---------- notifications: how the company reaches you (ADR-0020) ----------
 
 #[derive(Deserialize)]
@@ -1976,6 +2194,20 @@ async fn decide_approval(
                 }
                 crate::runner::StartResult::ApprovalRequired { .. } => {}
             }
+        }
+    }
+    // A team the CEO drew up (M15): approving hires everyone still on the list,
+    // rejecting tells the CEO why so it does not propose the same shape again.
+    if kind == "org_proposal" {
+        let p: Value = serde_json::from_str(&payload)?;
+        if let Some(proposal_id) = p["proposal_id"].as_str() {
+            if approve {
+                let hired = crate::org::accept(&state, proposal_id).await?;
+                result["hired"] = json!(hired.len());
+            } else {
+                crate::org::reject(&state, proposal_id, req.note.as_deref()).await?;
+            }
+            result["proposal_id"] = json!(proposal_id);
         }
     }
     // A meeting an agent asked for: approving opens the room, rejecting closes

@@ -75,6 +75,8 @@ struct TestEnv {
     app: axum::Router,
     root: PathBuf,
     company_id: String,
+    /// The CEO the company is founded with (M15) — the org leader.
+    ceo_id: String,
     agent_id: String,
     task_id: String,
 }
@@ -112,6 +114,10 @@ async fn setup(stub_script: &str) -> TestEnv {
     )
     .await;
     let company_id = company["id"].as_str().expect("company id").to_string();
+    let ceo_id = company["ceo"]["id"]
+        .as_str()
+        .expect("every company is founded with a CEO")
+        .to_string();
     let (_, agent) = send(
         &app,
         "POST",
@@ -165,6 +171,7 @@ async fn setup(stub_script: &str) -> TestEnv {
         app,
         root,
         company_id,
+        ceo_id,
         agent_id,
         task_id,
     }
@@ -792,7 +799,8 @@ async fn agent_conversation_ripples_to_teammates() {
         "task not assigned to the teammate: {task}"
     );
 
-    // The escalation reached the leader's (Builder's) thread as a system message.
+    // The escalation reached the org leader's thread. Since M15 that leader is
+    // the founding CEO, not Builder — Builder itself reports to it.
     let mut escalated = false;
     for _ in 0..60 {
         let (_, c) = send(
@@ -800,7 +808,7 @@ async fn agent_conversation_ripples_to_teammates() {
             "GET",
             &format!(
                 "/api/companies/{}/agents/{}/conversation",
-                env.company_id, env.agent_id
+                env.company_id, env.ceo_id
             ),
             None,
         )

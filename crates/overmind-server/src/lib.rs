@@ -7,6 +7,7 @@ pub mod governance;
 pub mod mcp;
 pub mod meeting;
 pub mod notify;
+pub mod org;
 pub mod runner;
 pub mod scheduler;
 pub mod ws;

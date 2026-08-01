@@ -193,8 +193,6 @@ impl AgentTraits {
     }
 }
 
-/// Audit event kinds. Centralized so the catalog of what gets audited is
-/// visible in one place.
 /// The permissions the server actually enforces (M14).
 pub mod perm {
     use super::ExecutionKind;
@@ -213,6 +211,8 @@ pub mod perm {
     }
 }
 
+/// Audit event kinds. Centralized so the catalog of what gets audited is
+/// visible in one place.
 pub mod event_kind {
     pub const COMPANY_CREATED: &str = "company.created";
     pub const AGENT_HIRED: &str = "agent.hired";
@@ -235,6 +235,9 @@ pub mod event_kind {
     pub const MEETING_DECIDED: &str = "meeting.decided";
     pub const MEETING_DECLINED: &str = "meeting.declined";
     pub const MEETING_DROPPED: &str = "meeting.dropped";
+    pub const ORG_PROPOSED: &str = "org.proposed";
+    pub const ORG_ACCEPTED: &str = "org.accepted";
+    pub const ORG_REJECTED: &str = "org.rejected";
     pub const MEETING_FAILED: &str = "meeting.failed";
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";

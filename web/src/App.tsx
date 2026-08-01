@@ -5,6 +5,7 @@ import type {
   Archetype,
   Company,
   Notification,
+  OrgProposal,
   ProjectDetail,
   Task,
   View,
@@ -38,6 +39,7 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<ProjectDetail[]>([]);
   const [budgets, setBudgets] = useState<AgentBudget[]>([]);
+  const [proposals, setProposals] = useState<OrgProposal[]>([]);
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("chat");
@@ -81,16 +83,18 @@ export default function App() {
 
   // Load everything for the selected company.
   const loadCompany = useCallback(async (id: string) => {
-    const [a, t, p, b] = await Promise.all([
+    const [a, t, p, b, op] = await Promise.all([
       api.listAgents(id),
       api.listTasks(id),
       api.listProjects(id),
       api.budgetSummary(id),
+      api.listOrgProposals(id).catch(() => []),
     ]);
     setAgents(a);
     setTasks(t);
     setProjects(p);
     setBudgets(b);
+    setProposals(op);
   }, []);
 
   useEffect(() => {
@@ -206,7 +210,14 @@ export default function App() {
               onSelect={setSelectedMeeting}
             />
           ) : (
-            <OrgChart agents={agents} budgets={budgets} onChanged={bump} onHireUnder={openHire} />
+            <OrgChart
+              agents={agents}
+              budgets={budgets}
+              proposal={proposals.find((p) => p.status === "proposed") ?? null}
+              onChanged={bump}
+              onHireUnder={openHire}
+              onTalkToCeo={() => setView("chat")}
+            />
           )}
         </main>
       )}

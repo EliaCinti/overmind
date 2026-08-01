@@ -408,6 +408,27 @@ async fn run_agent_turn(
     // Calls this agent sat in on are settled — it acts on them (ADR-0020).
     let decisions_block = crate::meeting::decisions_block(state, agent_id).await;
 
+    // Only the leader designs the organization (M15), and it can only propose
+    // roles that exist: hand it the catalogue rather than let it invent slugs.
+    let catalogue_block = if is_leader {
+        let slugs: Vec<(String, String)> =
+            sqlx::query_as("SELECT slug, name FROM archetypes ORDER BY slug")
+                .fetch_all(&state.pool)
+                .await
+                .unwrap_or_default();
+        let catalogue = slugs
+            .iter()
+            .map(|(slug, name)| format!("  {slug} — {name}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nRoles you can hire (use the slug exactly):\n{catalogue}{}",
+            crate::org::feedback_block(state, agent_id).await
+        )
+    } else {
+        String::new()
+    };
+
     // Files the user attached — copied into the working directory below.
     let attachments: Vec<(String, String)> = sqlx::query_as(
         "SELECT filename, path FROM attachments
@@ -431,7 +452,8 @@ async fn run_agent_turn(
 
     let persona = if is_leader {
         format!(
-            "You are {name}, the CEO of an AI company. The user is talking to you. Reply helpfully, and when work is needed, delegate it by proposing tasks — assign each to the right teammate by name."
+            "You are {name}, the CEO of an AI company. The user is talking to you. Reply helpfully, and when work is needed, delegate it by proposing tasks — assign each to the right teammate by name. \
+             When the user describes an idea and the company does not yet have the people for it, your job is to design the organization: propose a team with \"team\" (see below). You are not obliged to — if the people you have can do it, say so and get on with it."
         )
     } else {
         format!(
@@ -446,7 +468,7 @@ async fn run_agent_turn(
         .unwrap_or_default();
 
     let prompt = format!(
-        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Return an empty tasks array and omit escalate/meeting when nothing is needed."
+        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<slug from the list>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick an archetype slug from the list above, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed."
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -578,6 +600,16 @@ async fn run_agent_turn(
         && let Err(e) = crate::meeting::request(state, company_id, agent_id, &req).await
     {
         eprintln!("meeting requested by {name} could not be raised: {e}");
+    }
+
+    // The CEO has designed an organization (M15). Proposed, never applied:
+    // hiring is the user's decision, and only the leader may draw one up.
+    if is_leader
+        && let Some(t) = plan.as_ref().and_then(|v| v.get("team"))
+        && let Some(proposal) = crate::org::Proposal::from_json(t)
+        && let Err(e) = crate::org::propose(state, company_id, agent_id, &proposal).await
+    {
+        eprintln!("team proposed by {name} could not be raised: {e}");
     }
     Ok(())
 }

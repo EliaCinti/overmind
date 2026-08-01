@@ -202,8 +202,15 @@ async fn start_is_stopped_when_over_budget() {
         None,
     )
     .await;
-    assert_eq!(budgets["budgets"][0]["budget_cents"], 30);
-    assert_eq!(budgets["budgets"][0]["spent_cents"], 0);
+    // Pick our agent by id: since M15 the list also holds the founding CEO.
+    let mine = budgets["budgets"]
+        .as_array()
+        .expect("budgets")
+        .iter()
+        .find(|b| b["agent_id"] == json!(agent))
+        .expect("our agent's budget");
+    assert_eq!(mine["budget_cents"], 30);
+    assert_eq!(mine["spent_cents"], 0);
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
@@ -384,7 +391,13 @@ async fn config_revisions_roll_back() {
         None,
     )
     .await;
-    assert_eq!(agents["agents"][0]["title"], "Renamed");
+    let mine = agents["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .find(|a| a["id"] == json!(agent))
+        .expect("our agent");
+    assert_eq!(mine["title"], "Renamed");
 
     let (s, _) = send(
         &env.app,
@@ -402,7 +415,13 @@ async fn config_revisions_roll_back() {
         None,
     )
     .await;
-    assert_eq!(agents["agents"][0]["title"], Value::Null);
+    let mine = agents["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .find(|a| a["id"] == json!(agent))
+        .expect("our agent");
+    assert_eq!(mine["title"], Value::Null);
 
     // Rollback appended a third revision; history is forward-only.
     let (_, revs) = send(

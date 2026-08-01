@@ -163,6 +163,30 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
     })
 }
 
+/// The archetype every company is founded with (M15).
+pub const CEO_ARCHETYPE: &str = "chief-executive";
+
+/// The CEO thinks for the whole company, so it gets the strongest model.
+pub const CEO_MODEL: &str = "claude-opus-4-8";
+
+/// Names the system picks from when it founds a company's CEO. Short, easy to
+/// say, and deliberately not tied to a gender or a language — you will be
+/// talking to this one every day.
+const CEO_NAMES: &[&str] = &[
+    "Aria", "Nova", "Kai", "Iris", "Ada", "Ren", "Sol", "Vera", "Nico", "Yuki", "Rune", "Mira",
+    "Theo", "Zara", "Enzo", "Lumi",
+];
+
+/// A name for a newly founded company's CEO. Not cryptographically random and
+/// it does not need to be: it only has to feel chosen rather than defaulted.
+pub fn random_ceo_name() -> &'static str {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize)
+        .unwrap_or(0);
+    CEO_NAMES[n % CEO_NAMES.len()]
+}
+
 /// The built-in archetype catalog (UX.md: "the catalog is a product surface").
 /// Idempotent: inserts only slugs that don't exist yet, so user-added
 /// archetypes and future catalog versions coexist.
@@ -176,6 +200,38 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
         model: "claude-sonnet".to_string(),
     };
     vec![
+        (
+            "chief-executive",
+            "Chief Executive",
+            "Runs the company. Turns what you want into an organization and a plan: decides who to hire, who reports to whom, and what gets worked on first. Delegates rather than executing, and escalates to you the calls that are yours.",
+            AgentTraits {
+                focus_areas: vec![
+                    "direction".into(),
+                    "delegation".into(),
+                    "prioritisation".into(),
+                    "judgement".into(),
+                ],
+                // The CEO is the one agent that may take on anything; the
+                // budget, not the capability list, is what bounds it (M15).
+                permissions: [
+                    "task:code",
+                    "task:knowledge",
+                    "repo:read",
+                    "web:read",
+                    "docs:write",
+                    "pr:create",
+                    "pr:comment",
+                    "pr:approve",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+                autonomy: Autonomy::ActWithinBudget,
+                review_strictness: ReviewStrictness::Standard,
+                monthly_budget_cents: 2_000,
+                model: CEO_MODEL.to_string(),
+            },
+        ),
         (
             "security-engineer",
             "Security Engineer",

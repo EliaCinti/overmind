@@ -44,6 +44,9 @@ async fn send(
 struct TestEnv {
     app: axum::Router,
     company_id: String,
+    /// The CEO the company is founded with (M15) — the real org leader.
+    ceo_id: String,
+    ceo_name: String,
     /// The org leader (reports to nobody) — chairs any meeting it sits in.
     leader_id: String,
     /// A specialist reporting to the leader — the one we talk to.
@@ -78,6 +81,14 @@ async fn setup(stub_script: &str) -> TestEnv {
     )
     .await;
     let company_id = company["id"].as_str().expect("company id").to_string();
+    let ceo_id = company["ceo"]["id"]
+        .as_str()
+        .expect("founding CEO")
+        .to_string();
+    let ceo_name = company["ceo"]["name"]
+        .as_str()
+        .expect("the CEO is given a name")
+        .to_string();
 
     let hire = |name: &'static str, reports_to: Option<String>| {
         let app = app.clone();
@@ -104,6 +115,8 @@ async fn setup(stub_script: &str) -> TestEnv {
     TestEnv {
         app,
         company_id,
+        ceo_id,
+        ceo_name,
         leader_id,
         specialist_id,
         guard_id,
@@ -656,7 +669,7 @@ async fn a_meeting_that_never_converges_is_closed_by_the_chair() {
         &format!("/api/companies/{}/meetings", env.company_id),
         Some(json!({
             "topic": "How do we split the work?",
-            "participants": [env.specialist_id, env.leader_id],
+            "participants": [env.specialist_id, env.ceo_id],
             "turn_cap": 3,
         })),
     )
@@ -677,9 +690,10 @@ async fn a_meeting_that_never_converges_is_closed_by_the_chair() {
         .iter()
         .filter_map(|t| t["agent_name"].as_str())
         .collect();
-    // Round-robin in the order given — then Ada closes, because the leader
-    // chairs even though she was listed second.
-    assert_eq!(speakers, vec!["Bruno", "Ada", "Bruno", "Ada"]);
+    // Round-robin in the order given — then the CEO closes, because the org
+    // leader chairs even when listed second.
+    let ceo = env.ceo_name.as_str();
+    assert_eq!(speakers, vec!["Bruno", ceo, "Bruno", ceo]);
 
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));

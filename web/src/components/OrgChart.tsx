@@ -18,12 +18,13 @@ import {
   Ban,
   ShieldCheck,
 } from "lucide-react";
-import type { Agent, AgentBudget } from "../lib/api";
+import type { Agent, AgentBudget, OrgProposal } from "../lib/api";
 import { api } from "../lib/api";
 import { AUTONOMY_LABEL } from "../lib/status";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
 import { cn, formatCents } from "../lib/utils";
+import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
 
 const ICONS: Record<string, typeof Bot> = {
   "security-engineer": Shield,
@@ -37,21 +38,38 @@ const ICONS: Record<string, typeof Bot> = {
 export function OrgChart({
   agents,
   budgets,
+  proposal,
   onChanged,
   onHireUnder,
+  onTalkToCeo,
 }: {
   agents: Agent[];
   budgets: AgentBudget[];
+  /** A team the CEO drew up and you have not answered yet (M15). */
+  proposal: OrgProposal | null;
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
+  onTalkToCeo: () => void;
 }) {
   const active = agents.filter((a) => a.status !== "terminated");
+  // First run: the founding CEO and nobody else, nothing proposed yet.
+  const ceo = active.find((a) => a.reports_to === null);
+  const alone = active.length === 1 && !!ceo && !proposal;
   const childrenOf = (id: string | null) => active.filter((a) => (a.reports_to ?? null) === id);
   const budgetOf = (id: string) => budgets.find((b) => b.agent_id === id);
 
   return (
     <div className="flex-1 overflow-auto px-6 pb-8">
       <div className="mx-auto max-w-3xl">
+        {alone && ceo && (
+          <TwoRoads
+            ceoName={ceo.name}
+            onTalkToCeo={onTalkToCeo}
+            onHire={() => onHireUnder(ceo.id)}
+          />
+        )}
+        {proposal && <OrgProposalPanel proposal={proposal} onChanged={onChanged} />}
+
         {/* The human owner is the root of the chart. */}
         <div className="mb-2 flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 shadow-soft">
           <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
@@ -59,14 +77,11 @@ export function OrgChart({
           </span>
           <div className="min-w-0">
             <p className="font-medium">You</p>
-            <p className="text-xs text-muted-foreground">Owner · everyone ultimately reports here</p>
+            <p className="text-xs text-muted-foreground">
+              Owner · everyone ultimately reports here
+            </p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="ml-auto"
-            onClick={() => onHireUnder(null)}
-          >
+          <Button size="sm" variant="outline" className="ml-auto" onClick={() => onHireUnder(null)}>
             <UserPlus className="h-4 w-4" />
             Hire
           </Button>
@@ -231,7 +246,10 @@ function BudgetBar({ budget }: { budget: AgentBudget }) {
   return (
     <div className="mt-2.5 flex items-center gap-2">
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: tone }} />
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${pct}%`, background: tone }}
+        />
       </div>
       <span className="mono shrink-0 text-[11px] text-muted-foreground">
         {formatCents(used)}/{formatCents(budget.budget_cents)}
@@ -290,7 +308,12 @@ function EditRow({
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Title
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Senior Engineer" className="h-9" />
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="e.g. Senior Engineer"
+            className="h-9"
+          />
         </label>
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
           Reports to
