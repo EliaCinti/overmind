@@ -118,9 +118,46 @@ Meetings are an **automation the agents start and you allow** ([ADR-0020](adr/00
 - **UI.** The bell is one **inbox** for everything an agent wants you to know or decide, answered inline; live notifications arrive as **toasts**; a **Meetings** surface shows the rooms, the transcript arriving turn by turn, and the decision. Gated task starts raise a notification too, so there is a single place to look.
 - **Accept:** an agent asks, nothing runs until approval, then they deliberate to a decision that reaches their next run ✓ — `tests/meetings.rs` (9 tests): request from chat and from a task, nothing convenes before approval, decline path, chair closes at the cap, 500-turn request clamped to 12+1, each turn gets the instruction its position calls for, decision lands in a participant's next task. Chain verifies throughout. Also walked end-to-end in the browser against the real server.
 
-## M14 — Deep characterization `todo`
-- Extend [ADR-0005](adr/0005-structured-agent-characterization.md): domain brief + declared **tools/capabilities** (web research, spreadsheet output, vision) + multimodal flag — structured-first, server-enforced.
+## M13.5 — Restraint on meeting requests `done`
+Agents must be autonomous without being free to flood you. The gap that made this urgent was not the rate: a **declined request never reached the agent that asked**, so it re-requested the same meeting on its next turn, forever.
+- **One pending request per agent**, three per company, checked before any work.
+- The decline note is stored on the meeting and **injected into the convener's next prompt**; the limit is told to the agent, not merely enforced against it.
+- A participant can answer `no_decision_needed` → the room closes as **`dropped`**, a status distinct from `decided` so a pointless meeting is never injected into everyone's work as a settled call.
+- **Accept:** three turns produce one pending request ✓ · a refusal and its reason reach the agent's next prompt ✓ · a pointless room closes on turn 1 without inventing a decision ✓.
+
+## M14 — Deep characterization `in progress`
+Extend [ADR-0005](adr/0005-structured-agent-characterization.md). The premise turned out to be wrong: the fields already existed and **did nothing**.
+
+- ✅ **Slice 1 — the agent works in role.** A task run had no persona at all: a "Media & A/V quality" agent and a backend developer got identical prompts for the same task. Archetype, title, focus areas and brief now compile into the task prompt, as ADR-0005 always promised.
+- ✅ **Slice 2 — capabilities that are enforced.** `permissions` was seeded, versioned and read by nothing. Now `task:code` / `task:knowledge` are **enforced at checkout** (a researcher cannot be put on a code task); the rest stay **declared** — compiled into the prompt, not policed, because we shell out to an external CLI. Real enforcement of those is M10.
+- ☐ **Slice 3 — domain archetypes + multimodal.** The catalogue is still all-software; a "Media & A/V quality" agent only exists as a title over a `researcher`. Add domain archetypes and a multimodal flag.
 - **Accept:** a "Media & A/V quality" agent, hired without free text, uses a declared web-research capability and returns a structured result.
+
+## M15 — The founding CEO and the proposed organization `done`
+A company was born empty: you had to know what an "archetype" was before anything could happen.
+- **Founded with a CEO** — named by the system, on the strongest model, 20 € budget, allowed anything the budget permits, `reports_to IS NULL` so it is the org leader and the default chat thread.
+- **The CEO designs the team.** You describe the idea; it answers with a *proposed* org chart — who, in what role, reporting to whom, and **why each person is there**. Gated by an approval like a meeting request; you can **drop individual members** before accepting; a refusal feeds back into its next prompt (migration 0013, `org.rs`).
+- **Or build it yourself** — hiring by hand is untouched and has its own test.
+- **One root, any depth.** A manager-less hire used to create a second org root, making "who is the leader" ambiguous and sending escalations to the wrong thread. It now lands under the CEO; only the CEO has no manager. Locked by a four-level test, cycle included.
+- **UI:** the proposal is drawn as the org chart it would become — same geometry, provisional, each hire carrying its reason; dropping someone leaves them struck and quiet so you can see what you are refusing. First run offers the two roads, asymmetric on purpose.
+- **Accept:** the CEO proposes, nothing is hired until you accept, a dropped member stays dropped, the tree is wired ✓ — `tests/org_proposal.rs`.
+
+## M16 — Italian, and the language as a first-class setting `todo`
+Everything on screen must speak the chosen language — not just the UI chrome. What you read comes from **three places**, and only one is a dictionary.
+
+- ☐ **A · The language exists and is remembered.** Stored **on the company**, not the browser: the server needs it to instruct agents. Migration + endpoint + a language menu in the top bar (names in their own language — *Italiano*, *English* — **never flags**: flags are countries, not languages). Sets `<html lang>`.
+- ☐ **B · Agents speak it.** One line in the task, chat and meeting prompts. Smallest change, largest visible effect: the CEO, the meetings and the team proposals all switch language.
+- ☐ **C · The interface.** `lib/i18n.ts` — a nested dictionary and a `useT()` hook, no library for ~250 strings. The long, mechanical slice: ~15 components.
+- ☐ **D · Server-generated prose.** Notifications carry a `kind` + **structured params** instead of a composed sentence; the UI writes the sentence in the right language. Old rows keep `title`/`body` as a fallback. This is what makes the system translatable *by construction* rather than translated after the fact.
+- Alongside: **currency and dates**. Budgets render as `$20.00` while the product is priced in euro, and dates are US-formatted.
+- **Accept:** switch to Italian and the chrome, the inbox and the CEO's replies are all Italian; reload and it holds.
+
+## Known gaps — carried deliberately, not forgotten
+
+- **Chat and meeting turns do not reserve budget.** Task checkout has enforced budget reservation since M6; conversational turns (M12) and meeting turns (M13) do not. A meeting can spend up to 13 adapter runs without the agent's monthly cap being consulted. With the CEO now proposing teams and teams holding meetings, **this is the most pressing hole.**
+- **No authentication of any kind.** Fine while bound to loopback; anything beyond that is unauthenticated access to an API that spawns processes. See M10 and `docs/adr/0014-docker-deployment.md`.
+- **Declared permissions are not policed** (`repo:write`, `web:read`, …) — honest by design until M10 sandboxing.
+- **No quorum on meeting requests** — one agent convenes. Deliberate: seconding would burn an adapter turn per invitee *before* the human answers. Mitigated by the M13.5 limits instead.
 
 ## Later / icebox
 Linux/Windows support · multi-user · plugin system · agent marketplace-style role templates · public release polish

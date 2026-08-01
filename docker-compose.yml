@@ -9,11 +9,23 @@ services:
     build: .
     image: overmind:latest
     ports:
-      - "7070:7070"
+      # Loopback ONLY, on purpose. Overmind has no authentication, and its API
+      # starts tasks that run a CLI on this machine — publishing it on every
+      # interface would hand anyone who can reach the port the ability to run
+      # commands here. Do not change this to "7070:7070" until M10 lands auth;
+      # to reach it from another machine, tunnel: `ssh -L 7070:localhost:7070`.
+      - "127.0.0.1:7070:7070"
     volumes:
       - overmind-data:/data
+      # Agent credentials. Only needed if you sign in with `claude login`
+      # (a subscription) rather than passing a key below: the CLI writes its
+      # session under $HOME, which is NOT on /data and would be lost on every
+      # rebuild. With ANTHROPIC_API_KEY you can leave this commented out.
+      # - overmind-agent-home:/root/.claude
       # Mount host repositories agents will work on, e.g.:
       # - ${HOME}/code:/repos:rw
+      # NB: a workspace's `cwd` must then be the IN-CONTAINER path (/repos/x),
+      # not the host path — the container cannot see /Users/... .
     environment:
       # The agent adapter command. Configure to the CLI you installed/derived
       # into the image, e.g. Claude Code:
@@ -26,3 +38,5 @@ services:
 
 volumes:
   overmind-data:
+  # Uncomment together with the /root/.claude mount above.
+  # overmind-agent-home:
