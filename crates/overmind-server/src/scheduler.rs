@@ -12,7 +12,7 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::event_kind;
+use crate::domain::{ExecutionKind, event_kind, perm};
 use crate::runner::{self, RunnerError};
 
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
@@ -161,14 +161,46 @@ async fn wakeup_outcome(
         ));
     }
 
-    let next: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM tasks WHERE company_id = ? AND status = 'todo' ORDER BY created_at LIMIT 1",
-    )
-    .bind(&company_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    // Only work this agent is characterized for (M14). Picking the oldest todo
+    // task blindly would hand a researcher a code task and stall the wakeup on
+    // a capability it was never meant to have.
+    let permissions = serde_json::from_str::<Value>(&traits)
+        .ok()
+        .and_then(|v| {
+            v.get("permissions").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    let kinds: Vec<&str> = [ExecutionKind::Code, ExecutionKind::Knowledge]
+        .into_iter()
+        .filter(|k| {
+            let required = perm::for_execution_kind(*k);
+            permissions.iter().any(|p| p == required)
+        })
+        .map(|k| k.as_str())
+        .collect();
+    if kinds.is_empty() {
+        return Ok((
+            Some(company_id),
+            "agent is not characterized for any kind of task".to_string(),
+        ));
+    }
+    let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT id FROM tasks WHERE company_id = ? AND status = 'todo'
+           AND execution_kind IN ({placeholders}) ORDER BY created_at LIMIT 1"
+    );
+    let mut query = sqlx::query_as::<_, (String,)>(&sql).bind(&company_id);
+    for k in &kinds {
+        query = query.bind(*k);
+    }
+    let next: Option<(String,)> = query.fetch_optional(&state.pool).await?;
     let Some((task_id,)) = next else {
-        return Ok((Some(company_id), "no todo tasks".to_string()));
+        return Ok((Some(company_id), "no todo tasks it can take".to_string()));
     };
     match runner::start_task(state, &task_id, agent_id, false).await {
         Ok(runner::StartResult::Started(outcome)) => Ok((
@@ -188,6 +220,9 @@ async fn wakeup_outcome(
             format!("task {task_id} blocked: over budget"),
         )),
         Err(RunnerError::Invalid(msg)) => Ok((Some(company_id), format!("cannot start: {msg}"))),
+        // A refusal is this agent's problem, not the heartbeat's: record it as
+        // the wakeup's outcome instead of failing the beat for everyone.
+        Err(RunnerError::Blocked(msg)) => Ok((Some(company_id), format!("blocked: {msg}"))),
         Err(e) => Err(e),
     }
 }

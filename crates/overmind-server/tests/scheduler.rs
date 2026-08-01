@@ -187,6 +187,28 @@ async fn make_todo_task(env: &Env, title: &str) -> String {
     task_id
 }
 
+/// A `knowledge` task: needs no repo, and is what a researcher is
+/// characterized for (M14 — the capability gate refuses the rest).
+async fn make_todo_knowledge_task(env: &Env, title: &str) -> String {
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({ "title": title, "execution_kind": "knowledge" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    task_id
+}
+
 async fn task_status(env: &Env, task_id: &str) -> String {
     let (_, tasks) = send(
         &env.app,
@@ -394,7 +416,7 @@ async fn wakeup_enforces_agent_autonomy() {
     // act_within_budget (researcher archetype): may pick up todo work alone.
     let env = build_env(HAPPY_STUB, None, |_| {}).await;
     let agent_id = hire(&env, "Selfstarter", "researcher").await;
-    let task_id = make_todo_task(&env, "Autonomous pickup").await;
+    let task_id = make_todo_knowledge_task(&env, "Autonomous pickup").await;
     let (status, wakeup) = send(
         &env.app,
         "POST",

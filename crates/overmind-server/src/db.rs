@@ -187,7 +187,13 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
                     "dependencies",
                     "authz",
                 ],
-                &["repo:read", "pr:comment", "pr:create"],
+                &[
+                    "task:code",
+                    "task:knowledge",
+                    "repo:read",
+                    "pr:comment",
+                    "pr:create",
+                ],
                 Autonomy::ProposeOnly,
                 ReviewStrictness::Strict,
             ),
@@ -198,7 +204,13 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             "Implements server-side features and fixes: APIs, data models, business logic, tests.",
             base(
                 &["api", "data-model", "business-logic", "tests"],
-                &["repo:read", "repo:write-branch", "pr:create"],
+                &[
+                    "task:code",
+                    "task:knowledge",
+                    "repo:read",
+                    "repo:write-branch",
+                    "pr:create",
+                ],
                 Autonomy::ActWithApproval,
                 ReviewStrictness::Standard,
             ),
@@ -209,7 +221,13 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             "Implements UI components, styling and client-side logic, with attention to accessibility.",
             base(
                 &["ui-components", "styling", "accessibility", "client-state"],
-                &["repo:read", "repo:write-branch", "pr:create"],
+                &[
+                    "task:code",
+                    "task:knowledge",
+                    "repo:read",
+                    "repo:write-branch",
+                    "pr:create",
+                ],
                 Autonomy::ActWithApproval,
                 ReviewStrictness::Standard,
             ),
@@ -220,7 +238,13 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             "Reviews pull requests for correctness, clarity and maintainability. Never pushes code.",
             base(
                 &["correctness", "maintainability", "style"],
-                &["repo:read", "pr:comment", "pr:approve"],
+                &[
+                    "task:code",
+                    "task:knowledge",
+                    "repo:read",
+                    "pr:comment",
+                    "pr:approve",
+                ],
                 Autonomy::ProposeOnly,
                 ReviewStrictness::Strict,
             ),
@@ -231,7 +255,7 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             "Investigates questions, compares options, produces sourced write-ups. No code access needed.",
             base(
                 &["investigation", "comparison", "sources"],
-                &["web:read", "docs:write"],
+                &["task:knowledge", "web:read", "docs:write"],
                 Autonomy::ActWithinBudget,
                 ReviewStrictness::Lenient,
             ),
@@ -242,7 +266,7 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             "Writes and maintains documentation: guides, references, changelogs.",
             base(
                 &["guides", "reference", "changelog"],
-                &["repo:read", "docs:write", "pr:create"],
+                &["task:knowledge", "repo:read", "docs:write", "pr:create"],
                 Autonomy::ActWithApproval,
                 ReviewStrictness::Standard,
             ),

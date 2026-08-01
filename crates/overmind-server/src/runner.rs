@@ -192,6 +192,37 @@ pub async fn start_task(
     }
     let exec_kind = ExecutionKind::parse(&exec_kind_str).unwrap_or_default();
 
+    // Who you are asking comes before what the job needs: these checks are
+    // cheap, and "this agent cannot do code work" is a more useful answer than
+    // "the project has no workspace" when both are true.
+    let agent: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT traits, status, requires_approval FROM agents WHERE id = ? AND company_id = ?",
+    )
+    .bind(agent_id)
+    .bind(&company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((agent_traits, agent_status, requires_approval)) = agent else {
+        return Err(RunnerError::NotFound("agent"));
+    };
+    if agent_status != "active" {
+        return Err(RunnerError::Blocked(format!("agent is {agent_status}")));
+    }
+
+    // Capability gate (M14 / ADR-0005). The only enforcement that is honest
+    // here: we cannot police what the spawned CLI does, but we can refuse to
+    // hand it work it was never characterized for. A researcher does not get
+    // put on a code task — not by you, not by a teammate that assigned it one.
+    let required = crate::domain::perm::for_execution_kind(exec_kind);
+    if !trait_permissions(&agent_traits)
+        .iter()
+        .any(|p| p == required)
+    {
+        return Err(RunnerError::Blocked(format!(
+            "this agent is not characterized for {exec_kind_str} work (missing `{required}`)"
+        )));
+    }
+
     // A `code` run needs a git repo to branch a worktree from; a `knowledge`
     // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
     let workspace: Option<(String, Option<String>)> = match exec_kind {
@@ -218,20 +249,6 @@ pub async fn start_task(
         }
         ExecutionKind::Knowledge => None,
     };
-
-    let agent: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT traits, status, requires_approval FROM agents WHERE id = ? AND company_id = ?",
-    )
-    .bind(agent_id)
-    .bind(&company_id)
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some((agent_traits, agent_status, requires_approval)) = agent else {
-        return Err(RunnerError::NotFound("agent"));
-    };
-    if agent_status != "active" {
-        return Err(RunnerError::Blocked(format!("agent is {agent_status}")));
-    }
 
     // Governance gate: file an approval and launch nothing.
     if requires_approval != 0 && !bypass_approval {
@@ -426,6 +443,22 @@ fn trait_budget_cents(traits_json: &str) -> i64 {
         .ok()
         .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
         .unwrap_or(0)
+}
+
+/// What the agent is allowed to do. An unreadable traits blob yields none —
+/// fail closed: an agent we cannot characterize gets no work.
+fn trait_permissions(traits_json: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| {
+            v.get("permissions").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// Resume a session that is marked queued/running in the DB but has no live

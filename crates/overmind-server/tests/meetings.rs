@@ -1042,3 +1042,96 @@ async fn a_pointless_room_closes_without_inventing_a_decision() {
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+// ---------- M14: capabilities that are actually enforced ----------
+
+#[tokio::test]
+async fn an_agent_is_refused_work_it_is_not_characterized_for() {
+    let env = setup(ECHO_PROMPT_STUB).await;
+
+    // A researcher: seeded with `task:knowledge` but not `task:code`.
+    let (_, nova) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(json!({
+            "name": "Nova",
+            "archetype": "researcher",
+            "reports_to": env.leader_id,
+        })),
+    )
+    .await;
+    let nova_id = nova["id"].as_str().expect("id").to_string();
+    assert!(
+        nova["traits"]["permissions"]
+            .as_array()
+            .expect("permissions")
+            .iter()
+            .any(|p| p == "task:knowledge"),
+        "the researcher archetype declares knowledge work: {nova}"
+    );
+
+    // A code task exists.
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({ "title": "Refactor the parser", "execution_kind": "code" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+
+    // The researcher is refused — server-side, at checkout, before any spawn.
+    let (status, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": nova_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "should be refused: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("task:code"),
+        "the refusal says which capability is missing: {body}"
+    );
+
+    // The task is untouched: a refused checkout must not consume it.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let still = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["id"] == json!(task_id))
+        .expect("the task");
+    assert_eq!(still["status"], json!("todo"), "task: {still}");
+
+    // And the same agent takes knowledge work without complaint.
+    let done = run_knowledge_task(&env.app, &env.company_id, &nova_id, "Compare projectors").await;
+    let (_, artifacts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{done}/artifacts"),
+        None,
+    )
+    .await;
+    assert!(
+        !artifacts["artifacts"]
+            .as_array()
+            .expect("artifacts")
+            .is_empty(),
+        "the researcher can do research: {artifacts}"
+    );
+}

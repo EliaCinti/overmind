@@ -139,6 +139,17 @@ impl ExecutionKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentTraits {
     pub focus_areas: Vec<String>,
+    /// What the agent is allowed to do. Two families:
+    ///
+    /// - **`task:code` / `task:knowledge`** — *enforced*. The runner refuses to
+    ///   check an agent out onto a task whose execution kind it does not hold
+    ///   (see [`perm::for_execution_kind`]). A researcher cannot be put on a
+    ///   code task by accident, or by an agent that assigned it one.
+    /// - everything else (`repo:read`, `pr:approve`, …) — *declared*, compiled
+    ///   into the prompt so the agent knows its remit, but not policed: we
+    ///   shell out to an external CLI and cannot stop it. Real enforcement of
+    ///   those needs sandboxing (M10) — pretending otherwise would be the
+    ///   "security by prayer" ADR-0005 rejects.
     pub permissions: Vec<String>,
     pub autonomy: Autonomy,
     pub review_strictness: ReviewStrictness,
@@ -184,6 +195,24 @@ impl AgentTraits {
 
 /// Audit event kinds. Centralized so the catalog of what gets audited is
 /// visible in one place.
+/// The permissions the server actually enforces (M14).
+pub mod perm {
+    use super::ExecutionKind;
+
+    /// May be checked out onto `code` tasks: works in a git worktree, produces a diff.
+    pub const TASK_CODE: &str = "task:code";
+    /// May be checked out onto `knowledge` tasks: research, documents, decisions.
+    pub const TASK_KNOWLEDGE: &str = "task:knowledge";
+
+    /// Which permission a task of this kind requires of whoever works it.
+    pub fn for_execution_kind(kind: ExecutionKind) -> &'static str {
+        match kind {
+            ExecutionKind::Code => TASK_CODE,
+            ExecutionKind::Knowledge => TASK_KNOWLEDGE,
+        }
+    }
+}
+
 pub mod event_kind {
     pub const COMPANY_CREATED: &str = "company.created";
     pub const AGENT_HIRED: &str = "agent.hired";
