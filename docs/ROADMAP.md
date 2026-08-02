@@ -154,6 +154,30 @@ Everything on screen must speak the chosen language — not just the UI chrome. 
 - Two layout defects the longer Italian surfaced and fixed: buttons wrapped their own labels (`whitespace-nowrap` is now on the primitive), and the top bar overflowed — the language control is icon-only, as a rarely-used setting should be.
 - **Accept:** switch to Italian and the chrome, the inbox and the CEO's replies are all Italian; reload and it holds.
 
+## M17 — Everything in, everything out `done`
+An agent should take **anything** you can hand it and give back **anything** it produced: a file, a document, a code snippet, a change to a repo. Today it can do neither end properly.
+
+What is actually missing (measured, not assumed):
+
+| | today | gap |
+|---|---|---|
+| **Chat input** | files upload, land in the agent's working dir, are listed in the prompt | works — but capped at axum's default 2 MB body limit, so a real PDF fails |
+| **Task input** | title + description | **nothing else.** You cannot say "analyse this spreadsheet" as a task, only in chat |
+| **Knowledge output** | every top-level file in the scratch dir becomes an artifact | subdirectories are dropped; mime is always `text/markdown` or `application/octet-stream`; bytes stay in a dir that gets cleaned |
+| **Code output** | the git diff | a code run that also writes a report has nowhere to put it that is not the diff |
+| **Getting it back** | text renders inline; binary shows a filesystem path | **no download endpoint at all** |
+| **Chat output** | text | the agent cannot hand you a file back |
+
+- ✅ **A · Tasks take attachments.** `attachments` is polymorphic (a conversation *or* a task owns it, enforced by a CHECK). Files land in `inputs/` inside the run directory — a named directory, not the root, because in a code run the root is a git worktree and loose files would land in the diff. The prompt names each one with its type and size, so an agent knows what is worth opening before it opens anything. Upload limit 2 MB → **128 MB**; the old default was under the size of a scanned PDF.
+- ✅ **B · Outputs collected honestly.** Recursive walk (`research/sources.csv` stays a different deliverable from `sources.csv`), mime from the extension, and the bytes **copied somewhere durable** before the worktree is torn down. A **code** run's `deliverables/` is collected and git-excluded, so one run hands back a diff *and* a report with neither polluting the other.
+- ✅ **C · You can get them back.** `GET /api/artifacts/{id}/download` with the right content-type — `inline` for an image, `attachment` for everything else. The drawer shows prose and code in place, renders images, and offers a download on every row.
+- ✅ **D · Chat hands files back.** Files the agent leaves in its scratch dir become attachments on its reply, rendered by the component that already shows yours. Files *you* gave it are excluded by name — handing someone their own upload back is noise.
+- **Accept:** attach a CSV to a task, the agent reads it and returns a tree of four formats, each typed, previewed and downloadable ✓; a code run returns a diff and a document that never touch each other ✓; an agent hands a file back in chat ✓ — `tests/universal_io.rs`.
+
+Two bugs the tests caught, both silent: in a worktree `.git` is a *file*, so `<worktree>/.git/info/exclude` does not exist and writing to it did nothing (`git rev-parse --git-path` resolves the real per-worktree location, leaving the user's repo untouched); and the diff endpoint answers with the patch itself, not JSON around it.
+
+Not in scope, deliberately: converting formats server-side. We do not parse PDFs or spreadsheets — we put the file in front of the agent and say what it is. The adapter has its own tools for reading things, and a converter we wrote would be a worse one that also had to be maintained.
+
 ## Known gaps — carried deliberately, not forgotten
 
 - **Chat and meeting turns do not reserve budget.** Task checkout has enforced budget reservation since M6; conversational turns (M12) and meeting turns (M13) do not. A meeting can spend up to 13 adapter runs without the agent's monthly cap being consulted. With the CEO now proposing teams and teams holding meetings, **this is the most pressing hole.**

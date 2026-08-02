@@ -17,6 +17,7 @@ use tokio::process::Command;
 use crate::audit;
 use crate::db::AppState;
 use crate::domain::event_kind;
+use crate::files::{human_size, mime_for, safe_name};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CeoError {
@@ -99,27 +100,6 @@ pub struct AttachmentMeta {
     pub size_bytes: i64,
 }
 
-/// A path-free, filesystem-safe basename for an uploaded file.
-fn safe_name(filename: &str) -> String {
-    let base = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
-    let cleaned: String = base
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim_matches('.').to_string();
-    if cleaned.is_empty() {
-        "file".to_string()
-    } else {
-        cleaned
-    }
-}
-
 /// Store an uploaded file against an agent's thread. The bytes go to disk; the
 /// row is created unlinked (`message_id` NULL) and is attached to the user's
 /// message when they post it (see `post_user_message`).
@@ -169,6 +149,66 @@ pub async fn store_attachment(
         mime: mime.to_string(),
         size_bytes: size,
     })
+}
+
+/// Files an agent left in its chat scratch dir, stored as attachments on the
+/// reply it is about to post (M17).
+///
+/// Best-effort and bounded: a chat turn that writes a thousand files is a bug,
+/// and losing one file is better than losing the reply it came with. Returns
+/// the rows created, unlinked — the caller attaches them to the message in the
+/// same transaction that writes it.
+async fn collect_reply_files(
+    state: &AppState,
+    conversation_id: &str,
+    scratch: &std::path::Path,
+    given: &std::collections::HashSet<String>,
+) -> Vec<AttachmentMeta> {
+    const MAX_REPLY_FILES: usize = 20;
+    let dir = state
+        .config
+        .data_dir
+        .join("attachments")
+        .join(conversation_id);
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (rel, size) in crate::files::collect_files(scratch, MAX_REPLY_FILES).await {
+        let name = crate::files::safe_relative(&rel);
+        if name.is_empty() || given.contains(&name) || size == 0 {
+            continue;
+        }
+        let mime = mime_for(&name);
+        let id = new_id();
+        let stored = dir.join(format!("{id}_{}", safe_name(&name)));
+        if tokio::fs::copy(scratch.join(&rel), &stored).await.is_err() {
+            continue;
+        }
+        let inserted = sqlx::query(
+            "INSERT INTO attachments
+             (id, conversation_id, task_id, message_id, origin, filename, mime, size_bytes, path, created_at)
+             VALUES (?, ?, NULL, NULL, 'agent', ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(conversation_id)
+        .bind(&name)
+        .bind(mime)
+        .bind(size as i64)
+        .bind(stored.to_string_lossy().as_ref())
+        .bind(now())
+        .execute(&state.pool)
+        .await;
+        if inserted.is_ok() {
+            out.push(AttachmentMeta {
+                id,
+                filename: name,
+                mime: mime.to_string(),
+                size_bytes: size as i64,
+            });
+        }
+    }
+    out
 }
 
 /// Post a user message to an agent's thread and launch that agent's turn. Any
@@ -433,8 +473,8 @@ async fn run_agent_turn(
     };
 
     // Files the user attached — copied into the working directory below.
-    let attachments: Vec<(String, String)> = sqlx::query_as(
-        "SELECT filename, path FROM attachments
+    let attachments: Vec<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT filename, mime, size_bytes, path FROM attachments
          WHERE conversation_id = ? AND message_id IS NOT NULL ORDER BY created_at",
     )
     .bind(conversation_id)
@@ -445,11 +485,11 @@ async fn run_agent_turn(
     } else {
         let list = attachments
             .iter()
-            .map(|(n, _)| format!("- {n}"))
+            .map(|(n, mime, size, _)| format!("- {n} ({mime}, {})", human_size(*size as u64)))
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n\nThe user attached these files, now in your working directory — open them if relevant:\n{list}"
+            "\n\nThe user attached these files, now in your working directory — open them if relevant:\n{list}\nIf one is in a format you cannot read directly, say so rather than guessing at its contents."
         )
     };
 
@@ -471,7 +511,7 @@ async fn run_agent_turn(
         .unwrap_or_default();
 
     let prompt = format!(
-        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<slug from the list>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick an archetype slug from the list above, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.{language}"
+        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<slug from the list>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick an archetype slug from the list above, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -480,7 +520,7 @@ async fn run_agent_turn(
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot create scratch dir: {e}")))?;
     // Copy the attachments in so the agent can read (or see) them by filename.
-    for (n, path) in &attachments {
+    for (n, _, _, path) in &attachments {
         let _ = tokio::fs::copy(path, scratch.join(safe_name(n))).await;
     }
     let output = run_adapter(state, &scratch, &prompt, &traits, memory_context.as_deref()).await?;
@@ -522,17 +562,35 @@ async fn run_agent_turn(
         resolved.push((title.to_string(), description.to_string(), kind, assignee));
     }
 
+    // Anything the agent wrote in its scratch dir is something it is handing
+    // back (M17). The files the user gave it are in there too, so only new
+    // names count — re-attaching someone's own upload to the reply would be
+    // noise, and the prompt tells the agent to pick a new name.
+    let given: std::collections::HashSet<String> = attachments
+        .iter()
+        .map(|(n, _, _, _)| safe_name(n))
+        .collect();
+    let produced = collect_reply_files(state, conversation_id, &scratch, &given).await;
+
     let mut tx = state.pool.begin().await?;
+    let message_id = new_id();
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, created_at)
          VALUES (?, ?, 'ceo', ?, ?)",
     )
-    .bind(new_id())
+    .bind(&message_id)
     .bind(conversation_id)
     .bind(&reply)
     .bind(now())
     .execute(&mut *tx)
     .await?;
+    for att in &produced {
+        sqlx::query("UPDATE attachments SET message_id = ? WHERE id = ?")
+            .bind(&message_id)
+            .bind(&att.id)
+            .execute(&mut *tx)
+            .await?;
+    }
     audit::append(
         &mut tx,
         Some(company_id),

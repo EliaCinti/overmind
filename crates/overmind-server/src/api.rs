@@ -1,7 +1,7 @@
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,8 +55,18 @@ pub fn app(state: AppState) -> Router {
         );
     }
 
-    router.with_state(state)
+    // Uploads are the point of M17, and axum's 2 MB default is under the size
+    // of an ordinary scanned PDF — small enough that "attach anything" would
+    // have failed on the first real file. 128 MB is chosen against what a
+    // person plausibly hands an agent (a dataset, a recording, a design file),
+    // not against what the machine can take.
+    router
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        .with_state(state)
 }
+
+/// The largest single upload accepted. See the note in [`app`].
+pub const MAX_UPLOAD_BYTES: usize = 128 * 1024 * 1024;
 
 fn api_router() -> Router<AppState> {
     Router::new()
@@ -141,6 +151,15 @@ fn api_router() -> Router<AppState> {
         .route("/tasks/{task_id}/start", post(start_task))
         .route("/tasks/{task_id}/sessions", get(list_task_sessions))
         .route("/tasks/{task_id}/artifacts", get(list_task_artifacts))
+        .route(
+            "/tasks/{task_id}/attachments",
+            post(upload_task_attachment).get(list_task_attachments),
+        )
+        .route(
+            "/tasks/{task_id}/attachments/{attachment_id}",
+            delete(remove_task_attachment),
+        )
+        .route("/artifacts/{artifact_id}/download", get(download_artifact))
         .route("/agents/{agent_id}/wakeup", post(request_wakeup))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/diff", get(get_session_diff))
@@ -1319,6 +1338,8 @@ async fn list_task_sessions(
 }
 
 /// (id, session_id, kind, title, mime, content, file_path, created_at)
+/// (id, session_id, kind, title, mime, content, file_path, size_bytes,
+/// relative_path, created_at)
 type TaskArtifactRow = (
     String,
     String,
@@ -1326,6 +1347,8 @@ type TaskArtifactRow = (
     String,
     String,
     Option<String>,
+    Option<String>,
+    i64,
     Option<String>,
     String,
 );
@@ -1337,7 +1360,7 @@ async fn list_task_artifacts(
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<TaskArtifactRow> = sqlx::query_as(
-        "SELECT id, session_id, kind, title, mime, content, file_path, created_at
+        "SELECT id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at
          FROM task_artifacts WHERE task_id = ? ORDER BY created_at DESC",
     )
     .bind(&task_id)
@@ -1346,7 +1369,18 @@ async fn list_task_artifacts(
     let artifacts: Vec<Value> = rows
         .into_iter()
         .map(
-            |(id, session_id, kind, title, mime, content, file_path, created_at)| {
+            |(
+                id,
+                session_id,
+                kind,
+                title,
+                mime,
+                content,
+                file_path,
+                size_bytes,
+                relative_path,
+                created_at,
+            )| {
                 json!({
                     "id": id,
                     "session_id": session_id,
@@ -1354,7 +1388,11 @@ async fn list_task_artifacts(
                     "title": title,
                     "mime": mime,
                     "content": content,
-                    "file_path": file_path,
+                    // Whether the bytes can be fetched — the client shows a
+                    // download only when there is something behind it.
+                    "downloadable": file_path.is_some(),
+                    "size_bytes": size_bytes,
+                    "relative_path": relative_path,
                     "created_at": created_at,
                 })
             },
@@ -1467,6 +1505,181 @@ async fn download_attachment(
         ],
         bytes,
     ))
+}
+
+/// Serve an artifact's bytes — the only way anything non-text a run produced
+/// gets off this machine and into the user's hands (M17).
+///
+/// `attachment` (not `inline`): an artifact is a deliverable, and the browser
+/// should save it rather than try to display a spreadsheet. The one exception
+/// is an image, which the drawer renders from this same URL.
+async fn download_artifact(
+    State(state): State<AppState>,
+    Path(artifact_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row: Option<(String, String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT title, mime, file_path, content FROM task_artifacts WHERE id = ?")
+            .bind(&artifact_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((title, mime, file_path, content)) = row else {
+        return Err(ApiError::NotFound("artifact"));
+    };
+    // Prefer the file; fall back to the inline text, so an artifact that was
+    // only ever stored as content is still downloadable.
+    let bytes = match file_path {
+        Some(p) => tokio::fs::read(&p)
+            .await
+            .map_err(|_| ApiError::NotFound("artifact file"))?,
+        None => content
+            .ok_or(ApiError::NotFound("artifact bytes"))?
+            .into_bytes(),
+    };
+    let filename = crate::files::safe_name(&title);
+    let disposition = if mime.starts_with("image/") {
+        format!("inline; filename=\"{filename}\"")
+    } else {
+        format!("attachment; filename=\"{filename}\"")
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    ))
+}
+
+/// Attach a file to a task, so an agent that picks it up gets it too (M17).
+/// Multipart with a `file` part, same shape as the conversation upload.
+async fn upload_task_attachment(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    let exists: Option<(String,)> = sqlx::query_as("SELECT company_id FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((company_id,)) = exists else {
+        return Err(ApiError::NotFound("task"));
+    };
+    let (filename, mime, bytes) = read_upload(multipart).await?;
+    let name = crate::files::safe_name(&filename);
+    // Trust the extension over the browser's content type: a browser reports
+    // `application/octet-stream` for anything it does not recognise, and the
+    // extension is what the agent will see anyway.
+    let mime = match crate::files::mime_for(&name) {
+        "application/octet-stream" => mime,
+        known => known.to_string(),
+    };
+    let id = uuid::Uuid::now_v7().to_string();
+    let dir = state.config.data_dir.join("attachments").join(&task_id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| ApiError::Invalid(format!("cannot create attachments dir: {e}")))?;
+    let path = dir.join(format!("{id}_{name}"));
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| ApiError::Invalid(format!("cannot write attachment: {e}")))?;
+    let size = bytes.len() as i64;
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO attachments
+         (id, conversation_id, task_id, message_id, origin, filename, mime, size_bytes, path, created_at)
+         VALUES (?, NULL, ?, NULL, 'user', ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&task_id)
+    .bind(&name)
+    .bind(&mime)
+    .bind(size)
+    .bind(path.to_string_lossy().as_ref())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    crate::audit::append(
+        &mut tx,
+        Some(&company_id),
+        Some(&task_id),
+        crate::domain::event_kind::ATTACHMENT_ADDED,
+        &json!({ "task_id": task_id, "attachment_id": id, "filename": name, "mime": mime }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({
+        "id": id, "filename": name, "mime": mime, "size_bytes": size,
+    })))
+}
+
+/// Files attached to a task — what an agent picking it up will be handed.
+async fn list_task_attachments(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT id, filename, mime, size_bytes, created_at FROM attachments
+         WHERE task_id = ? ORDER BY created_at",
+    )
+    .bind(&task_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let attachments: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, filename, mime, size_bytes, created_at)| {
+            json!({
+                "id": id, "filename": filename, "mime": mime,
+                "size_bytes": size_bytes, "created_at": created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "attachments": attachments })))
+}
+
+/// Detach a file from a task. The row goes; the bytes on disk are left for the
+/// audit trail to point at, and cost nothing to keep.
+async fn remove_task_attachment(
+    State(state): State<AppState>,
+    Path((task_id, attachment_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let done = sqlx::query("DELETE FROM attachments WHERE id = ? AND task_id = ?")
+        .bind(&attachment_id)
+        .bind(&task_id)
+        .execute(&state.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("attachment"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// The single `file` part of a multipart upload.
+async fn read_upload(mut multipart: Multipart) -> Result<(String, String, Vec<u8>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::Invalid(format!("malformed upload: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().unwrap_or("file").to_string();
+        let mime = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::Invalid(format!("bad file: {e}")))?
+            .to_vec();
+        if bytes.is_empty() {
+            return Err(ApiError::Invalid("attachment is empty".into()));
+        }
+        return Ok((filename, mime, bytes));
+    }
+    Err(ApiError::Invalid("no file part in upload".into()))
 }
 
 /// An agent's thread and its messages (null until the first message).

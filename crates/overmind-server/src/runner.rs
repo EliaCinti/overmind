@@ -16,12 +16,65 @@ use tokio::process::Command;
 use crate::audit;
 use crate::db::AppState;
 use crate::domain::{ExecutionKind, event_kind};
+use crate::files;
 use crate::governance;
 
 /// How a working agent asks for a meeting: a control file in its working
 /// directory (ADR-0020). A file, not stdout, because the last JSON line of a
 /// run belongs to the adapter's own result envelope.
 const MEETING_REQUEST_FILE: &str = "MEETING_REQUEST.json";
+
+/// Where files you attached to a task are placed, inside the run directory
+/// (M17). A named directory rather than the root for two reasons: in a `code`
+/// run the root is a git worktree and loose files would land in the diff, and
+/// in either kind the output collector must be able to tell what the agent
+/// *produced* from what it was *given*.
+const INPUTS_DIR: &str = "inputs";
+
+/// Where a `code` run puts anything that is not a code change — a report, a
+/// chart, a generated file. Git-excluded, collected as artifacts. A knowledge
+/// run needs no such convention: everything it writes is the deliverable.
+const DELIVERABLES_DIR: &str = "deliverables";
+
+/// A cap on how many files one run can hand back. Not a policy about what is
+/// reasonable — a guard so a runaway loop writing files cannot fill the
+/// database.
+const MAX_ARTIFACTS: usize = 200;
+
+/// Text kept inline in the row for preview and search; beyond this only the
+/// file on disk. 256 KB is far past any document a human reads in a drawer.
+const MAX_INLINE_BYTES: u64 = 256 * 1024;
+
+/// Files attached to this task, as `(filename, mime, size, absolute path)`.
+async fn task_inputs(state: &AppState, task_id: &str) -> Vec<(String, String, i64, String)> {
+    sqlx::query_as(
+        "SELECT filename, mime, size_bytes, path FROM attachments
+         WHERE task_id = ? ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Copy the task's attachments into the run directory before the agent starts.
+///
+/// Best-effort: a file that cannot be copied costs the agent that input, and
+/// the prompt still names it — better than failing a run over one unreadable
+/// upload. The agent is told what is there and where.
+async fn place_inputs(ctx: &SessionContext) {
+    let inputs = task_inputs(&ctx.state, &ctx.task_id).await;
+    if inputs.is_empty() {
+        return;
+    }
+    let dir = ctx.worktree_dir.join(INPUTS_DIR);
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        return;
+    }
+    for (name, _, _, path) in &inputs {
+        let _ = tokio::fs::copy(path, dir.join(files::safe_name(name))).await;
+    }
+}
 
 /// Who the agent is, compiled for the prompt (ADR-0005 / M14).
 ///
@@ -627,12 +680,38 @@ async fn prepare_scratch(ctx: &SessionContext) -> Result<(), RunnerError> {
     tokio::fs::create_dir_all(&ctx.worktree_dir)
         .await
         .map_err(|e| RunnerError::Invalid(format!("cannot create scratch dir: {e}")))?;
+    place_inputs(ctx).await;
     sqlx::query("UPDATE agent_task_sessions SET status = 'running', started_at = ? WHERE id = ?")
         .bind(now())
         .bind(&ctx.session_id)
         .execute(&ctx.state.pool)
         .await?;
     Ok(())
+}
+
+/// Keep Overmind's own directories out of the run's diff.
+///
+/// The path matters: in a worktree `.git` is a *file* pointing at
+/// `<repo>/.git/worktrees/<name>`, so `<worktree>/.git/info/exclude` does not
+/// exist and writing to it silently does nothing — which is exactly what
+/// happened until a test caught it. `git rev-parse --git-path` resolves the
+/// per-worktree location, so the user's own repo is never touched.
+///
+/// Best-effort: without it the worst case is a report showing up in a diff.
+async fn exclude_from_git(worktree: &Path) {
+    let Ok(path) = git(worktree, &["rev-parse", "--git-path", "info/exclude"]).await else {
+        return;
+    };
+    // The path is relative to the worktree unless git returns an absolute one.
+    let path = if Path::new(&path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        worktree.join(path)
+    };
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(&path, format!("/{DELIVERABLES_DIR}/\n/{INPUTS_DIR}/\n")).await;
 }
 
 async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(), RunnerError> {
@@ -648,6 +727,13 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
     }
     git(&spec.repo_cwd, &args).await?;
     let base_sha = git(&ctx.worktree_dir, &["rev-parse", "HEAD"]).await?;
+    // A code run can also hand back documents (M17): `deliverables/` is
+    // collected as artifacts and kept out of git, so one run can produce a
+    // diff *and* a report without either polluting the other. Same for the
+    // files the human attached — they are input, not a change.
+    let _ = tokio::fs::create_dir_all(ctx.worktree_dir.join(DELIVERABLES_DIR)).await;
+    exclude_from_git(&ctx.worktree_dir).await;
+    place_inputs(ctx).await;
     sqlx::query(
         "UPDATE agent_task_sessions SET status = 'running', base_sha = ?, started_at = ? WHERE id = ?",
     )
@@ -692,13 +778,46 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         crate::i18n::prompt_line(&crate::i18n::company_language(&ctx.state, &ctx.company_id).await);
 
     // How the agent is expected to deliver, per execution kind (ADR-0017).
+    //
+    // Both kinds may hand back files of any type (M17). We say what the file
+    // is and where to put it; we do not tell it what to write it *with* — the
+    // adapter has its own tools, and constraining the format here would make
+    // "produce a chart" impossible for no reason.
     let deliver = match ctx.exec_kind {
         ExecutionKind::Code => {
-            "Work in the current directory. When done, leave the changes uncommitted."
+            "Work in the current directory. When done, leave the changes uncommitted. \
+             Anything that is NOT a code change — a report, a chart, a generated file, a \
+             standalone snippet — goes in the `deliverables/` directory instead: it is kept out \
+             of git and handed back alongside your diff. Any file type is fine."
         }
         ExecutionKind::Knowledge => {
-            "Write your deliverable as one or more Markdown files in the current directory (e.g. ARTIFACT.md). Do not use git."
+            "Write your deliverable as files in the current directory — Markdown for prose \
+             (e.g. ARTIFACT.md), but any format the work calls for: CSV or JSON for data, an \
+             image for a chart, a source file for code, a PDF if you can produce one. \
+             Subdirectories are kept, so organise them if there is more than one. Do not use git."
         }
+    };
+
+    // What the human handed the agent (M17). Named with type and size so it
+    // can decide what is worth opening before it opens anything.
+    let inputs = task_inputs(&ctx.state, &ctx.task_id).await;
+    let inputs_block = if inputs.is_empty() {
+        String::new()
+    } else {
+        let list = inputs
+            .iter()
+            .map(|(name, mime, size, _)| {
+                format!(
+                    "- {INPUTS_DIR}/{} ({mime}, {})",
+                    files::safe_name(name),
+                    files::human_size(*size as u64)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nFiles provided with this task, already in your working directory:\n{list}\nOpen the ones that matter. If one is in a format you cannot read directly, say so in your output rather than guessing at its contents."
+        )
     };
     // Collaboration is expected: an agent that hits a call it should not make
     // alone asks for a meeting instead of guessing (ADR-0020). Nothing happens
@@ -714,12 +833,12 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
 
     let prompt = if resume {
         format!(
-            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}{language}",
+            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}{inputs_block}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}{language}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     } else {
         format!(
-            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}\n\n{deliver}{meeting_hint}{language}",
+            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}{inputs_block}\n\n{deliver}{meeting_hint}{language}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     };
@@ -907,71 +1026,96 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     )
     .await?;
 
-    // Knowledge runs deliver files, not a diff (ADR-0017): register everything
-    // the agent wrote in the scratch dir as task artifacts. Reading the dir is
-    // best-effort; a missing file must not fail the already-recorded session.
-    if ctx.exec_kind == ExecutionKind::Knowledge && f.session_status == "completed" {
+    // What the run produced, besides (or instead of) a diff — M17.
+    //
+    // A knowledge run's deliverable is everything it wrote; a code run's is the
+    // diff, plus anything it deliberately put in `deliverables/`. Either way
+    // the bytes are copied somewhere durable first: the worktree is torn down,
+    // and an artifact that points into a deleted directory is not an artifact.
+    //
+    // Best-effort throughout: the session is already recorded, and a file that
+    // cannot be read must not undo that.
+    if f.session_status == "completed" {
+        let (root, inline_root) = match ctx.exec_kind {
+            ExecutionKind::Knowledge => (ctx.worktree_dir.clone(), true),
+            ExecutionKind::Code => (ctx.worktree_dir.join(DELIVERABLES_DIR), false),
+        };
+        let store = ctx
+            .state
+            .config
+            .data_dir
+            .join("artifacts")
+            .join(&ctx.session_id);
         let mut n = 0usize;
-        if let Ok(mut entries) = tokio::fs::read_dir(&ctx.worktree_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let is_file = entry
-                    .file_type()
-                    .await
-                    .map(|t| t.is_file())
-                    .unwrap_or(false);
-                let name = entry.file_name().to_string_lossy().into_owned();
-                // The meeting request is a control file, not a deliverable.
-                if !is_file || name.starts_with('.') || name == MEETING_REQUEST_FILE {
-                    continue;
-                }
-                let (content, file_path, mime): (Option<String>, Option<String>, &str) =
-                    match tokio::fs::read(entry.path()).await {
-                        Ok(bytes) => match String::from_utf8(bytes) {
-                            Ok(text) => (Some(text), None, "text/markdown"),
-                            // Non-text payload: point at the file on disk instead.
-                            Err(_) => (
-                                None,
-                                Some(entry.path().to_string_lossy().into_owned()),
-                                "application/octet-stream",
-                            ),
-                        },
-                        Err(_) => continue,
-                    };
-                sqlx::query(
-                    "INSERT INTO task_artifacts (id, task_id, session_id, kind, title, mime, content, file_path, created_at)
-                     VALUES (?, ?, ?, 'document', ?, ?, ?, ?, ?)",
-                )
-                .bind(uuid::Uuid::now_v7().to_string())
-                .bind(&ctx.task_id)
-                .bind(&ctx.session_id)
-                .bind(&name)
-                .bind(mime)
-                .bind(&content)
-                .bind(&file_path)
-                .bind(now())
-                .execute(&mut *tx)
-                .await?;
-                audit::append(
-                    &mut tx,
-                    Some(&ctx.company_id),
-                    Some(&ctx.task_id),
-                    event_kind::ARTIFACT_CREATED,
-                    &json!({ "session_id": ctx.session_id, "title": name }),
-                )
-                .await?;
-                n += 1;
+        for (rel, size) in files::collect_files(&root, MAX_ARTIFACTS).await {
+            let rel_str = files::safe_relative(&rel);
+            // Control files and the inputs we placed are not deliverables.
+            if rel_str.is_empty()
+                || rel_str == MEETING_REQUEST_FILE
+                || rel_str.starts_with(&format!("{INPUTS_DIR}/"))
+                || (inline_root && rel_str.starts_with(&format!("{DELIVERABLES_DIR}/")))
+            {
+                continue;
             }
-        }
-        // Always leave at least one artifact so the drawer has something to show.
-        if n == 0 {
+            let mime = files::mime_for(&rel_str);
+            // Text small enough to read stays inline, so the drawer can show it
+            // without a second request; everything else is served from disk.
+            let content = if files::is_texty(mime) && size <= MAX_INLINE_BYTES {
+                tokio::fs::read_to_string(root.join(&rel)).await.ok()
+            } else {
+                None
+            };
+            let stored = store.join(&rel_str);
+            let copied = async {
+                tokio::fs::create_dir_all(stored.parent()?).await.ok()?;
+                tokio::fs::copy(root.join(&rel), &stored).await.ok()
+            }
+            .await
+            .is_some();
+            if !copied && content.is_none() {
+                continue; // nothing survives of this one; do not record a lie
+            }
             sqlx::query(
-                "INSERT INTO task_artifacts (id, task_id, session_id, kind, title, mime, content, file_path, created_at)
-                 VALUES (?, ?, ?, 'document', 'Run output', 'text/plain', ?, NULL, ?)",
+                "INSERT INTO task_artifacts
+                 (id, task_id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at)
+                 VALUES (?, ?, ?, 'document', ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&ctx.task_id)
+            .bind(&ctx.session_id)
+            .bind(&rel_str)
+            .bind(mime)
+            .bind(&content)
+            .bind(copied.then(|| stored.to_string_lossy().into_owned()))
+            .bind(size as i64)
+            .bind(&rel_str)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            audit::append(
+                &mut tx,
+                Some(&ctx.company_id),
+                Some(&ctx.task_id),
+                event_kind::ARTIFACT_CREATED,
+                &json!({ "session_id": ctx.session_id, "title": rel_str, "mime": mime, "size_bytes": size }),
+            )
+            .await?;
+            n += 1;
+        }
+        // A knowledge run must leave something in the drawer even when the
+        // agent wrote no file — the raw output is better than an empty panel.
+        // A code run that produced only a diff is complete without one.
+        if n == 0 && ctx.exec_kind == ExecutionKind::Knowledge {
+            sqlx::query(
+                "INSERT INTO task_artifacts
+                 (id, task_id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at)
+                 VALUES (?, ?, ?, 'document', 'Run output', 'text/plain', ?, NULL, ?, NULL, ?)",
             )
             .bind(uuid::Uuid::now_v7().to_string())
             .bind(&ctx.task_id)
             .bind(&ctx.session_id)
             .bind(&f.output)
+            .bind(f.output.len() as i64)
             .bind(now())
             .execute(&mut *tx)
             .await?;

@@ -188,10 +188,15 @@ export interface Artifact {
   id: string;
   session_id: string;
   kind: string;
+  /** Path relative to the run's deliverable root — `research/sources.csv`. */
   title: string;
   mime: string;
+  /** Inline text, when the artifact is text and small enough to preview. */
   content: string | null;
-  file_path: string | null;
+  /** Whether bytes can be fetched from `artifactUrl` (M17). */
+  downloadable: boolean;
+  size_bytes: number;
+  relative_path: string | null;
   created_at: string;
 }
 
@@ -432,27 +437,43 @@ export const api = {
       { content, attachment_ids: attachmentIds ?? [] },
     ),
   /** Upload a file/image to an agent's thread; returns its attachment metadata. */
-  uploadAttachment: (companyId: string, agentId: string, file: File): Promise<Attachment> => {
-    const form = new FormData();
-    form.append("file", file);
-    return fetch(`/api/companies/${companyId}/agents/${agentId}/conversation/attachments`, {
-      method: "POST",
-      body: form,
-    }).then(async (res) => {
-      if (!res.ok) {
-        let message = res.statusText;
-        try {
-          const data = await res.json();
-          if (data?.error) message = data.error;
-        } catch {
-          // keep statusText
-        }
-        throw new ApiError(res.status, message);
-      }
-      return (await res.json()) as Attachment;
-    });
-  },
+  uploadAttachment: (companyId: string, agentId: string, file: File): Promise<Attachment> =>
+    postFile(`/api/companies/${companyId}/agents/${agentId}/conversation/attachments`, file),
+
   /** URL that serves an attachment's bytes (for <img> / download links). */
   attachmentUrl: (companyId: string, attachmentId: string) =>
     `/api/companies/${companyId}/conversation/attachments/${attachmentId}`,
+
+  // --- Files on a task (M17): what an agent picking it up will be handed.
+  uploadTaskAttachment: (taskId: string, file: File): Promise<Attachment> =>
+    postFile(`/api/tasks/${taskId}/attachments`, file),
+  listTaskAttachments: (taskId: string) =>
+    req<{ attachments: Attachment[] }>("GET", `/tasks/${taskId}/attachments`).then(
+      (r) => r.attachments,
+    ),
+  removeTaskAttachment: (taskId: string, attachmentId: string) =>
+    req<unknown>("DELETE", `/tasks/${taskId}/attachments/${attachmentId}`),
+
+  /** URL that serves an artifact's bytes — images render from it, everything
+   *  else downloads from it (M17). */
+  artifactUrl: (artifactId: string) => `/api/artifacts/${artifactId}/download`,
 };
+
+/** Multipart upload of a single file. `fetch` directly: `req` sends JSON. */
+function postFile(url: string, file: File): Promise<Attachment> {
+  const form = new FormData();
+  form.append("file", file);
+  return fetch(url, { method: "POST", body: form }).then(async (res) => {
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const data = await res.json();
+        if (data?.error) message = data.error;
+      } catch {
+        // keep statusText
+      }
+      throw new ApiError(res.status, message);
+    }
+    return (await res.json()) as Attachment;
+  });
+}
