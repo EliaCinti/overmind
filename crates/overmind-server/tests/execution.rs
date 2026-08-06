@@ -75,6 +75,8 @@ struct TestEnv {
     app: axum::Router,
     root: PathBuf,
     company_id: String,
+    /// The CEO the company is founded with (M15) — the org leader.
+    ceo_id: String,
     agent_id: String,
     task_id: String,
 }
@@ -112,11 +114,15 @@ async fn setup(stub_script: &str) -> TestEnv {
     )
     .await;
     let company_id = company["id"].as_str().expect("company id").to_string();
+    let ceo_id = company["ceo"]["id"]
+        .as_str()
+        .expect("every company is founded with a CEO")
+        .to_string();
     let (_, agent) = send(
         &app,
         "POST",
         &format!("/api/companies/{company_id}/agents"),
-        Some(json!({ "name": "Builder", "archetype": "backend-developer" })),
+        Some(json!({ "name": "Builder", "archetype": "builder" })),
     )
     .await;
     let agent_id = agent["id"].as_str().expect("agent id").to_string();
@@ -165,6 +171,7 @@ async fn setup(stub_script: &str) -> TestEnv {
         app,
         root,
         company_id,
+        ceo_id,
         agent_id,
         task_id,
     }
@@ -337,6 +344,492 @@ async fn failed_session_blocks_task_with_error() {
     )
     .await;
     assert_eq!(tasks["tasks"][0]["status"], "blocked");
+
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+// M11 / ADR-0017: a knowledge run produces a document artifact, not a diff.
+const KNOWLEDGE_STUB: &str = r#"#!/bin/sh
+echo "researching: $OVERMIND_TASK_TITLE"
+printf '# Avengers - best editions\n\n4K UHD, Dolby Atmos.\n' > ARTIFACT.md
+echo '{"model":"stub-model","total_cost_usd":0.10,"usage":{"input_tokens":100,"output_tokens":50}}'
+"#;
+
+#[tokio::test]
+async fn knowledge_task_produces_document_artifact() {
+    let env = setup(KNOWLEDGE_STUB).await;
+
+    // A knowledge task needs neither a goal nor a git workspace (ADR-0017).
+    let (status, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({
+            "title": "Research Avengers editions",
+            "description": "Find the best 4K release.",
+            "execution_kind": "knowledge"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {task}");
+    assert_eq!(task["execution_kind"], "knowledge");
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start failed: {started}");
+    let session_id = started["session_id"].as_str().expect("session id");
+    // Knowledge runs have no git branch.
+    assert_eq!(started["branch"], "");
+
+    let session = wait_for_session(&env.app, session_id).await;
+    assert_eq!(session["status"], "completed", "session: {session}");
+
+    // The deliverable is an artifact, not a diff.
+    let (status, artifacts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{task_id}/artifacts"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let doc = artifacts["artifacts"]
+        .as_array()
+        .expect("artifacts")
+        .iter()
+        .find(|a| a["title"] == "ARTIFACT.md")
+        .expect("ARTIFACT.md artifact");
+    assert!(
+        doc["content"].as_str().expect("content").contains("4K UHD"),
+        "artifact: {doc}"
+    );
+
+    // Task landed in review; the artifact is audited and the chain still verifies.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let ours = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["id"] == task_id.as_str())
+        .expect("our task");
+    assert_eq!(ours["status"], "in_review");
+    assert_eq!(ours["execution_kind"], "knowledge");
+
+    let (_, events) = send(
+        &env.app,
+        "GET",
+        &format!("/api/audit/events?company_id={}", env.company_id),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().expect("kind"))
+        .collect();
+    assert!(
+        kinds.contains(&"artifact.created"),
+        "missing artifact.created in {kinds:?}"
+    );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+// M12 / ADR-0018: talking to the CEO opens a task. The stub CEO returns a plan.
+const CEO_STUB: &str = r#"#!/bin/sh
+echo "thinking..."
+echo '{"reply":"On it - I will research that.","tasks":[{"title":"Research Avengers 4K editions","description":"Best release per film.","execution_kind":"knowledge"}]}'
+"#;
+
+#[tokio::test]
+async fn ceo_replies_and_opens_a_task() {
+    let env = setup(CEO_STUB).await;
+
+    let (status, posted) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.agent_id
+        ),
+        Some(json!({
+            "content": "Find the best 4K Avengers editions."
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "post failed: {posted}");
+
+    // The CEO's turn runs in the background; poll until it has replied.
+    let mut convo = json!({});
+    for _ in 0..100 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, env.agent_id
+            ),
+            None,
+        )
+        .await;
+        let replied = c["messages"]
+            .as_array()
+            .map(|m| m.iter().any(|x| x["role"] == "ceo"))
+            .unwrap_or(false);
+        if replied {
+            convo = c;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let messages = convo["messages"].as_array().expect("messages");
+    assert!(
+        messages.iter().any(|m| m["role"] == "user"),
+        "no user message"
+    );
+    let ceo = messages
+        .iter()
+        .find(|m| m["role"] == "ceo")
+        .expect("ceo reply");
+    assert!(
+        ceo["content"].as_str().unwrap_or("").contains("research"),
+        "ceo: {ceo}"
+    );
+
+    // The CEO opened a knowledge task, visible on the board and dispatchable.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let opened = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["title"] == "Research Avengers 4K editions")
+        .expect("the CEO's task");
+    assert_eq!(opened["status"], "todo");
+    assert_eq!(opened["execution_kind"], "knowledge");
+
+    // Every step audited; the chain still verifies.
+    let (_, events) = send(
+        &env.app,
+        "GET",
+        &format!("/api/audit/events?company_id={}", env.company_id),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().expect("kind"))
+        .collect();
+    for expected in ["conversation.created", "message.posted", "task.created"] {
+        assert!(kinds.contains(&expected), "missing {expected} in {kinds:?}");
+    }
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+// M12 / ADR-0018: an uploaded file reaches the CEO agent's working directory.
+// This stub reports the files it can see, so the test can prove the file arrived.
+const CEO_ATTACH_STUB: &str = r#"#!/bin/sh
+printf '{"reply":"files present: %s","tasks":[]}\n' "$(ls)"
+"#;
+
+/// POST a multipart upload (agent_id field + a file part) to the attachments endpoint.
+async fn upload_file(
+    app: &axum::Router,
+    company_id: &str,
+    agent_id: &str,
+    filename: &str,
+    mime: &str,
+    content: &[u8],
+) -> (StatusCode, Value) {
+    let boundary = "OMTESTBOUNDARY";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes(),
+    );
+    body.extend_from_slice(content);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/api/companies/{company_id}/agents/{agent_id}/conversation/attachments"
+        ))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .expect("build request");
+    let response = app.clone().oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+#[tokio::test]
+async fn ceo_sees_an_attachment() {
+    let env = setup(CEO_ATTACH_STUB).await;
+
+    // Upload a file to the CEO thread.
+    let (status, att) = upload_file(
+        &env.app,
+        &env.company_id,
+        &env.agent_id,
+        "room.txt",
+        "text/plain",
+        b"a cozy living room",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "upload failed: {att}");
+    let attachment_id = att["id"].as_str().expect("attachment id").to_string();
+    assert_eq!(att["filename"], "room.txt");
+
+    // Post a message that references the attachment.
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.agent_id
+        ),
+        Some(json!({
+            "content": "What do you think of this room?",
+            "attachment_ids": [attachment_id],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // Poll for the CEO's reply; the stub lists the files in its working dir.
+    let mut ceo_reply = String::new();
+    let mut convo = json!({});
+    for _ in 0..100 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, env.agent_id
+            ),
+            None,
+        )
+        .await;
+        if let Some(m) = c["messages"]
+            .as_array()
+            .and_then(|m| m.iter().find(|x| x["role"] == "ceo"))
+        {
+            ceo_reply = m["content"].as_str().unwrap_or("").to_string();
+            convo = c;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The file reached the agent's working directory.
+    assert!(
+        ceo_reply.contains("room.txt"),
+        "the attachment didn't reach the agent — reply: {ceo_reply:?}"
+    );
+
+    // The attachment is shown on the user's message.
+    let user = convo["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("user message");
+    assert_eq!(user["attachments"][0]["filename"], "room.txt");
+
+    // And it's downloadable, with the exact bytes we uploaded.
+    let (status, body) = send_text(
+        &env.app,
+        &format!(
+            "/api/companies/{}/conversation/attachments/{}",
+            env.company_id, attachment_id
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "a cozy living room");
+
+    // Audited (attachment.added), and the chain still verifies.
+    let (_, events) = send(
+        &env.app,
+        "GET",
+        &format!("/api/audit/events?company_id={}", env.company_id),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or(""))
+        .collect();
+    assert!(
+        kinds.contains(&"attachment.added"),
+        "missing attachment.added in {kinds:?}"
+    );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+// ADR-0019: talking to a single agent ripples onto the team — a specialist
+// assigns a task to a teammate and escalates to the CEO. The stub returns that plan.
+const SPECIALIST_STUB: &str = r#"#!/bin/sh
+echo '{"reply":"On it - I will bring in Guard.","tasks":[{"title":"Harden the login flow","description":"Review auth.","execution_kind":"code","assignee":"Guard"}],"escalate":"This affects the whole app; the CEO should know."}'
+"#;
+
+#[tokio::test]
+async fn agent_conversation_ripples_to_teammates() {
+    // env.agent_id ("Builder") reports to nobody, so it is the org leader (the CEO).
+    let env = setup(SPECIALIST_STUB).await;
+
+    // A teammate to assign to, and the specialist we'll talk to — both report to the leader.
+    let (_, guard) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(json!({ "name": "Guard", "archetype": "builder", "reports_to": env.agent_id })),
+    )
+    .await;
+    let guard_id = guard["id"].as_str().expect("guard id").to_string();
+    let (_, iris) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(json!({ "name": "Iris", "archetype": "builder", "reports_to": env.agent_id })),
+    )
+    .await;
+    let iris_id = iris["id"].as_str().expect("iris id").to_string();
+
+    // Talk to Iris directly (a specialist, not the leader).
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, iris_id
+        ),
+        Some(json!({ "content": "Can you secure the login?" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    // Wait for Iris to reply.
+    for _ in 0..100 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, iris_id
+            ),
+            None,
+        )
+        .await;
+        if c["messages"]
+            .as_array()
+            .map(|m| m.iter().any(|x| x["role"] == "ceo"))
+            .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The ripple: a task was created and ASSIGNED to Guard (a different agent).
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let task = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["title"] == "Harden the login flow")
+        .expect("the assigned task");
+    assert_eq!(
+        task["assignee_agent_id"],
+        json!(guard_id),
+        "task not assigned to the teammate: {task}"
+    );
+
+    // The escalation reached the org leader's thread. Since M15 that leader is
+    // the founding CEO, not Builder — Builder itself reports to it.
+    let mut escalated = false;
+    for _ in 0..60 {
+        let (_, c) = send(
+            &env.app,
+            "GET",
+            &format!(
+                "/api/companies/{}/agents/{}/conversation",
+                env.company_id, env.ceo_id
+            ),
+            None,
+        )
+        .await;
+        if c["messages"]
+            .as_array()
+            .map(|m| {
+                m.iter().any(|x| {
+                    x["role"] == "system"
+                        && x["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .contains("Escalation from Iris")
+                })
+            })
+            .unwrap_or(false)
+        {
+            escalated = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(escalated, "no escalation reached the leader's thread");
 
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));

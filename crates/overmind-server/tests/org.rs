@@ -52,7 +52,7 @@ async fn hire(
     reports_to: Option<&str>,
     title: Option<&str>,
 ) -> (StatusCode, Value) {
-    let mut body = json!({ "name": name, "archetype": "backend-developer" });
+    let mut body = json!({ "name": name, "archetype": "builder" });
     if let Some(m) = reports_to {
         body["reports_to"] = json!(m);
     }
@@ -79,13 +79,21 @@ async fn builds_a_reporting_tree() {
     )
     .await;
     let company = co["id"].as_str().expect("company id").to_string();
+    // Since M15 the company is founded with a CEO, and it is the only root:
+    // hiring without a manager attaches under it rather than creating a second.
+    let ceo_id = co["ceo"]["id"].as_str().expect("founding CEO").to_string();
+    assert_eq!(co["ceo"]["reports_to"], Value::Null, "the CEO is the root");
 
-    // A lead reporting to the human owner (reports_to = null), and two reports.
+    // A lead hired with no manager given, and two reports under it.
     let (s, lead) = hire(&app, &company, "Lead", None, Some("Tech Lead")).await;
     assert_eq!(s, StatusCode::CREATED);
     let lead_id = lead["id"].as_str().expect("lead id").to_string();
     assert_eq!(lead["title"], "Tech Lead");
-    assert_eq!(lead["reports_to"], Value::Null);
+    assert_eq!(
+        lead["reports_to"],
+        json!(ceo_id),
+        "an org has one root: a manager-less hire lands under the CEO"
+    );
 
     let (s, dev) = hire(&app, &company, "Dev", Some(&lead_id), None).await;
     assert_eq!(s, StatusCode::CREATED);
@@ -112,7 +120,7 @@ async fn builds_a_reporting_tree() {
     )
     .await;
     let list = agents["agents"].as_array().expect("agents");
-    assert_eq!(list.len(), 2);
+    assert_eq!(list.len(), 3, "CEO + Lead + Dev");
     let dev_row = list.iter().find(|a| a["name"] == "Dev").expect("dev");
     assert_eq!(dev_row["reports_to"], json!(lead_id));
 }
@@ -197,4 +205,77 @@ async fn reassignment_enforces_the_dag() {
     // The audit chain still verifies after all the org mutations.
     let (_, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
+}
+
+/// M15: the org is a tree rooted at the founding CEO, of any depth. Everyone
+/// reaches the CEO by walking up; nobody is a second root.
+#[tokio::test]
+async fn the_org_is_a_tree_rooted_at_the_ceo() {
+    let app = app().await;
+    let (_, co) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Deep Co" })),
+    )
+    .await;
+    let company = co["id"].as_str().expect("company id").to_string();
+    let ceo = co["ceo"]["id"].as_str().expect("founding CEO").to_string();
+
+    // CEO → Director → Lead → Engineer: four levels, built explicitly.
+    let (_, director) = hire(&app, &company, "Director", Some(&ceo), Some("Director")).await;
+    let director_id = director["id"].as_str().expect("id").to_string();
+    let (_, lead) = hire(&app, &company, "Lead", Some(&director_id), Some("Lead")).await;
+    let lead_id = lead["id"].as_str().expect("id").to_string();
+    let (s, eng) = hire(&app, &company, "Engineer", Some(&lead_id), None).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(eng["reports_to"], json!(lead_id));
+
+    let (_, agents) = send(
+        &app,
+        "GET",
+        &format!("/api/companies/{company}/agents"),
+        None,
+    )
+    .await;
+    let list = agents["agents"].as_array().expect("agents");
+    assert_eq!(list.len(), 4, "CEO + three levels under it");
+
+    // Exactly one root, and it is the CEO.
+    let roots: Vec<&str> = list
+        .iter()
+        .filter(|a| a["reports_to"].is_null())
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    assert_eq!(roots, vec![ceo.as_str()], "one root, the CEO");
+
+    // Every agent reaches the CEO by walking up its managers.
+    let manager_of = |id: &str| -> Option<String> {
+        list.iter()
+            .find(|a| a["id"] == json!(id))
+            .and_then(|a| a["reports_to"].as_str())
+            .map(str::to_string)
+    };
+    for a in list.iter() {
+        let id = a["id"].as_str().expect("id");
+        let mut cursor = id.to_string();
+        let mut hops = 0;
+        while let Some(mgr) = manager_of(&cursor) {
+            cursor = mgr;
+            hops += 1;
+            assert!(hops < 10, "walking up {id} did not terminate");
+        }
+        assert_eq!(cursor, ceo, "{id} does not reach the CEO");
+    }
+
+    // And a cycle is still refused, however deep: the CEO cannot report to a leaf.
+    let eng_id = eng["id"].as_str().expect("id");
+    let (s, _) = send(
+        &app,
+        "POST",
+        &format!("/api/agents/{ceo}/reassign"),
+        Some(json!({ "reports_to": eng_id })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "that would close a cycle");
 }

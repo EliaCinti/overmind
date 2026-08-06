@@ -5,38 +5,33 @@ import type { Company } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Field, Input } from "./ui/primitives";
+import { connectRepo } from "../lib/repo";
+import { useT } from "../lib/i18n";
 
 /**
- * First-run guidance. Two steps, shown one at a time:
- *  1. name a company, then
- *  2. point it at a git repository (creates the project + primary workspace +
- *     a default goal that tasks attach to).
- * `needsWorkspace` tells us which step the current company is on.
+ * First run. Name a company — that is the only required step; the company is
+ * usable the moment it exists. Then the offer to connect a git repo, which is
+ * **optional**: it is what `code` tasks need (ADR-0008), and a company doing
+ * research, documents or decisions (ADR-0016/0017) never needs one. Skipping
+ * costs nothing — the repo can be connected later, from where you reach for it.
  */
-export function Onboarding({
-  company,
-  needsWorkspace,
-  onCompanyCreated,
-  onReady,
-}: {
-  company: Company | null;
-  needsWorkspace: boolean;
-  onCompanyCreated: (id: string) => void;
-  onReady: () => void;
-}) {
+export function Onboarding({ onDone }: { onDone: (companyId: string) => void }) {
+  const [created, setCreated] = useState<Company | null>(null);
+
   return (
     <div className="flex flex-1 items-center justify-center p-6">
       <motion.div
+        key={created ? "repo" : "company"}
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
         className="w-full max-w-md"
       >
-        {!company ? (
-          <CompanyStep onCreated={onCompanyCreated} />
-        ) : needsWorkspace ? (
-          <WorkspaceStep company={company} onReady={onReady} />
-        ) : null}
+        {!created ? (
+          <CompanyStep onCreated={setCreated} />
+        ) : (
+          <RepoStep company={created} onDone={() => onDone(created.id)} />
+        )}
       </motion.div>
     </div>
   );
@@ -72,7 +67,8 @@ function StepShell({
   );
 }
 
-function CompanyStep({ onCreated }: { onCreated: (id: string) => void }) {
+function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
+  const t = useT();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,10 +78,9 @@ function CompanyStep({ onCreated }: { onCreated: (id: string) => void }) {
     setBusy(true);
     setError(null);
     try {
-      const c = await api.createCompany(name.trim());
-      onCreated(c.id);
+      onCreated(await api.createCompany(name.trim()));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(e instanceof Error ? e.message : t("common.failed"));
       setBusy(false);
     }
   };
@@ -93,23 +88,23 @@ function CompanyStep({ onCreated }: { onCreated: (id: string) => void }) {
   return (
     <StepShell
       icon={<Building2 className="h-6 w-6" />}
-      step="Step 1 of 2"
-      title="Name your company"
-      subtitle="An organization of AI agents that work for you."
+      step={t("onboard.step1")}
+      title={t("onboard.nameTitle")}
+      subtitle={t("onboard.nameSubtitle")}
     >
       <div className="flex flex-col gap-4">
-        <Field label="Company name">
+        <Field label={t("onboard.companyName")}>
           <Input
             autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Acme Labs"
+            placeholder={t("onboard.companyPlaceholder")}
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
         </Field>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button variant="primary" onClick={submit} disabled={busy || !name.trim()}>
-          {busy ? "Creating…" : "Continue"}
+          {busy ? t("onboard.creating") : t("onboard.continue")}
           <ArrowRight className="h-4 w-4" />
         </Button>
       </div>
@@ -117,7 +112,8 @@ function CompanyStep({ onCreated }: { onCreated: (id: string) => void }) {
   );
 }
 
-function WorkspaceStep({ company, onReady }: { company: Company; onReady: () => void }) {
+function RepoStep({ company, onDone }: { company: Company; onDone: () => void }) {
+  const t = useT();
   const [cwd, setCwd] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,12 +123,10 @@ function WorkspaceStep({ company, onReady }: { company: Company; onReady: () => 
     setBusy(true);
     setError(null);
     try {
-      const project = await api.createProject(company.id, "Workspace");
-      await api.createWorkspace(project.id, "main", cwd.trim());
-      await api.createGoal(project.id, "Tasks");
-      onReady();
+      await connectRepo(company.id, cwd.trim());
+      onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(e instanceof Error ? e.message : t("common.failed"));
       setBusy(false);
     }
   };
@@ -140,29 +134,33 @@ function WorkspaceStep({ company, onReady }: { company: Company; onReady: () => 
   return (
     <StepShell
       icon={<FolderGit2 className="h-6 w-6" />}
-      step="Step 2 of 2"
-      title="Connect a git repo"
-      subtitle="Agents work here — each run gets its own isolated worktree."
+      step={t("onboard.step2")}
+      title={t("onboard.repoTitle")}
+      subtitle={t("onboard.repoSubtitle")}
     >
       <div className="flex flex-col gap-4">
-        <Field
-          label="Repository path"
-          hint="An absolute path to a git repository on this machine."
-        >
+        <Field label={t("repo.path")} hint={t("repo.pathHint")}>
           <Input
             autoFocus
             value={cwd}
             onChange={(e) => setCwd(e.target.value)}
-            placeholder="/Users/you/code/my-project"
+            placeholder={t("repo.pathPlaceholder")}
             className="mono"
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
         </Field>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button variant="primary" onClick={submit} disabled={busy || !cwd.trim()}>
-          {busy ? "Setting up…" : "Finish setup"}
+          {busy ? t("onboard.settingUp") : t("onboard.finish")}
           <ArrowRight className="h-4 w-4" />
         </Button>
+        <button
+          onClick={onDone}
+          disabled={busy}
+          className="-mt-1 self-center rounded-md px-2 py-1 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
+        >
+          {t("onboard.skip")}
+        </button>
       </div>
     </StepShell>
   );

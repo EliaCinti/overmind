@@ -7,9 +7,43 @@
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 
 use crate::db::AppState;
+
+/// Origins allowed to open the live socket during development, when the UI is
+/// served by Vite instead of by us.
+const DEV_ORIGINS: &[&str] = &["http://localhost:5173", "http://127.0.0.1:5173"];
+
+/// Refuse the upgrade to any page that is not ours, **before** the upgrade is
+/// attempted.
+///
+/// WebSockets are not subject to CORS: the browser opens the connection and
+/// hands the server an `Origin` to judge for itself. Without this, any page you
+/// have open could subscribe to the company's live feed — notifications,
+/// decisions, everything — from 127.0.0.1. Same reasoning as the CORS policy in
+/// `api.rs`: local does not mean private.
+///
+/// A missing `Origin` is a non-browser client (curl, a test, an MCP client) and
+/// is allowed; only browsers send one, and then it must be ours.
+pub async fn guard_origin(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let headers = request.headers();
+    if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or_default();
+        let ours = headers
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(|host| origin == format!("http://{host}") || origin == format!("https://{host}"))
+            .unwrap_or(false);
+        if !ours && !DEV_ORIGINS.contains(&origin) {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    next.run(request).await
+}
 
 pub async fn handler(
     State(state): State<AppState>,

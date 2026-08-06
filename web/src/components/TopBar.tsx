@@ -10,11 +10,13 @@ import {
   WifiOff,
   BrainCircuit,
 } from "lucide-react";
-import type { Company } from "../lib/api";
+import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Segmented } from "./ui/controls";
-import { ApprovalsInbox } from "./ApprovalsInbox";
+import { Inbox } from "./Inbox";
+import { LanguageMenu } from "./LanguageMenu";
+import { useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
 export function TopBar({
@@ -29,8 +31,12 @@ export function TopBar({
   onViewChange,
   showViews,
   onApprovalDecided,
+  inboxSignal,
+  onOpenMeeting,
   connected,
   tick,
+  language,
+  onChangeLanguage,
   theme,
   onToggleTheme,
 }: {
@@ -41,15 +47,20 @@ export function TopBar({
   onHire: () => void;
   onNewTask: () => void;
   canCreateTask: boolean;
-  view: "board" | "org";
-  onViewChange: (v: "board" | "org") => void;
+  view: View;
+  onViewChange: (v: View) => void;
   showViews: boolean;
-  onApprovalDecided: () => void;
+  onApprovalDecided: (approvalId?: string) => void;
+  inboxSignal: number;
+  onOpenMeeting: (meetingId: string) => void;
   connected: boolean;
   tick: number;
+  language: LanguageCode;
+  onChangeLanguage: (code: LanguageCode) => void;
   theme: string;
   onToggleTheme: () => void;
 }) {
+  const t = useT();
   return (
     <header className="flex items-center gap-3 border-b border-border px-6 py-3">
       <div className="flex items-center gap-2">
@@ -61,26 +72,30 @@ export function TopBar({
 
       <select
         value={companyId ?? ""}
-        onChange={(e) => (e.target.value === "__new" ? onNewCompany() : onSelectCompany(e.target.value))}
-        className="h-9 rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onChange={(e) =>
+          e.target.value === "__new" ? onNewCompany() : onSelectCompany(e.target.value)
+        }
+        className="h-9 max-w-40 shrink rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
-        {companies.length === 0 && <option value="">No company</option>}
+        {companies.length === 0 && <option value="">{t("nav.noCompany")}</option>}
         {companies.map((c) => (
           <option key={c.id} value={c.id}>
             {c.name}
           </option>
         ))}
-        <option value="__new">+ New company…</option>
+        <option value="__new">{t("nav.newCompany")}</option>
       </select>
 
       {showViews && (
         <div className="ml-2">
-          <Segmented<"board" | "org">
+          <Segmented<View>
             value={view}
             onChange={onViewChange}
             options={[
-              { value: "board", label: "Board" },
-              { value: "org", label: "Org" },
+              { value: "chat", label: t("nav.chat") },
+              { value: "board", label: t("nav.board") },
+              { value: "meetings", label: t("nav.meetings") },
+              { value: "org", label: t("nav.org") },
             ]}
           />
         </div>
@@ -88,7 +103,13 @@ export function TopBar({
 
       <div className="ml-auto flex items-center gap-2">
         {companyId && (
-          <ApprovalsInbox companyId={companyId} tick={tick} onDecided={onApprovalDecided} />
+          <Inbox
+            companyId={companyId}
+            tick={tick}
+            onDecided={onApprovalDecided}
+            openSignal={inboxSignal}
+            onOpenMeeting={onOpenMeeting}
+          />
         )}
         <MemoryIndicator />
         <AuditIndicator tick={tick} />
@@ -97,15 +118,21 @@ export function TopBar({
           <>
             <Button variant="outline" size="sm" onClick={onHire}>
               <UserPlus className="h-4 w-4" />
-              Hire
+              {t("nav.hire")}
             </Button>
             <Button variant="primary" size="sm" onClick={onNewTask} disabled={!canCreateTask}>
               <Plus className="h-4 w-4" />
-              New task
+              {t("nav.newTask")}
             </Button>
           </>
         )}
-        <Button variant="ghost" size="icon" onClick={onToggleTheme} aria-label="Toggle theme">
+        {companyId && <LanguageMenu language={language} onChange={onChangeLanguage} />}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onToggleTheme}
+          aria-label={t("nav.toggleTheme")}
+        >
           {theme === "dark" ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
         </Button>
       </div>
@@ -113,25 +140,51 @@ export function TopBar({
   );
 }
 
+/** The Overmind mark: a memory-trace (轍) — three ruts converging into the
+ * present node. Kept identical to the marketing site's assets/brand/mark.svg. */
 function Logo() {
   return (
-    <span className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-      <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth={2.2}>
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2.5 2.5M16.5 16.5L19 19M19 5l-2.5 2.5M7.5 16.5L5 19" />
-      </svg>
-    </span>
+    <svg viewBox="0 0 220 220" className="h-7 w-7" fill="none" role="img" aria-label="Overmind">
+      <defs>
+        <linearGradient
+          id="om-track"
+          x1="40"
+          y1="110"
+          x2="154"
+          y2="110"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0" stopColor="#6d6386" stopOpacity="0.3" />
+          <stop offset="0.55" stopColor="#7c5cff" stopOpacity="0.75" />
+          <stop offset="1" stopColor="#9d7bff" stopOpacity="1" />
+        </linearGradient>
+        <radialGradient id="om-present" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0" stopColor="#f0c07a" stopOpacity="0.95" />
+          <stop offset="0.35" stopColor="#9d7bff" stopOpacity="0.9" />
+          <stop offset="1" stopColor="#7c5cff" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      <g stroke="url(#om-track)" strokeWidth="12" strokeLinecap="round">
+        <line x1="46" y1="56" x2="152" y2="110" />
+        <line x1="40" y1="110" x2="152" y2="110" />
+        <line x1="46" y1="164" x2="152" y2="110" />
+      </g>
+      <circle cx="152" cy="110" r="44" fill="url(#om-present)" />
+      <circle cx="152" cy="110" r="23" fill="#9d7bff" />
+      <circle cx="152" cy="110" r="8.5" fill="#f0c07a" />
+    </svg>
   );
 }
 
 function ConnectionDot({ connected }: { connected: boolean }) {
+  const t = useT();
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         connected ? "text-status-done" : "text-muted-foreground",
       )}
-      title={connected ? "Live updates connected" : "Reconnecting…"}
+      title={connected ? t("nav.liveConnected") : t("nav.reconnecting")}
     >
       {connected ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
     </span>
@@ -140,6 +193,7 @@ function ConnectionDot({ connected }: { connected: boolean }) {
 
 /** Shows whether organizational memory (Wadachi/MCP) is connected. */
 function MemoryIndicator() {
+  const t = useT();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   useEffect(() => {
     api
@@ -154,16 +208,17 @@ function MemoryIndicator() {
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         enabled ? "text-primary" : "text-muted-foreground/50",
       )}
-      title={enabled ? "Organizational memory connected (Wadachi)" : "Memory not configured"}
+      title={enabled ? t("nav.memoryOn") : t("nav.memoryOff")}
     >
       <BrainCircuit className="h-3.5 w-3.5" />
-      memory
+      {t("nav.memory")}
     </span>
   );
 }
 
 /** Periodically verifies the audit hash chain and shows a trust badge. */
 function AuditIndicator({ tick }: { tick: number }) {
+  const t = useT();
   const [valid, setValid] = useState<boolean | null>(null);
   useEffect(() => {
     api
@@ -178,10 +233,10 @@ function AuditIndicator({ tick }: { tick: number }) {
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         valid ? "text-status-done" : "text-destructive",
       )}
-      title={valid ? "Audit chain verified" : "Audit chain BROKEN"}
+      title={valid ? t("nav.auditOk") : t("nav.auditBroken")}
     >
       {valid ? <ShieldCheck className="h-3.5 w-3.5" /> : <ShieldAlert className="h-3.5 w-3.5" />}
-      audit
+      {t("nav.audit")}
     </span>
   );
 }

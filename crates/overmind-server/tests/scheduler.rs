@@ -187,6 +187,28 @@ async fn make_todo_task(env: &Env, title: &str) -> String {
     task_id
 }
 
+/// A `knowledge` task: needs no repo, and is what a researcher is
+/// characterized for (M14 — the capability gate refuses the rest).
+async fn make_todo_knowledge_task(env: &Env, title: &str) -> String {
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({ "title": title, "execution_kind": "knowledge" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    task_id
+}
+
 async fn task_status(env: &Env, task_id: &str) -> String {
     let (_, tasks) = send(
         &env.app,
@@ -236,7 +258,7 @@ async fn three_agents_work_three_tasks_in_parallel() {
     let mut agents = Vec::new();
     let mut tasks = Vec::new();
     for i in 0..3 {
-        agents.push(hire(&env, &format!("Agent {i}"), "backend-developer").await);
+        agents.push(hire(&env, &format!("Agent {i}"), "builder").await);
         tasks.push(make_todo_task(&env, &format!("Task {i}")).await);
     }
 
@@ -277,7 +299,7 @@ async fn timeout_kills_session_and_releases_task() {
         c.session_timeout_secs = 1
     })
     .await;
-    let agent_id = hire(&env, "Slowpoke", "backend-developer").await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
     let task_id = make_todo_task(&env, "Never finishes").await;
 
     let (status, started) = send(
@@ -315,7 +337,7 @@ async fn restart_recovery_resumes_orphaned_session() {
     // crash mid-run would leave it (running in the DB, worktree on disk, no
     // live process).
     let env = build_env(HAPPY_STUB, Some(db_url.clone()), |_| {}).await;
-    let agent_id = hire(&env, "Phoenix", "backend-developer").await;
+    let agent_id = hire(&env, "Phoenix", "builder").await;
     let task_id = make_todo_task(&env, "Survives restarts").await;
 
     let repo = env.root.join("repo");
@@ -394,7 +416,7 @@ async fn wakeup_enforces_agent_autonomy() {
     // act_within_budget (researcher archetype): may pick up todo work alone.
     let env = build_env(HAPPY_STUB, None, |_| {}).await;
     let agent_id = hire(&env, "Selfstarter", "researcher").await;
-    let task_id = make_todo_task(&env, "Autonomous pickup").await;
+    let task_id = make_todo_knowledge_task(&env, "Autonomous pickup").await;
     let (status, wakeup) = send(
         &env.app,
         "POST",
@@ -419,9 +441,9 @@ async fn wakeup_enforces_agent_autonomy() {
         "outcome: {outcome:?}"
     );
 
-    // act_with_approval (backend-developer): the wakeup must NOT start work.
+    // act_with_approval (builder): the wakeup must NOT start work.
     let env2 = build_env(HAPPY_STUB, None, |_| {}).await;
-    let agent2 = hire(&env2, "Waitsforhumans", "backend-developer").await;
+    let agent2 = hire(&env2, "Waitsforhumans", "builder").await;
     let task2 = make_todo_task(&env2, "Needs a human").await;
     let (_, wakeup2) = send(
         &env2.app,

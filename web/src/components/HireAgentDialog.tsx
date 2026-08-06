@@ -1,43 +1,60 @@
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import {
-  Shield,
-  Server,
-  Palette,
-  Eye,
-  Search,
-  FileText,
-  Bot,
-  ChevronRight,
-  Sparkles,
-} from "lucide-react";
-import type { Agent, Archetype, AgentTraits, Autonomy, ReviewStrictness } from "../lib/api";
+import { Bot, ChevronRight, Sparkles } from "lucide-react";
+import type {
+  Agent,
+  Archetype,
+  AgentTraits,
+  Autonomy,
+  Domain,
+  Model,
+  ReviewStrictness,
+} from "../lib/api";
 import { api } from "../lib/api";
-import { AUTONOMY_LABEL, STRICTNESS_LABEL, autonomySentence } from "../lib/status";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Field, Input, Textarea } from "./ui/primitives";
 import { Chip, Segmented } from "./ui/controls";
-import { cn, formatCents } from "../lib/utils";
+import { useCatalogText, useFormats, useT } from "../lib/i18n";
+import { DOMAIN_ICONS, FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
+import { cn } from "../lib/utils";
 
-const ICONS: Record<string, typeof Bot> = {
-  "security-engineer": Shield,
-  "backend-developer": Server,
-  "frontend-developer": Palette,
-  "code-reviewer": Eye,
-  researcher: Search,
-  "technical-writer": FileText,
-};
+type Level = "pick" | "field" | "tune" | "expert";
 
-const MODELS = ["claude-sonnet", "claude-opus", "claude-haiku"];
-
-type Level = "pick" | "tune" | "expert";
+/**
+ * What a domain adds on top of a function's defaults, for the preview.
+ *
+ * Mirrors `AgentTraits::with_domain` on the server, which stays the authority —
+ * it recomposes from the catalog on every hire. This exists so the tune step
+ * shows the traits you are actually about to create, rather than the function's
+ * bare defaults with the field's contribution appearing only after the fact.
+ */
+function withDomain(base: AgentTraits, domain: Domain | null): AgentTraits {
+  if (!domain) return { ...base, focus_areas: [...base.focus_areas] };
+  const patch = domain.traits_patch;
+  const focus = [...base.focus_areas];
+  for (const f of patch.focus_areas) if (!focus.includes(f)) focus.push(f);
+  const permissions = [...base.permissions];
+  for (const p of patch.permissions) {
+    // A field never decides which kinds of task an agent may take.
+    if (p === "task:code" || p === "task:knowledge") continue;
+    if (!permissions.includes(p)) permissions.push(p);
+  }
+  return {
+    ...base,
+    focus_areas: focus,
+    permissions,
+    multimodal: base.multimodal || patch.multimodal,
+  };
+}
 
 export function HireAgentDialog({
   open,
   onOpenChange,
   companyId,
   archetypes,
+  domains,
+  models,
   agents,
   defaultManager,
   onHired,
@@ -46,12 +63,18 @@ export function HireAgentDialog({
   onOpenChange: (o: boolean) => void;
   companyId: string;
   archetypes: Archetype[];
+  domains: Domain[];
+  models: Model[];
   agents: Agent[];
   defaultManager: string | null;
   onHired: () => void;
 }) {
+  const t = useT();
+  const catalog = useCatalogText();
+  const { formatCents } = useFormats();
   const [level, setLevel] = useState<Level>("pick");
   const [picked, setPicked] = useState<Archetype | null>(null);
+  const [field, setField] = useState<Domain | null>(null);
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [manager, setManager] = useState<string>("");
@@ -63,6 +86,7 @@ export function HireAgentDialog({
   const reset = () => {
     setLevel("pick");
     setPicked(null);
+    setField(null);
     setName("");
     setTitle("");
     setManager(defaultManager ?? "");
@@ -71,11 +95,17 @@ export function HireAgentDialog({
     setError(null);
   };
 
-  const choose = (a: Archetype) => {
+  const chooseFunction = (a: Archetype) => {
     setPicked(a);
-    setTraits({ ...a.default_traits, focus_areas: [...a.default_traits.focus_areas] });
     setName(a.name);
     setManager(defaultManager ?? "");
+    setLevel("field");
+  };
+
+  const chooseField = (d: Domain) => {
+    if (!picked) return;
+    setField(d);
+    setTraits(withDomain(picked.default_traits, d));
     setLevel("tune");
   };
 
@@ -98,6 +128,7 @@ export function HireAgentDialog({
       await api.hireAgent(companyId, {
         name: name.trim() || picked.name,
         archetype: picked.slug,
+        domain: field?.slug ?? null,
         traits,
         custom_brief: brief.trim() || null,
         title: title.trim() || null,
@@ -107,17 +138,36 @@ export function HireAgentDialog({
       onOpenChange(false);
       setTimeout(reset, 200);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to hire");
+      setError(e instanceof Error ? e.message : t("hire.failed"));
     } finally {
       setBusy(false);
     }
   };
 
-  // Focus-area suggestions = the archetype's defaults, so tuning stays click-first.
+  // Focus-area suggestions = what the function and the field between them
+  // suggest, so tuning stays click-first even in a field nobody typed.
   const focusOptions = useMemo(
-    () => picked?.default_traits.focus_areas ?? [],
-    [picked],
+    () => (picked ? withDomain(picked.default_traits, field).focus_areas : []),
+    [picked, field],
   );
+
+  // A vision-less model cannot carry a multimodal agent; the server refuses it,
+  // so the dialog should not offer the combination in the first place.
+  const modelHasVision = models.find((m) => m.id === traits?.model)?.vision ?? true;
+
+  const functionName = picked
+    ? catalog("archetype", picked.slug, { name: picked.name, description: picked.description }).name
+    : "";
+
+  const description = () => {
+    if (level === "pick") return t("hire.pickFunctionDesc");
+    if (level === "field") return t("hire.fieldOf", { function: functionName });
+    const step = level === "tune" ? t("hire.tune") : t("hire.expert");
+    const where = field
+      ? catalog("domain", field.slug, { name: field.name, description: field.description }).name
+      : "";
+    return `${functionName}${where ? ` · ${where}` : ""} · ${step}`;
+  };
 
   return (
     <Dialog
@@ -126,12 +176,8 @@ export function HireAgentDialog({
         onOpenChange(o);
         if (!o) setTimeout(reset, 200);
       }}
-      title="Hire an agent"
-      description={
-        level === "pick"
-          ? "Pick a role to start — everything is preconfigured."
-          : `${picked?.name} · ${level === "tune" ? "tune the details" : "expert mode"}`
-      }
+      title={t("hire.title")}
+      description={description()}
       className="max-w-2xl"
     >
       <AnimatePresence mode="wait">
@@ -144,30 +190,46 @@ export function HireAgentDialog({
             transition={{ duration: 0.15 }}
             className="grid grid-cols-1 gap-2.5 sm:grid-cols-2"
           >
-            {archetypes.map((a) => {
-              const Icon = ICONS[a.slug] ?? Bot;
-              return (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() => choose(a)}
-                  className="group flex flex-col gap-2 rounded-lg border border-border bg-card p-4 text-left transition hover:border-primary/50 hover:shadow-soft cursor-pointer"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/10 text-primary">
-                      <Icon className="h-4.5 w-4.5" />
-                    </span>
-                    <span className="font-medium">{a.name}</span>
-                    <ChevronRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
-                  </div>
-                  <p className="text-sm leading-snug text-muted-foreground">{a.description}</p>
-                </button>
-              );
-            })}
+            {archetypes.map((a) => (
+              <CatalogCard
+                key={a.id}
+                icon={FUNCTION_ICONS[a.slug] ?? FALLBACK_ICON}
+                {...catalog("archetype", a.slug, { name: a.name, description: a.description })}
+                onClick={() => chooseFunction(a)}
+              />
+            ))}
           </motion.div>
         )}
 
-        {level !== "pick" && traits && picked && (
+        {level === "field" && (
+          <motion.div
+            key="field"
+            initial={{ opacity: 0, x: 8 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -8 }}
+            transition={{ duration: 0.15 }}
+            className="flex flex-col gap-3"
+          >
+            <p className="text-sm text-muted-foreground">{t("hire.pickDomainDesc")}</p>
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {domains.map((d) => (
+                <CatalogCard
+                  key={d.id}
+                  icon={DOMAIN_ICONS[d.slug] ?? FALLBACK_ICON}
+                  {...catalog("domain", d.slug, { name: d.name, description: d.description })}
+                  onClick={() => chooseField(d)}
+                />
+              ))}
+            </div>
+            <div className="pt-1">
+              <Button variant="ghost" onClick={() => setLevel("pick")}>
+                {t("common.back")}
+              </Button>
+            </div>
+          </motion.div>
+        )}
+
+        {(level === "tune" || level === "expert") && traits && picked && (
           <motion.div
             key="config"
             initial={{ opacity: 0, x: 8 }}
@@ -179,25 +241,25 @@ export function HireAgentDialog({
             {level === "tune" ? (
               <>
                 <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  <Field label="Name">
+                  <Field label={t("hire.name")}>
                     <Input value={name} onChange={(e) => setName(e.target.value)} />
                   </Field>
-                  <Field label="Title" hint="Optional job title.">
+                  <Field label={t("hire.jobTitle")} hint={t("hire.jobTitleHint")}>
                     <Input
                       value={title}
                       onChange={(e) => setTitle(e.target.value)}
-                      placeholder="e.g. Senior Engineer"
+                      placeholder={t("hire.jobTitlePlaceholder")}
                     />
                   </Field>
                 </div>
 
-                <Field label="Reports to" hint="Where this agent sits in the org.">
+                <Field label={t("hire.reportsTo")} hint={t("hire.reportsToHint")}>
                   <select
                     value={manager}
                     onChange={(e) => setManager(e.target.value)}
                     className="h-10 rounded-md border border-input bg-background px-3 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
-                    <option value="">You (owner)</option>
+                    <option value="">{t("hire.youOwner")}</option>
                     {managerOptions.map((m) => (
                       <option key={m.id} value={m.id}>
                         {m.name}
@@ -207,7 +269,7 @@ export function HireAgentDialog({
                   </select>
                 </Field>
 
-                <Field label="Focus areas" hint="What this agent pays attention to.">
+                <Field label={t("hire.focus")} hint={t("hire.focusHint")}>
                   <div className="flex flex-wrap gap-2">
                     {focusOptions.map((f) => (
                       <Chip
@@ -222,27 +284,29 @@ export function HireAgentDialog({
                 </Field>
 
                 <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                  <Field label="Autonomy">
+                  <Field label={t("hire.autonomy")}>
                     <Segmented<Autonomy>
                       value={traits.autonomy}
                       onChange={(v) => setTraits({ ...traits, autonomy: v })}
                       options={(
                         ["propose_only", "act_with_approval", "act_within_budget"] as Autonomy[]
-                      ).map((v) => ({ value: v, label: AUTONOMY_LABEL[v] }))}
+                      ).map((v) => ({ value: v, label: t(`autonomy.${v}`) }))}
                     />
                   </Field>
-                  <Field label="Review strictness">
+                  <Field label={t("hire.strictness")}>
                     <Segmented<ReviewStrictness>
                       value={traits.review_strictness}
                       onChange={(v) => setTraits({ ...traits, review_strictness: v })}
-                      options={(
-                        ["lenient", "standard", "strict"] as ReviewStrictness[]
-                      ).map((v) => ({ value: v, label: STRICTNESS_LABEL[v] }))}
+                      options={(["lenient", "standard", "strict"] as ReviewStrictness[]).map(
+                        (v) => ({ value: v, label: t(`strictness.${v}`) }),
+                      )}
                     />
                   </Field>
                 </div>
 
-                <Field label={`Monthly budget · ${formatCents(traits.monthly_budget_cents)}`}>
+                <Field
+                  label={t("hire.budget", { amount: formatCents(traits.monthly_budget_cents) })}
+                >
                   <input
                     type="range"
                     min={500}
@@ -256,48 +320,67 @@ export function HireAgentDialog({
                   />
                 </Field>
 
-                <Field label="Model">
+                <Field label={t("hire.model")}>
                   <Segmented
                     value={traits.model}
-                    onChange={(v) => setTraits({ ...traits, model: v })}
-                    options={MODELS.map((m) => ({ value: m, label: m.replace("claude-", "") }))}
+                    onChange={(v) =>
+                      setTraits({
+                        ...traits,
+                        model: v,
+                        multimodal:
+                          traits.multimodal && (models.find((m) => m.id === v)?.vision ?? true),
+                      })
+                    }
+                    options={models.map((m) => ({ value: m.id, label: m.display_name }))}
                   />
+                </Field>
+
+                <Field label={t("hire.multimodal")} hint={t("hire.multimodalHint")}>
+                  <Chip
+                    active={traits.multimodal}
+                    onClick={() =>
+                      modelHasVision && setTraits({ ...traits, multimodal: !traits.multimodal })
+                    }
+                  >
+                    {t("hire.multimodal")}
+                  </Chip>
                 </Field>
               </>
             ) : (
-              <Field
-                label="Custom brief"
-                hint="Added on top of the structured config. It can add guidance but never override the enforced limits above."
-              >
+              <Field label={t("hire.brief")} hint={t("hire.briefHint")}>
                 <Textarea
                   value={brief}
                   onChange={(e) => setBrief(e.target.value)}
-                  placeholder="e.g. Pay special attention to our authentication module and flag any use of deprecated crypto."
+                  placeholder={t("hire.briefPlaceholder")}
                   className="min-h-32"
                 />
               </Field>
             )}
 
-            <LivePreview traits={traits} name={name || picked.name} hasBrief={brief.trim().length > 0} />
+            <LivePreview
+              traits={traits}
+              name={name || picked.name}
+              hasBrief={brief.trim().length > 0}
+            />
 
             {error && <p className="text-sm text-destructive">{error}</p>}
 
             <div className="flex items-center justify-between gap-2 pt-1">
               <Button
                 variant="ghost"
-                onClick={() => setLevel(level === "expert" ? "tune" : "pick")}
+                onClick={() => setLevel(level === "expert" ? "tune" : "field")}
               >
-                Back
+                {t("common.back")}
               </Button>
               <div className="flex gap-2">
                 {level === "tune" && (
                   <Button variant="outline" onClick={() => setLevel("expert")}>
                     <Sparkles className="h-4 w-4" />
-                    Expert mode
+                    {t("hire.expertMode")}
                   </Button>
                 )}
                 <Button variant="primary" onClick={submit} disabled={busy}>
-                  {busy ? "Hiring…" : "Hire agent"}
+                  {busy ? t("hire.submitting") : t("hire.submit")}
                 </Button>
               </div>
             </div>
@@ -305,6 +388,36 @@ export function HireAgentDialog({
         )}
       </AnimatePresence>
     </Dialog>
+  );
+}
+
+/** One pickable catalog row — a function or a field, drawn identically. */
+function CatalogCard({
+  icon: Icon,
+  name,
+  description,
+  onClick,
+}: {
+  icon: typeof Bot;
+  name: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex flex-col gap-2 rounded-lg border border-border bg-card p-4 text-left transition hover:border-primary/50 hover:shadow-soft cursor-pointer"
+    >
+      <div className="flex items-center gap-2.5">
+        <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/10 text-primary">
+          <Icon className="h-4.5 w-4.5" />
+        </span>
+        <span className="font-medium">{name}</span>
+        <ChevronRight className="ml-auto h-4 w-4 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
+      </div>
+      <p className="text-sm leading-snug text-muted-foreground">{description}</p>
+    </button>
   );
 }
 
@@ -318,19 +431,23 @@ function LivePreview({
   name: string;
   hasBrief: boolean;
 }) {
+  const t = useT();
+  const { formatCents } = useFormats();
   return (
     <div className={cn("rounded-md border border-border bg-muted/40 p-3.5 text-sm")}>
       <p className="leading-relaxed">
-        <span className="font-medium">{name}</span> {autonomySentence(traits.autonomy)}, reviewing
-        with <span className="font-medium">{STRICTNESS_LABEL[traits.review_strictness]}</span>{" "}
-        strictness on{" "}
+        <span className="font-medium">{name}</span> {t(`autonomySays.${traits.autonomy}`)}
+        {t("hire.previewReviewing")}
+        <span className="font-medium">{t(`strictness.${traits.review_strictness}`)}</span>
+        {t("hire.previewStrictness")}
         <span className="font-medium">
-          {traits.focus_areas.length ? traits.focus_areas.join(", ") : "no specific focus"}
+          {traits.focus_areas.length ? traits.focus_areas.join(", ") : t("hire.previewNoFocus")}
         </span>
-        . Capped at{" "}
-        <span className="mono">{formatCents(traits.monthly_budget_cents)}</span>/mo on{" "}
-        <span className="mono">{traits.model}</span>.
-        {hasBrief && " Plus your custom brief."}
+        {t("hire.previewCapped")}
+        <span className="mono">{formatCents(traits.monthly_budget_cents)}</span>
+        {t("hire.previewPerMonth")}
+        <span className="mono">{traits.model}</span>.{traits.multimodal && t("hire.previewLooks")}
+        {hasBrief && t("hire.previewBrief")}
       </p>
     </div>
   );

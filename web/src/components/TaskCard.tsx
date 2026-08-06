@@ -2,7 +2,7 @@ import { ArrowUp, Minus, ChevronsUp, Bot } from "lucide-react";
 import type { Agent, Task, TaskPriority } from "../lib/api";
 import { STATUS_VAR } from "../lib/status";
 import { Card } from "./ui/primitives";
-import { timeAgo } from "../lib/utils";
+import { useFormats, useT } from "../lib/i18n";
 
 const PRIORITY_ICON: Record<TaskPriority, typeof Minus> = {
   low: Minus,
@@ -26,6 +26,8 @@ export function TaskCard({
   agents: Agent[];
   onClick: () => void;
 }) {
+  const t = useT();
+  const { timeAgo } = useFormats();
   const PIcon = PRIORITY_ICON[task.priority];
   const assignee = agents.find((a) => a.id === task.assignee_agent_id);
   return (
@@ -40,9 +42,12 @@ export function TaskCard({
       <div className="flex flex-col gap-2 pl-1.5">
         <p className="text-sm font-medium leading-snug">{task.title}</p>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1" style={{ color: PRIORITY_TONE[task.priority] }}>
+          <span
+            className="inline-flex items-center gap-1"
+            style={{ color: PRIORITY_TONE[task.priority] }}
+          >
             <PIcon className="h-3.5 w-3.5" />
-            {task.priority}
+            {t(`priority.${task.priority}`)}
           </span>
           <span aria-hidden>·</span>
           <span>{timeAgo(task.updated_at)}</span>

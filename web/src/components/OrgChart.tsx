@@ -1,74 +1,63 @@
 import { useState } from "react";
 import { motion } from "motion/react";
-import {
-  Shield,
-  Server,
-  Palette,
-  Eye,
-  Search,
-  FileText,
-  Bot,
-  Crown,
-  UserPlus,
-  Pencil,
-  Check,
-  X,
-  Pause,
-  Play,
-  Ban,
-  ShieldCheck,
-} from "lucide-react";
-import type { Agent, AgentBudget } from "../lib/api";
+import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
+import type { Agent, AgentBudget, OrgProposal } from "../lib/api";
 import { api } from "../lib/api";
-import { AUTONOMY_LABEL } from "../lib/status";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
-import { cn, formatCents } from "../lib/utils";
-
-const ICONS: Record<string, typeof Bot> = {
-  "security-engineer": Shield,
-  "backend-developer": Server,
-  "frontend-developer": Palette,
-  "code-reviewer": Eye,
-  researcher: Search,
-  "technical-writer": FileText,
-};
+import { cn } from "../lib/utils";
+import { useT, useFormats } from "../lib/i18n";
+import { FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
+import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
 
 export function OrgChart({
   agents,
   budgets,
+  proposal,
   onChanged,
   onHireUnder,
+  onTalkToCeo,
 }: {
   agents: Agent[];
   budgets: AgentBudget[];
+  /** A team the CEO drew up and you have not answered yet (M15). */
+  proposal: OrgProposal | null;
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
+  onTalkToCeo: () => void;
 }) {
+  const t = useT();
   const active = agents.filter((a) => a.status !== "terminated");
+  // First run: the founding CEO and nobody else, nothing proposed yet.
+  const ceo = active.find((a) => a.reports_to === null);
+  const alone = active.length === 1 && !!ceo && !proposal;
   const childrenOf = (id: string | null) => active.filter((a) => (a.reports_to ?? null) === id);
   const budgetOf = (id: string) => budgets.find((b) => b.agent_id === id);
 
   return (
     <div className="flex-1 overflow-auto px-6 pb-8">
       <div className="mx-auto max-w-3xl">
+        {alone && ceo && (
+          <TwoRoads
+            ceoName={ceo.name}
+            onTalkToCeo={onTalkToCeo}
+            onHire={() => onHireUnder(ceo.id)}
+          />
+        )}
+        {proposal && <OrgProposalPanel proposal={proposal} onChanged={onChanged} />}
+
         {/* The human owner is the root of the chart. */}
         <div className="mb-2 flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 shadow-soft">
           <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
             <Crown className="h-4.5 w-4.5" />
           </span>
           <div className="min-w-0">
-            <p className="font-medium">You</p>
-            <p className="text-xs text-muted-foreground">Owner · everyone ultimately reports here</p>
+            <p className="font-medium">{t("org.you")}</p>
+            <p className="text-xs text-muted-foreground">{t("org.ownerLine")}</p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="ml-auto"
-            onClick={() => onHireUnder(null)}
-          >
+          <Button size="sm" variant="outline" className="ml-auto" onClick={() => onHireUnder(null)}>
             <UserPlus className="h-4 w-4" />
-            Hire
+            {t("nav.hire")}
           </Button>
         </div>
 
@@ -82,9 +71,7 @@ export function OrgChart({
           onHireUnder={onHireUnder}
         />
         {active.length === 0 && (
-          <p className="mt-6 text-center text-sm text-muted-foreground">
-            No agents yet. Hire your first one to build the org.
-          </p>
+          <p className="mt-6 text-center text-sm text-muted-foreground">{t("org.empty")}</p>
         )}
       </div>
     </div>
@@ -147,8 +134,9 @@ function Node({
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
 }) {
+  const t = useT();
   const [editing, setEditing] = useState(false);
-  const Icon = ICONS[agent.archetype] ?? Bot;
+  const Icon = FUNCTION_ICONS[agent.archetype] ?? FALLBACK_ICON;
   const paused = agent.status === "paused";
 
   // Valid managers = anyone except self (server also rejects cycles).
@@ -175,29 +163,34 @@ function Node({
             {paused && (
               <Badge tone="var(--color-status-cancelled)">
                 <Pause className="h-3 w-3" />
-                paused
+                {t("org.paused")}
               </Badge>
             )}
             {agent.requires_approval && (
               <Badge tone="var(--color-status-in_review)">
                 <ShieldCheck className="h-3 w-3" />
-                approval
+                {t("org.approvalBadge")}
               </Badge>
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            {agent.archetype} · {AUTONOMY_LABEL[agent.traits.autonomy]}
+            {agent.archetype} · {t(`autonomy.${agent.traits.autonomy}`)}
           </p>
         </div>
         <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
-          <Button size="icon" variant="ghost" onClick={() => setEditing((v) => !v)} title="Edit">
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setEditing((v) => !v)}
+            title={t("org.edit")}
+          >
             <Pencil className="h-4 w-4" />
           </Button>
           <Button
             size="icon"
             variant="ghost"
             onClick={() => onHireUnder(agent.id)}
-            title="Hire a report"
+            title={t("org.hireReport")}
           >
             <UserPlus className="h-4 w-4" />
           </Button>
@@ -220,6 +213,7 @@ function Node({
 
 /** Month-to-date spend (+ in-flight reservation) against the cap. */
 function BudgetBar({ budget }: { budget: AgentBudget }) {
+  const { formatCents } = useFormats();
   const used = budget.spent_cents + budget.reserved_cents;
   const pct = Math.min(100, (used / budget.budget_cents) * 100);
   const tone =
@@ -231,7 +225,10 @@ function BudgetBar({ budget }: { budget: AgentBudget }) {
   return (
     <div className="mt-2.5 flex items-center gap-2">
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: tone }} />
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${pct}%`, background: tone }}
+        />
       </div>
       <span className="mono shrink-0 text-[11px] text-muted-foreground">
         {formatCents(used)}/{formatCents(budget.budget_cents)}
@@ -251,6 +248,7 @@ function EditRow({
   onDone: () => void;
   onChanged: () => void;
 }) {
+  const t = useT();
   const [title, setTitle] = useState(agent.title ?? "");
   const [manager, setManager] = useState(agent.reports_to ?? "");
   const [busy, setBusy] = useState(false);
@@ -265,7 +263,7 @@ function EditRow({
       await p;
       onChanged();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed");
+      setError(e instanceof Error ? e.message : t("common.failed"));
     } finally {
       setBusy(false);
     }
@@ -289,17 +287,22 @@ function EditRow({
     >
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-          Title
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Senior Engineer" className="h-9" />
+          {t("org.title")}
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={t("org.titlePlaceholder")}
+            className="h-9"
+          />
         </label>
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-          Reports to
+          {t("org.reportsTo")}
           <select
             value={manager}
             onChange={(e) => setManager(e.target.value)}
             className="h-9 rounded-md border border-input bg-background px-2.5 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <option value="">You (owner)</option>
+            <option value="">{t("org.youOwner")}</option>
             {managerOptions.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.name}
@@ -312,7 +315,7 @@ function EditRow({
 
       {/* Governance actions */}
       <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <span className="text-xs font-medium text-muted-foreground">Governance</span>
+        <span className="text-xs font-medium text-muted-foreground">{t("org.governance")}</span>
         <Button
           size="sm"
           variant="outline"
@@ -323,11 +326,11 @@ function EditRow({
         >
           {agent.status === "paused" ? (
             <>
-              <Play className="h-4 w-4" /> Resume
+              <Play className="h-4 w-4" /> {t("org.resume")}
             </>
           ) : (
             <>
-              <Pause className="h-4 w-4" /> Pause
+              <Pause className="h-4 w-4" /> {t("org.pause")}
             </>
           )}
         </Button>
@@ -338,30 +341,30 @@ function EditRow({
           onClick={() => run(api.setApprovalGate(agent.id, !agent.requires_approval))}
         >
           <ShieldCheck className="h-4 w-4" />
-          {agent.requires_approval ? "Drop approval gate" : "Require approval"}
+          {agent.requires_approval ? t("org.dropApproval") : t("org.requireApproval")}
         </Button>
         <Button
           size="sm"
           variant="destructive"
           disabled={busy}
           onClick={() => {
-            if (confirm(`Terminate ${agent.name}? This is permanent.`))
+            if (confirm(t("org.terminateConfirm", { name: agent.name })))
               run(api.terminateAgent(agent.id));
           }}
         >
           <Ban className="h-4 w-4" />
-          Terminate
+          {t("org.terminate")}
         </Button>
       </div>
 
       <div className="flex justify-end gap-2">
         <Button size="sm" variant="ghost" onClick={onDone}>
           <X className="h-4 w-4" />
-          Cancel
+          {t("common.cancel")}
         </Button>
         <Button size="sm" variant="primary" onClick={save} disabled={busy}>
           <Check className="h-4 w-4" />
-          Save title / manager
+          {t("org.saveEdits")}
         </Button>
       </div>
     </motion.div>

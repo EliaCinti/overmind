@@ -1,0 +1,15 @@
+-- M16 slice D: notifications that can be read in the company's language.
+--
+-- Until now a notification carried a finished English sentence, composed on the
+-- server. That made the inbox the one surface a translated UI could not fix:
+-- the chrome around it was Italian and the message inside it was English.
+--
+-- So a notification now also carries the *values* the sentence was made of —
+-- who asked, about what, how many. The client owns the wording. `title` and
+-- `body` stay: they are the durable record for rows written before this
+-- column, for clients that do not know a kind, and for anything reading the
+-- database directly, which should not have to own a phrasebook.
+--
+-- Agent-authored prose (a reason, a decision, a rationale) travels inside
+-- params untouched. The agent already wrote it in the company's language.
+ALTER TABLE notifications ADD COLUMN params TEXT; -- JSON object, NULL for old rows

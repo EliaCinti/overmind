@@ -6,13 +6,7 @@ export type Autonomy = "propose_only" | "act_with_approval" | "act_within_budget
 export type ReviewStrictness = "lenient" | "standard" | "strict";
 
 export type TaskStatus =
-  | "backlog"
-  | "todo"
-  | "in_progress"
-  | "in_review"
-  | "blocked"
-  | "done"
-  | "cancelled";
+  "backlog" | "todo" | "in_progress" | "in_review" | "blocked" | "done" | "cancelled";
 
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
@@ -23,8 +17,11 @@ export interface AgentTraits {
   review_strictness: ReviewStrictness;
   monthly_budget_cents: number;
   model: string;
+  /** Characterized to work with visual material (ADR-0021). */
+  multimodal: boolean;
 }
 
+/** The *function* an agent performs (ADR-0021). */
 export interface Archetype {
   id: string;
   slug: string;
@@ -33,9 +30,38 @@ export interface Archetype {
   default_traits: AgentTraits;
 }
 
+/** The *field* it performs it in — the second axis (ADR-0021). */
+export interface Domain {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  traits_patch: {
+    focus_areas: string[];
+    permissions: string[];
+    multimodal: boolean;
+    context: string;
+  };
+}
+
+/**
+ * A model an agent may run on. The dialog used to offer three hand-written
+ * strings that were not model identifiers at all; it now reads the server's
+ * catalog, which is the only thing that knows what we actually ship.
+ */
+export interface Model {
+  id: string;
+  display_name: string;
+  vision: boolean;
+}
+
+export type LanguageCode = "en" | "it";
+
 export interface Company {
   id: string;
   name: string;
+  /** The language the company works in — UI *and* what the agents write (M16). */
+  language: LanguageCode;
   created_at: string;
 }
 
@@ -43,6 +69,8 @@ export interface Agent {
   id: string;
   name: string;
   archetype: string;
+  /** `null` for agents hired before ADR-0021. */
+  domain: string | null;
   traits: AgentTraits;
   custom_brief: string | null;
   title: string | null;
@@ -69,6 +97,92 @@ export interface AgentBudget {
   reserved_cents: number;
 }
 
+/** How the company reaches you (ADR-0020). Actionable when `approval_id` is set. */
+export interface Notification {
+  id: string;
+  kind: string;
+  /** Server-composed English. The fallback when `params` is absent (M16). */
+  title: string;
+  body: string;
+  /** The values the sentence is made of, so we can word it in any language. */
+  params: Record<string, string | number | null> | null;
+  agent_id: string | null;
+  subject_type: string | null;
+  subject_id: string | null;
+  approval_id: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+/** The main surfaces of the app. */
+export type View = "chat" | "board" | "meetings" | "org";
+
+export type MeetingStatus = "requested" | "open" | "decided" | "declined" | "failed"
+  /** Out of budget mid-deliberation; waiting to be resumed (ADR-0022). */
+  | "paused";
+
+/** A meeting an agent asked for (or you convened). */
+export interface Meeting {
+  id: string;
+  topic: string;
+  reason: string;
+  convener_agent_id: string | null;
+  convener_name: string | null;
+  turn_cap: number;
+  status: MeetingStatus;
+  decision: string | null;
+  /** Why the room is waiting, when it is (ADR-0022). */
+  paused_note?: string | null;
+  approval_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+}
+
+export interface MeetingTurn {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  ordinal: number;
+  content: string;
+  created_at: string;
+}
+
+export interface MeetingDetail {
+  meeting: Meeting & { company_id: string };
+  participants: { id: string; name: string; title: string | null }[];
+  turns: MeetingTurn[];
+}
+
+export type OrgProposalStatus = "proposed" | "accepted" | "rejected";
+
+/** One hire the CEO suggests. `reports_to` is another member's *name*. */
+export interface OrgProposalMember {
+  id: string;
+  position: number;
+  name: string;
+  archetype: string;
+  domain: string | null;
+  title: string | null;
+  reports_to: string | null;
+  brief: string | null;
+  rationale: string | null;
+  excluded: boolean;
+  hired_agent_id: string | null;
+}
+
+/** A team the CEO drew up (M15). Nobody is hired until you accept. */
+export interface OrgProposal {
+  id: string;
+  summary: string;
+  proposed_by_name: string | null;
+  status: OrgProposalStatus;
+  decline_note: string | null;
+  approval_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+  members: OrgProposalMember[];
+}
+
 export interface Project {
   id: string;
   title: string;
@@ -91,6 +205,8 @@ export interface ProjectDetail {
   workspaces: { id: string; name: string; cwd: string; is_primary: boolean }[];
 }
 
+export type ExecutionKind = "code" | "knowledge";
+
 export interface Task {
   id: string;
   goal_id: string | null;
@@ -98,7 +214,51 @@ export interface Task {
   status: TaskStatus;
   priority: TaskPriority;
   assignee_agent_id: string | null;
+  execution_kind: ExecutionKind;
   updated_at: string;
+}
+
+/** A knowledge run's deliverable (ADR-0017): a document, table, or research note. */
+export interface Artifact {
+  id: string;
+  session_id: string;
+  kind: string;
+  /** Path relative to the run's deliverable root — `research/sources.csv`. */
+  title: string;
+  mime: string;
+  /** Inline text, when the artifact is text and small enough to preview. */
+  content: string | null;
+  /** Whether bytes can be fetched from `artifactUrl` (M17). */
+  downloadable: boolean;
+  size_bytes: number;
+  relative_path: string | null;
+  created_at: string;
+}
+
+/** A turn in the CEO conversation (M12 / ADR-0018). */
+export type MessageRole = "user" | "ceo" | "system";
+
+/** A file/image attached to a message. */
+export interface Attachment {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+}
+
+export interface Message {
+  id: string;
+  role: MessageRole;
+  content: string;
+  created_at: string;
+  attachments?: Attachment[];
+}
+
+export interface Conversation {
+  id: string;
+  agent_id: string;
+  title: string;
+  created_at: string;
 }
 
 export interface Session {
@@ -168,6 +328,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 export interface HireAgentBody {
   name: string;
   archetype: string;
+  domain?: string | null;
   traits?: Partial<AgentTraits>;
   custom_brief?: string | null;
   title?: string | null;
@@ -177,18 +338,29 @@ export interface HireAgentBody {
 export const api = {
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
   createCompany: (name: string) => req<Company>("POST", "/companies", { name }),
+  setCompanyLanguage: (companyId: string, language: LanguageCode) =>
+    req<{ id: string; language: LanguageCode }>("POST", `/companies/${companyId}/language`, {
+      language,
+    }),
 
   listArchetypes: () =>
     req<{ archetypes: Archetype[] }>("GET", "/archetypes").then((r) => r.archetypes),
+  listDomains: () => req<{ domains: Domain[] }>("GET", "/domains").then((r) => r.domains),
+  listModels: () => req<{ models: Model[] }>("GET", "/models").then((r) => r.models),
 
   listAgents: (companyId: string) =>
     req<{ agents: Agent[] }>("GET", `/companies/${companyId}/agents`).then((r) => r.agents),
   hireAgent: (companyId: string, body: HireAgentBody) =>
     req<Agent>("POST", `/companies/${companyId}/agents`, body),
-  reassignAgent: (
-    agentId: string,
-    body: { reports_to?: string | null; title?: string },
-  ) => req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
+  /** Raise (or lower) an agent's monthly cap — what unblocks a paused room. */
+  setAgentBudget: (agentId: string, monthlyBudgetCents: number) =>
+    req<{ id: string; monthly_budget_cents: number }>("POST", `/agents/${agentId}/budget`, {
+      monthly_budget_cents: monthlyBudgetCents,
+    }),
+  resumeMeeting: (companyId: string, meetingId: string) =>
+    req<{ id: string }>("POST", `/companies/${companyId}/meetings/${meetingId}/resume`, {}),
+  reassignAgent: (agentId: string, body: { reports_to?: string | null; title?: string }) =>
+    req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
   pauseAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/pause`),
   resumeAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/resume`),
   terminateAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/terminate`),
@@ -204,6 +376,30 @@ export const api = {
       decision,
       note,
     }),
+
+  listNotifications: (companyId: string) =>
+    req<{ notifications: Notification[]; unread: number }>(
+      "GET",
+      `/companies/${companyId}/notifications`,
+    ),
+  readNotification: (id: string) => req<unknown>("POST", `/notifications/${id}/read`),
+  readAllNotifications: (companyId: string) =>
+    req<{ read: number }>("POST", `/companies/${companyId}/notifications/read`),
+
+  listOrgProposals: (companyId: string) =>
+    req<{ proposals: OrgProposal[] }>("GET", `/companies/${companyId}/org-proposals`).then(
+      (r) => r.proposals,
+    ),
+  setProposalMemberExcluded: (proposalId: string, memberId: string, excluded: boolean) =>
+    req<{ id: string; excluded: boolean }>(
+      "POST",
+      `/org-proposals/${proposalId}/members/${memberId}`,
+      { excluded },
+    ),
+
+  listMeetings: (companyId: string) =>
+    req<{ meetings: Meeting[] }>("GET", `/companies/${companyId}/meetings`).then((r) => r.meetings),
+  getMeeting: (meetingId: string) => req<MeetingDetail>("GET", `/meetings/${meetingId}`),
 
   budgetSummary: (companyId: string) =>
     req<{ budgets: AgentBudget[]; window_start: string }>(
@@ -230,7 +426,13 @@ export const api = {
     req<{ tasks: Task[] }>("GET", `/companies/${companyId}/tasks`).then((r) => r.tasks),
   createTask: (
     companyId: string,
-    body: { title: string; description?: string; goal_id?: string; priority?: TaskPriority },
+    body: {
+      title: string;
+      description?: string;
+      goal_id?: string;
+      priority?: TaskPriority;
+      execution_kind?: ExecutionKind;
+    },
   ) => req<Task>("POST", `/companies/${companyId}/tasks`, body),
   transitionTask: (taskId: string, to: TaskStatus, agent_id?: string) =>
     req<{ id: string; status: TaskStatus }>("POST", `/tasks/${taskId}/transition`, {
@@ -248,9 +450,9 @@ export const api = {
   getSessionDiff: (id: string) =>
     fetch(`/api/sessions/${id}/diff`).then((r) => (r.ok ? r.text() : "")),
   listTaskSessions: (taskId: string) =>
-    req<{ sessions: TaskSessionRef[] }>("GET", `/tasks/${taskId}/sessions`).then(
-      (r) => r.sessions,
-    ),
+    req<{ sessions: TaskSessionRef[] }>("GET", `/tasks/${taskId}/sessions`).then((r) => r.sessions),
+  listTaskArtifacts: (taskId: string) =>
+    req<{ artifacts: Artifact[] }>("GET", `/tasks/${taskId}/artifacts`).then((r) => r.artifacts),
 
   requestWakeup: (agentId: string, reason?: string) =>
     req<{ id: string }>("POST", `/agents/${agentId}/wakeup`, { reason }),
@@ -266,4 +468,57 @@ export const api = {
     ),
 
   memoryStatus: () => req<{ enabled: boolean }>("GET", "/memory/status"),
+
+  // Conversation with an agent — the CEO is the org leader (ADR-0019).
+  getConversation: (companyId: string, agentId: string) =>
+    req<{ conversation: Conversation | null; messages: Message[] }>(
+      "GET",
+      `/companies/${companyId}/agents/${agentId}/conversation`,
+    ),
+  postMessage: (companyId: string, agentId: string, content: string, attachmentIds?: string[]) =>
+    req<{ conversation_id: string }>(
+      "POST",
+      `/companies/${companyId}/agents/${agentId}/conversation/messages`,
+      { content, attachment_ids: attachmentIds ?? [] },
+    ),
+  /** Upload a file/image to an agent's thread; returns its attachment metadata. */
+  uploadAttachment: (companyId: string, agentId: string, file: File): Promise<Attachment> =>
+    postFile(`/api/companies/${companyId}/agents/${agentId}/conversation/attachments`, file),
+
+  /** URL that serves an attachment's bytes (for <img> / download links). */
+  attachmentUrl: (companyId: string, attachmentId: string) =>
+    `/api/companies/${companyId}/conversation/attachments/${attachmentId}`,
+
+  // --- Files on a task (M17): what an agent picking it up will be handed.
+  uploadTaskAttachment: (taskId: string, file: File): Promise<Attachment> =>
+    postFile(`/api/tasks/${taskId}/attachments`, file),
+  listTaskAttachments: (taskId: string) =>
+    req<{ attachments: Attachment[] }>("GET", `/tasks/${taskId}/attachments`).then(
+      (r) => r.attachments,
+    ),
+  removeTaskAttachment: (taskId: string, attachmentId: string) =>
+    req<unknown>("DELETE", `/tasks/${taskId}/attachments/${attachmentId}`),
+
+  /** URL that serves an artifact's bytes — images render from it, everything
+   *  else downloads from it (M17). */
+  artifactUrl: (artifactId: string) => `/api/artifacts/${artifactId}/download`,
 };
+
+/** Multipart upload of a single file. `fetch` directly: `req` sends JSON. */
+function postFile(url: string, file: File): Promise<Attachment> {
+  const form = new FormData();
+  form.append("file", file);
+  return fetch(url, { method: "POST", body: form }).then(async (res) => {
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const data = await res.json();
+        if (data?.error) message = data.error;
+      } catch {
+        // keep statusText
+      }
+      throw new ApiError(res.status, message);
+    }
+    return (await res.json()) as Attachment;
+  });
+}

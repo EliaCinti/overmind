@@ -61,7 +61,9 @@ async fn full_lifecycle_with_audit_trail() {
     assert_eq!(status, StatusCode::CREATED);
     let company_id = company["id"].as_str().expect("company id").to_string();
 
-    // Archetype catalog is seeded
+    // Both catalogs are seeded. Since ADR-0021 they are two axes: the
+    // archetype is the *function*, the domain is the *field* it works in — so
+    // a security reviewer is `reviewer × security`, not a row of its own.
     let (status, catalog) = send(&app, "GET", "/api/archetypes", None).await;
     assert_eq!(status, StatusCode::OK);
     let slugs: Vec<&str> = catalog["archetypes"]
@@ -70,7 +72,18 @@ async fn full_lifecycle_with_audit_trail() {
         .iter()
         .map(|a| a["slug"].as_str().expect("slug"))
         .collect();
-    assert!(slugs.contains(&"security-engineer"), "catalog: {slugs:?}");
+    assert!(slugs.contains(&"reviewer"), "catalog: {slugs:?}");
+
+    let (status, catalog) = send(&app, "GET", "/api/domains", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let domains: Vec<&str> = catalog["domains"]
+        .as_array()
+        .expect("domains array")
+        .iter()
+        .map(|d| d["slug"].as_str().expect("slug"))
+        .collect();
+    assert!(domains.contains(&"security"), "domains: {domains:?}");
+    assert!(domains.contains(&"media-av"), "domains: {domains:?}");
 
     // Hire an agent: archetype defaults + structured override (ADR-0005)
     let (status, agent) = send(
@@ -79,7 +92,8 @@ async fn full_lifecycle_with_audit_trail() {
         &format!("/api/companies/{company_id}/agents"),
         Some(json!({
             "name": "Sentinel",
-            "archetype": "security-engineer",
+            "archetype": "reviewer",
+            "domain": "security",
             "traits": { "focus_areas": ["auth", "secrets-handling"] },
             "custom_brief": "Pay special attention to the audit log code."
         })),
@@ -215,6 +229,8 @@ async fn full_lifecycle_with_audit_trail() {
         kinds,
         vec![
             "company.created",
+            // The founding CEO (M15): a company is never empty.
+            "agent.hired",
             "agent.hired",
             "project.created",
             "goal.created",
@@ -230,7 +246,7 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["valid"], json!(true), "report: {report}");
-    assert_eq!(report["events_checked"], json!(9));
+    assert_eq!(report["events_checked"], json!(10));
 }
 
 #[tokio::test]

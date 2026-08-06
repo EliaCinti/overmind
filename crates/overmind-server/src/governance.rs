@@ -40,19 +40,204 @@ pub async fn spent_cents(
     Ok(row.0)
 }
 
-/// Cents currently reserved by the agent's in-flight sessions.
+/// Cents currently reserved by everything the agent has in flight.
+///
+/// Two sources since [ADR-0022](../../docs/adr/0022-conversational-spend-under-budget.md):
+/// task sessions, and conversational turns. Turn reservations could not live on
+/// `agent_task_sessions` — its `task_id` is `NOT NULL` — so they have their own
+/// table and are summed here, where every caller already looks.
 pub async fn reserved_cents(
     conn: &mut SqliteConnection,
     agent_id: &str,
 ) -> Result<i64, sqlx::Error> {
-    let row: (i64,) = sqlx::query_as(
+    let sessions: (i64,) = sqlx::query_as(
         "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_task_sessions
          WHERE agent_id = ? AND status IN ('queued', 'running')",
     )
     .bind(agent_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let turns: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_turn_reservations
+         WHERE agent_id = ? AND released_at IS NULL",
+    )
+    .bind(agent_id)
     .fetch_one(conn)
     .await?;
-    Ok(row.0)
+    Ok(sessions.0 + turns.0)
+}
+
+/// What the budget looks like for one prospective run.
+#[derive(Clone, Copy, Debug)]
+pub struct BudgetCheck {
+    /// Whether this run fits under the cap. Always true for an uncapped agent.
+    pub fits: bool,
+    pub spent: i64,
+    pub reserved: i64,
+    pub estimate: i64,
+    /// The agent's monthly cap; `0` means uncapped.
+    pub cap: i64,
+}
+
+impl BudgetCheck {
+    /// What the run would bring the agent to.
+    pub fn observed(&self) -> i64 {
+        self.spent + self.reserved + self.estimate
+    }
+}
+
+/// Does one more run of `estimate` cents fit under `cap`?
+///
+/// The rule M6 has enforced at task checkout since ADR-0012, lifted out so
+/// conversational turns are measured by the same arithmetic rather than by a
+/// second implementation that could drift from it (ADR-0022).
+pub async fn check(
+    conn: &mut SqliteConnection,
+    agent_id: &str,
+    cap: i64,
+    estimate: i64,
+) -> Result<BudgetCheck, sqlx::Error> {
+    if cap <= 0 {
+        return Ok(BudgetCheck {
+            fits: true,
+            spent: 0,
+            reserved: 0,
+            estimate,
+            cap,
+        });
+    }
+    let window = month_window_start();
+    let spent = spent_cents(&mut *conn, agent_id, &window).await?;
+    let reserved = reserved_cents(&mut *conn, agent_id).await?;
+    Ok(BudgetCheck {
+        fits: spent + reserved + estimate <= cap,
+        spent,
+        reserved,
+        estimate,
+        cap,
+    })
+}
+
+/// Record that an agent was stopped by its cap: a durable incident plus the
+/// audit event. Shared by task checkout and conversational turns so both
+/// overruns are visible in the same place, described the same way.
+pub async fn record_overrun(
+    conn: &mut SqliteConnection,
+    company_id: &str,
+    agent_id: &str,
+    task_id: Option<&str>,
+    check: &BudgetCheck,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO budget_incidents (id, company_id, agent_id, window_start, threshold_type, amount_limit, amount_observed, status, created_at)
+         VALUES (?, ?, ?, ?, 'hard', ?, ?, 'open', ?)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(company_id)
+    .bind(agent_id)
+    .bind(month_window_start())
+    .bind(check.cap)
+    .bind(check.observed())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *conn)
+    .await?;
+    crate::audit::append(
+        conn,
+        Some(company_id),
+        task_id,
+        crate::domain::event_kind::BUDGET_BLOCKED,
+        &json!({
+            "agent_id": agent_id,
+            "limit_cents": check.cap,
+            "observed_cents": check.observed(),
+        }),
+    )
+    .await
+    .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    Ok(())
+}
+
+/// Hold `cents` against an agent's cap for the duration of one conversational
+/// turn. Returns the reservation id, which the caller must release.
+pub async fn reserve_turn(
+    conn: &mut SqliteConnection,
+    company_id: &str,
+    agent_id: &str,
+    kind: &str,
+    cents: i64,
+) -> Result<String, sqlx::Error> {
+    let id = uuid::Uuid::now_v7().to_string();
+    sqlx::query(
+        "INSERT INTO agent_turn_reservations (id, company_id, agent_id, kind, reserved_cents, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(company_id)
+    .bind(agent_id)
+    .bind(kind)
+    .bind(cents)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(conn)
+    .await?;
+    Ok(id)
+}
+
+/// Record what a conversational turn actually cost (ADR-0022).
+///
+/// `task_id` and `session_id` are null: this spend belongs to no task and no
+/// session, which is exactly why it was invisible until now. Both columns have
+/// been nullable since M2, so the ledger's shape already allowed for it — the
+/// only thing missing was a second writer.
+///
+/// Best-effort: an adapter that prints no cost envelope is not an error, and
+/// losing the accounting for one turn must not lose the turn.
+pub async fn record_turn_cost(
+    pool: &sqlx::SqlitePool,
+    company_id: &str,
+    agent_id: &str,
+    output: &str,
+) {
+    let Some(cost) = crate::runner::parse_cost(output) else {
+        return;
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = sqlx::query(
+        "INSERT INTO cost_events (id, company_id, agent_id, task_id, session_id, provider, model,
+         input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at)
+         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(company_id)
+    .bind(agent_id)
+    .bind("anthropic")
+    .bind(&cost.model)
+    .bind(cost.input_tokens)
+    .bind(cost.cached_input_tokens)
+    .bind(cost.output_tokens)
+    .bind(cost.cost_cents)
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await;
+}
+
+/// Release a turn's reservation, however the turn ended. Best-effort on
+/// purpose: a failure here must not mask the turn's own outcome, and the worst
+/// case is a reservation that reads as in-flight until it is cleaned up —
+/// conservative in the direction of spending less.
+pub async fn release_turn(pool: &sqlx::SqlitePool, reservation_id: &str) {
+    let _ = sqlx::query("UPDATE agent_turn_reservations SET released_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(reservation_id)
+        .execute(pool)
+        .await;
+}
+
+/// Cents as euros, for the English `title`/`body` a notification keeps as its
+/// durable record. The *translated* wording is the client's job (M16 slice D);
+/// this is the fallback, and the fallback has always been English.
+pub fn euros(cents: i64) -> String {
+    format!("€{}.{:02}", cents / 100, (cents % 100).abs())
 }
 
 /// The full config snapshot stored in an `agent_config_revisions` row.

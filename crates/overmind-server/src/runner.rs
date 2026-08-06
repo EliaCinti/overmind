@@ -15,8 +15,163 @@ use tokio::process::Command;
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::event_kind;
+use crate::domain::{ExecutionKind, event_kind};
+use crate::files;
 use crate::governance;
+
+/// How a working agent asks for a meeting: a control file in its working
+/// directory (ADR-0020). A file, not stdout, because the last JSON line of a
+/// run belongs to the adapter's own result envelope.
+const MEETING_REQUEST_FILE: &str = "MEETING_REQUEST.json";
+
+/// Where files you attached to a task are placed, inside the run directory
+/// (M17). A named directory rather than the root for two reasons: in a `code`
+/// run the root is a git worktree and loose files would land in the diff, and
+/// in either kind the output collector must be able to tell what the agent
+/// *produced* from what it was *given*.
+const INPUTS_DIR: &str = "inputs";
+
+/// Where a `code` run puts anything that is not a code change — a report, a
+/// chart, a generated file. Git-excluded, collected as artifacts. A knowledge
+/// run needs no such convention: everything it writes is the deliverable.
+const DELIVERABLES_DIR: &str = "deliverables";
+
+/// A cap on how many files one run can hand back. Not a policy about what is
+/// reasonable — a guard so a runaway loop writing files cannot fill the
+/// database.
+const MAX_ARTIFACTS: usize = 200;
+
+/// Text kept inline in the row for preview and search; beyond this only the
+/// file on disk. 256 KB is far past any document a human reads in a drawer.
+const MAX_INLINE_BYTES: u64 = 256 * 1024;
+
+/// Files attached to this task, as `(filename, mime, size, absolute path)`.
+async fn task_inputs(state: &AppState, task_id: &str) -> Vec<(String, String, i64, String)> {
+    sqlx::query_as(
+        "SELECT filename, mime, size_bytes, path FROM attachments
+         WHERE task_id = ? ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// Copy the task's attachments into the run directory before the agent starts.
+///
+/// Best-effort: a file that cannot be copied costs the agent that input, and
+/// the prompt still names it — better than failing a run over one unreadable
+/// upload. The agent is told what is there and where.
+async fn place_inputs(ctx: &SessionContext) {
+    let inputs = task_inputs(&ctx.state, &ctx.task_id).await;
+    if inputs.is_empty() {
+        return;
+    }
+    let dir = ctx.worktree_dir.join(INPUTS_DIR);
+    if tokio::fs::create_dir_all(&dir).await.is_err() {
+        return;
+    }
+    for (name, _, _, path) in &inputs {
+        let _ = tokio::fs::copy(path, dir.join(files::safe_name(name))).await;
+    }
+}
+
+/// Who the agent is, compiled for the prompt (ADR-0005 / M14).
+///
+/// The characterization is structured data — archetype, title, focus areas,
+/// brief — and ADR-0005 says it must compile into the agent's *prompt context*.
+/// Until M14 it only reached conversational turns: a task run got a prompt with
+/// no persona at all, so a "Media & A/V quality" agent and a backend developer
+/// were handed identical instructions for the same task.
+pub(crate) struct Persona {
+    pub name: String,
+    /// Job title if set, else the archetype's human name.
+    pub role: String,
+    pub focus_areas: Vec<String>,
+    /// One line about the field the agent works in, from its domain
+    /// (ADR-0021). Empty for the general domain, which adds nothing.
+    pub domain_context: String,
+    pub brief: Option<String>,
+}
+
+impl Persona {
+    /// The "who you are" block that opens a task prompt. Empty only if the
+    /// agent could not be loaded — never silently role-blind.
+    fn block(&self) -> String {
+        let mut s = format!("You are {}, the {} of an AI company.", self.name, self.role);
+        if !self.focus_areas.is_empty() {
+            s.push_str(&format!(
+                " What you are relied on for: {}.",
+                self.focus_areas.join(", ")
+            ));
+        }
+        if !self.domain_context.trim().is_empty() {
+            s.push_str(&format!("\n{}", self.domain_context.trim()));
+        }
+        if let Some(brief) = self
+            .brief
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+        {
+            s.push_str(&format!("\nYour brief: {brief}"));
+        }
+        s.push_str("\n\nWork in role: bring the judgement your role is hired for, and say so when the task strays outside it.");
+        s
+    }
+}
+
+/// (name, title, archetype name, traits JSON, custom_brief, domain patch JSON)
+type PersonaRow = (
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+/// Load an agent's characterization for the prompt. Best-effort by design:
+/// a missing archetype row must not stop work, it just costs the persona.
+async fn load_persona(state: &AppState, agent_id: &str) -> Option<Persona> {
+    let row: Option<PersonaRow> = sqlx::query_as(
+        "SELECT a.name, a.title, ar.name, a.traits, a.custom_brief, d.traits_patch
+         FROM agents a
+         JOIN archetypes ar ON ar.id = a.archetype_id
+         LEFT JOIN domains d ON d.id = a.domain_id
+         WHERE a.id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let (name, title, archetype_name, traits, brief, domain_patch) = row?;
+    // A LEFT JOIN: an agent hired before ADR-0021 has no domain, and works
+    // exactly as it did — the line is simply absent from its prompt.
+    let domain_context = domain_patch
+        .and_then(|json| serde_json::from_str::<crate::domain::DomainPatch>(&json).ok())
+        .map(|p| p.context)
+        .unwrap_or_default();
+    let focus_areas = serde_json::from_str::<Value>(&traits)
+        .ok()
+        .and_then(|v| {
+            v.get("focus_areas").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    Some(Persona {
+        name,
+        role: title.unwrap_or(archetype_name),
+        focus_areas,
+        domain_context,
+        brief,
+    })
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -98,37 +253,23 @@ pub async fn start_task(
     bypass_approval: bool,
 ) -> Result<StartResult, RunnerError> {
     // Resolve task -> goal -> project -> primary workspace.
-    let task: Option<(String, Option<String>, String, String, String)> = sqlx::query_as(
-        "SELECT company_id, goal_id, title, description, status FROM tasks WHERE id = ?",
+    let task: Option<(String, Option<String>, String, String, String, String)> = sqlx::query_as(
+        "SELECT company_id, goal_id, title, description, status, execution_kind FROM tasks WHERE id = ?",
     )
     .bind(task_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((company_id, goal_id, title, description, status)) = task else {
+    let Some((company_id, goal_id, title, description, status, exec_kind_str)) = task else {
         return Err(RunnerError::NotFound("task"));
     };
     if status != "todo" {
         return Err(RunnerError::Conflict);
     }
-    let Some(goal_id) = goal_id else {
-        return Err(RunnerError::Invalid(
-            "task has no goal: attach it to a project with a workspace first".into(),
-        ));
-    };
-    let workspace: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT w.cwd, w.default_ref FROM project_workspaces w
-         JOIN goals g ON g.project_id = w.project_id
-         WHERE g.id = ? AND w.is_primary = 1",
-    )
-    .bind(&goal_id)
-    .fetch_optional(&state.pool)
-    .await?;
-    let Some((repo_cwd, default_ref)) = workspace else {
-        return Err(RunnerError::Invalid(
-            "the task's project has no primary workspace".into(),
-        ));
-    };
+    let exec_kind = ExecutionKind::parse(&exec_kind_str).unwrap_or_default();
 
+    // Who you are asking comes before what the job needs: these checks are
+    // cheap, and "this agent cannot do code work" is a more useful answer than
+    // "the project has no workspace" when both are true.
     let agent: Option<(String, String, i64)> = sqlx::query_as(
         "SELECT traits, status, requires_approval FROM agents WHERE id = ? AND company_id = ?",
     )
@@ -142,6 +283,67 @@ pub async fn start_task(
     if agent_status != "active" {
         return Err(RunnerError::Blocked(format!("agent is {agent_status}")));
     }
+
+    // Capability gate (M14 / ADR-0005). The only enforcement that is honest
+    // here: we cannot police what the spawned CLI does, but we can refuse to
+    // hand it work it was never characterized for. A researcher does not get
+    // put on a code task — not by you, not by a teammate that assigned it one.
+    let required = crate::domain::perm::for_execution_kind(exec_kind);
+    if !trait_permissions(&agent_traits)
+        .iter()
+        .any(|p| p == required)
+    {
+        return Err(RunnerError::Blocked(format!(
+            "this agent is not characterized for {exec_kind_str} work (missing `{required}`)"
+        )));
+    }
+
+    // Multimodal gate (ADR-0021). Same shape as the capability gate above, and
+    // the same honesty about what it is: not a claim that the spawned CLI
+    // cannot open a PNG, but a refusal to hand an agent material it was never
+    // characterized to judge. A researcher who has never been asked to look at
+    // anything should not silently become the one grading your projector.
+    if !trait_multimodal(&agent_traits) {
+        let visual: Vec<String> = task_inputs(state, task_id)
+            .await
+            .into_iter()
+            .filter(|(_, mime, _, _)| crate::files::is_visual(mime))
+            .map(|(name, _, _, _)| name)
+            .collect();
+        if !visual.is_empty() {
+            return Err(RunnerError::Blocked(format!(
+                "this task carries material to look at ({}) and this agent is not characterized for visual work",
+                visual.join(", ")
+            )));
+        }
+    }
+
+    // A `code` run needs a git repo to branch a worktree from; a `knowledge`
+    // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
+    let workspace: Option<(String, Option<String>)> = match exec_kind {
+        ExecutionKind::Code => {
+            let Some(goal_id) = goal_id else {
+                return Err(RunnerError::Invalid(
+                    "task has no goal: attach it to a project with a workspace first".into(),
+                ));
+            };
+            let ws: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                 JOIN goals g ON g.project_id = w.project_id
+                 WHERE g.id = ? AND w.is_primary = 1",
+            )
+            .bind(&goal_id)
+            .fetch_optional(&state.pool)
+            .await?;
+            let Some(ws) = ws else {
+                return Err(RunnerError::Invalid(
+                    "the task's project has no primary workspace".into(),
+                ));
+            };
+            Some(ws)
+        }
+        ExecutionKind::Knowledge => None,
+    };
 
     // Governance gate: file an approval and launch nothing.
     if requires_approval != 0 && !bypass_approval {
@@ -166,8 +368,32 @@ pub async fn start_task(
             &json!({ "approval_id": approval_id, "agent_id": agent_id, "type": "task_start" }),
         )
         .await?;
+        // Reach the human the same way a meeting request does (ADR-0020): an
+        // approval nobody sees is an agent stuck waiting forever.
+        let who: Option<(String,)> = sqlx::query_as("SELECT name FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let who = who.map(|(n,)| n).unwrap_or_else(|| "An agent".into());
+        let notification = crate::notify::post(
+            &mut tx,
+            &company_id,
+            crate::notify::New {
+                kind: crate::notify::kind::APPROVAL_REQUESTED,
+                title: &format!("{who} wants to start a task"),
+                body: &format!(
+                    "Task: {title}\n\nThis agent is gated: it starts only once you approve."
+                ),
+                params: serde_json::json!({ "agent": who, "task": title }),
+                agent_id: Some(agent_id),
+                subject: Some(("task", task_id)),
+                approval_id: Some(&approval_id),
+            },
+        )
+        .await?;
         tx.commit().await?;
         state.notify(&company_id);
+        crate::notify::deliver(state, &company_id, &notification);
         return Ok(StartResult::ApprovalRequired { approval_id });
     }
 
@@ -175,52 +401,34 @@ pub async fn start_task(
     let estimate = state.config.start_estimate_cents;
 
     let session_id = uuid::Uuid::now_v7().to_string();
-    // Branch uniqueness comes from the full session id (globally unique); the
-    // task tag is only there to make the branch human-recognizable.
-    let branch = format!("overmind/task-{}-sess-{}", tag(task_id), session_id);
-    let worktree_dir = state
-        .config
-        .data_dir
-        .join("worktrees")
-        .join(&session_id)
-        .to_string_lossy()
-        .into_owned();
+    // `code`: a git branch + worktree dir. `knowledge`: no branch, a scratch dir.
+    // Branch uniqueness rides on the full session id (globally unique); the task
+    // tag only makes it human-recognizable.
+    let (branch, work_dir): (String, PathBuf) = match exec_kind {
+        ExecutionKind::Code => (
+            format!("overmind/task-{}-sess-{}", tag(task_id), session_id),
+            state.config.data_dir.join("worktrees").join(&session_id),
+        ),
+        ExecutionKind::Knowledge => (
+            String::new(),
+            state.config.data_dir.join("sessions").join(&session_id),
+        ),
+    };
+    let work_dir_str = work_dir.to_string_lossy().into_owned();
 
     let mut tx = state.pool.begin().await?;
 
     // Budget check, atomic with checkout. spent (this month) + reserved
     // (in-flight) + this run's estimate must fit under the cap.
-    if budget > 0 {
-        let window = governance::month_window_start();
-        let spent = governance::spent_cents(&mut tx, agent_id, &window).await?;
-        let reserved = governance::reserved_cents(&mut tx, agent_id).await?;
-        if spent + reserved + estimate > budget {
-            // Record the incident and commit that alone; the task is untouched.
-            sqlx::query(
-                "INSERT INTO budget_incidents (id, company_id, agent_id, window_start, threshold_type, amount_limit, amount_observed, status, created_at)
-                 VALUES (?, ?, ?, ?, 'hard', ?, ?, 'open', ?)",
-            )
-            .bind(uuid::Uuid::now_v7().to_string())
-            .bind(&company_id)
-            .bind(agent_id)
-            .bind(&window)
-            .bind(budget)
-            .bind(spent + reserved + estimate)
-            .bind(now())
-            .execute(&mut *tx)
-            .await?;
-            audit::append(
-                &mut tx,
-                Some(&company_id),
-                Some(task_id),
-                event_kind::BUDGET_BLOCKED,
-                &json!({ "agent_id": agent_id, "limit_cents": budget, "observed_cents": spent + reserved + estimate }),
-            )
-            .await?;
-            tx.commit().await?;
-            state.notify(&company_id);
-            return Err(RunnerError::OverBudget);
-        }
+    // One arithmetic, shared with conversational turns (ADR-0022) — a second
+    // implementation of "does this fit" is a second thing to drift.
+    let check = governance::check(&mut tx, agent_id, budget, estimate).await?;
+    if !check.fits {
+        // Record the incident and commit that alone; the task is untouched.
+        governance::record_overrun(&mut tx, &company_id, agent_id, Some(task_id), &check).await?;
+        tx.commit().await?;
+        state.notify(&company_id);
+        return Err(RunnerError::OverBudget);
     }
 
     // Atomic checkout: exactly one concurrent caller wins this UPDATE.
@@ -242,7 +450,7 @@ pub async fn start_task(
     .bind(task_id)
     .bind(agent_id)
     .bind(&branch)
-    .bind(&worktree_dir)
+    .bind(&work_dir_str)
     .bind(estimate)
     .bind(now())
     .execute(&mut *tx)
@@ -271,34 +479,92 @@ pub async fn start_task(
         session_id: session_id.clone(),
         task_id: task_id.to_string(),
         company_id,
-        worktree_dir: PathBuf::from(&worktree_dir),
+        agent_id: agent_id.to_string(),
+        persona: load_persona(state, agent_id).await,
+        worktree_dir: work_dir,
         title,
         description,
         agent_traits,
+        exec_kind,
     };
-    let spec = WorktreeSpec {
-        repo_cwd: PathBuf::from(repo_cwd),
-        default_ref,
-        branch: branch.clone(),
+    let fresh = match exec_kind {
+        ExecutionKind::Code => {
+            let (repo_cwd, default_ref) =
+                workspace.expect("a code run resolved a primary workspace above");
+            FreshSpec::Code(WorktreeSpec {
+                repo_cwd: PathBuf::from(repo_cwd),
+                default_ref,
+                branch: branch.clone(),
+            })
+        }
+        ExecutionKind::Knowledge => FreshSpec::Knowledge,
     };
     register(state, &session_id);
     tokio::spawn(async move {
-        run_session(ctx, Mode::Fresh(spec)).await;
+        run_session(ctx, Mode::Fresh(fresh)).await;
     });
 
     Ok(StartResult::Started(StartOutcome {
         session_id,
         branch,
-        workspace_path: worktree_dir,
+        workspace_path: work_dir_str,
     }))
 }
 
 /// The monthly budget cap from an agent's serialized traits (0 = uncapped).
-fn trait_budget_cents(traits_json: &str) -> i64 {
+pub(crate) fn trait_budget_cents(traits_json: &str) -> i64 {
     serde_json::from_str::<Value>(traits_json)
         .ok()
         .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
         .unwrap_or(0)
+}
+
+/// What the agent is allowed to do. An unreadable traits blob yields none —
+/// fail closed: an agent we cannot characterize gets no work.
+fn trait_permissions(traits_json: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| {
+            v.get("permissions").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the agent is characterized to work with visual material (ADR-0021).
+/// An unreadable traits blob yields `false`, on the same fail-closed grounds as
+/// [`trait_permissions`].
+pub(crate) fn trait_multimodal(traits_json: &str) -> bool {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| v.get("multimodal").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Which model runs this agent. Falls back to the catalog default rather than
+/// to nothing: a traits blob we cannot read is a reason to run the agent
+/// plainly, not a reason to invoke the CLI with an empty `--model`.
+pub(crate) fn trait_model(traits_json: &str) -> String {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| v.get("model").and_then(Value::as_str).map(str::to_string))
+        .filter(|m| crate::model::is_known(m))
+        .unwrap_or_else(|| crate::model::default_model().id.to_string())
+}
+
+/// The adapter invocation (ADR-0021). Configurable — tests use a stub — and the
+/// default drives the Claude Code CLI headless, on the model the agent is
+/// actually characterized for. Until M14 slice 3 this string existed in two
+/// copies and named no model at all, so `AgentTraits.model` was decorative.
+pub(crate) fn agent_command(state: &AppState) -> String {
+    state.config.agent_cmd.clone().unwrap_or_else(|| {
+        "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" --output-format json"
+            .to_string()
+    })
 }
 
 /// Resume a session that is marked queued/running in the DB but has no live
@@ -314,14 +580,16 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     let Some((task_id, agent_id, workspace_path)) = session else {
         return Err(RunnerError::NotFound("session"));
     };
-    let task: Option<(String, String, String, String)> =
-        sqlx::query_as("SELECT company_id, title, description, status FROM tasks WHERE id = ?")
-            .bind(&task_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((company_id, title, description, task_status)) = task else {
+    let task: Option<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT company_id, title, description, status, execution_kind FROM tasks WHERE id = ?",
+    )
+    .bind(&task_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((company_id, title, description, task_status, exec_kind_str)) = task else {
         return Err(RunnerError::NotFound("task"));
     };
+    let exec_kind = ExecutionKind::parse(&exec_kind_str).unwrap_or_default();
     let agent_traits: Option<(String,)> = sqlx::query_as("SELECT traits FROM agents WHERE id = ?")
         .bind(&agent_id)
         .fetch_optional(&state.pool)
@@ -333,10 +601,13 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         session_id: session_id.to_string(),
         task_id: task_id.clone(),
         company_id: company_id.clone(),
+        agent_id: agent_id.clone(),
+        persona: load_persona(state, &agent_id).await,
         worktree_dir: PathBuf::from(&workspace_path),
         title,
         description,
         agent_traits,
+        exec_kind,
     };
 
     // A session whose task is no longer in progress, or whose worktree is
@@ -394,10 +665,15 @@ pub(crate) struct SessionContext {
     session_id: String,
     task_id: String,
     company_id: String,
+    agent_id: String,
+    /// Who is doing the work (ADR-0005). `None` only if the agent row vanished.
+    persona: Option<Persona>,
+    /// The agent's cwd: a git worktree for `code`, a scratch dir for `knowledge`.
     worktree_dir: PathBuf,
     title: String,
     description: String,
     agent_traits: String,
+    exec_kind: ExecutionKind,
 }
 
 pub(crate) struct WorktreeSpec {
@@ -406,8 +682,15 @@ pub(crate) struct WorktreeSpec {
     branch: String,
 }
 
+/// How a fresh run is prepared: `code` needs a git worktree from a repo;
+/// `knowledge` just needs an empty scratch dir (ADR-0017).
+pub(crate) enum FreshSpec {
+    Code(WorktreeSpec),
+    Knowledge,
+}
+
 pub(crate) enum Mode {
-    Fresh(WorktreeSpec),
+    Fresh(FreshSpec),
     Resume,
 }
 
@@ -428,15 +711,59 @@ async fn run_session(ctx: SessionContext, mode: Mode) {
 
 async fn execute(ctx: &SessionContext, mode: Mode) -> Outcome {
     let resume = matches!(mode, Mode::Resume);
-    if let Mode::Fresh(spec) = &mode
-        && let Err(e) = prepare_worktree(ctx, spec).await
-    {
-        return Outcome::Infra {
-            error: e.to_string(),
-            release: false,
+    if let Mode::Fresh(fresh) = &mode {
+        let prep = match fresh {
+            FreshSpec::Code(spec) => prepare_worktree(ctx, spec).await,
+            FreshSpec::Knowledge => prepare_scratch(ctx).await,
         };
+        if let Err(e) = prep {
+            return Outcome::Infra {
+                error: e.to_string(),
+                release: false,
+            };
+        }
     }
     run_process(ctx, resume).await
+}
+
+/// Prepare a `knowledge` run: an empty scratch dir, no git. The session goes
+/// `running` with no `base_sha` — there is no diff base (ADR-0017).
+async fn prepare_scratch(ctx: &SessionContext) -> Result<(), RunnerError> {
+    tokio::fs::create_dir_all(&ctx.worktree_dir)
+        .await
+        .map_err(|e| RunnerError::Invalid(format!("cannot create scratch dir: {e}")))?;
+    place_inputs(ctx).await;
+    sqlx::query("UPDATE agent_task_sessions SET status = 'running', started_at = ? WHERE id = ?")
+        .bind(now())
+        .bind(&ctx.session_id)
+        .execute(&ctx.state.pool)
+        .await?;
+    Ok(())
+}
+
+/// Keep Overmind's own directories out of the run's diff.
+///
+/// The path matters: in a worktree `.git` is a *file* pointing at
+/// `<repo>/.git/worktrees/<name>`, so `<worktree>/.git/info/exclude` does not
+/// exist and writing to it silently does nothing — which is exactly what
+/// happened until a test caught it. `git rev-parse --git-path` resolves the
+/// per-worktree location, so the user's own repo is never touched.
+///
+/// Best-effort: without it the worst case is a report showing up in a diff.
+async fn exclude_from_git(worktree: &Path) {
+    let Ok(path) = git(worktree, &["rev-parse", "--git-path", "info/exclude"]).await else {
+        return;
+    };
+    // The path is relative to the worktree unless git returns an absolute one.
+    let path = if Path::new(&path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        worktree.join(path)
+    };
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(&path, format!("/{DELIVERABLES_DIR}/\n/{INPUTS_DIR}/\n")).await;
 }
 
 async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(), RunnerError> {
@@ -452,6 +779,13 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
     }
     git(&spec.repo_cwd, &args).await?;
     let base_sha = git(&ctx.worktree_dir, &["rev-parse", "HEAD"]).await?;
+    // A code run can also hand back documents (M17): `deliverables/` is
+    // collected as artifacts and kept out of git, so one run can produce a
+    // diff *and* a report without either polluting the other. Same for the
+    // files the human attached — they are input, not a change.
+    let _ = tokio::fs::create_dir_all(ctx.worktree_dir.join(DELIVERABLES_DIR)).await;
+    exclude_from_git(&ctx.worktree_dir).await;
+    place_inputs(ctx).await;
     sqlx::query(
         "UPDATE agent_task_sessions SET status = 'running', base_sha = ?, started_at = ? WHERE id = ?",
     )
@@ -464,12 +798,7 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
 }
 
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
-    // The adapter command is configurable (tests use a stub); the default
-    // drives the Claude Code CLI headless with a JSON result.
-    let agent_cmd =
-        ctx.state.config.agent_cmd.clone().unwrap_or_else(|| {
-            "claude -p \"$OVERMIND_TASK_PROMPT\" --output-format json".to_string()
-        });
+    let agent_cmd = agent_command(&ctx.state);
     // Load what the organization remembers about this kind of work, and put
     // it in front of the agent (and in an env var). A no-op when memory is off.
     let memory_context = ctx
@@ -489,15 +818,75 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         })
         .unwrap_or_default();
 
+    // Calls this agent sat in on are settled — it works from them (ADR-0020).
+    let decisions_block = crate::meeting::decisions_block(&ctx.state, &ctx.agent_id).await;
+    // The company's language (M16): what the agent writes must match the UI.
+    let language =
+        crate::i18n::prompt_line(&crate::i18n::company_language(&ctx.state, &ctx.company_id).await);
+
+    // How the agent is expected to deliver, per execution kind (ADR-0017).
+    //
+    // Both kinds may hand back files of any type (M17). We say what the file
+    // is and where to put it; we do not tell it what to write it *with* — the
+    // adapter has its own tools, and constraining the format here would make
+    // "produce a chart" impossible for no reason.
+    let deliver = match ctx.exec_kind {
+        ExecutionKind::Code => {
+            "Work in the current directory. When done, leave the changes uncommitted. \
+             Anything that is NOT a code change — a report, a chart, a generated file, a \
+             standalone snippet — goes in the `deliverables/` directory instead: it is kept out \
+             of git and handed back alongside your diff. Any file type is fine."
+        }
+        ExecutionKind::Knowledge => {
+            "Write your deliverable as files in the current directory — Markdown for prose \
+             (e.g. ARTIFACT.md), but any format the work calls for: CSV or JSON for data, an \
+             image for a chart, a source file for code, a PDF if you can produce one. \
+             Subdirectories are kept, so organise them if there is more than one. Do not use git."
+        }
+    };
+
+    // What the human handed the agent (M17). Named with type and size so it
+    // can decide what is worth opening before it opens anything.
+    let inputs = task_inputs(&ctx.state, &ctx.task_id).await;
+    let inputs_block = if inputs.is_empty() {
+        String::new()
+    } else {
+        let list = inputs
+            .iter()
+            .map(|(name, mime, size, _)| {
+                format!(
+                    "- {INPUTS_DIR}/{} ({mime}, {})",
+                    files::safe_name(name),
+                    files::human_size(*size as u64)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n\nFiles provided with this task, already in your working directory:\n{list}\nOpen the ones that matter. If one is in a format you cannot read directly, say so in your output rather than guessing at its contents."
+        )
+    };
+    // Collaboration is expected: an agent that hits a call it should not make
+    // alone asks for a meeting instead of guessing (ADR-0020). Nothing happens
+    // until the human approves, so this is cheap to ask for and safe to ignore.
+    let meeting_hint = "\n\nIf finishing this needs a decision you should not take alone — it affects teammates' work, or you are blocked on a call above your role — write a file named MEETING_REQUEST.json in this directory: {\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}. It reaches the human for approval; do not wait for it, finish what you can.\nAsk sparingly: you may have only ONE request waiting on the human at a time, and every request costs them an interruption. If you can take the call yourself, take it.";
+    // Who is doing the work (ADR-0005 / M14). Without this the prompt is
+    // role-blind: every agent gets identical instructions for the same task.
+    let persona_block = ctx
+        .persona
+        .as_ref()
+        .map(|p| format!("{}\n\n", p.block()))
+        .unwrap_or_default();
+
     let prompt = if resume {
         format!(
-            "You are resuming interrupted work on the task \"{}\".\n\n{}{}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. Leave the changes uncommitted.",
-            ctx.title, ctx.description, memory_block
+            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}{inputs_block}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}{language}",
+            ctx.title, ctx.description, memory_block, decisions_block
         )
     } else {
         format!(
-            "You are working on the task \"{}\".\n\n{}{}\n\nWork in the current directory. When done, leave the changes uncommitted.",
-            ctx.title, ctx.description, memory_block
+            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}{inputs_block}\n\n{deliver}{meeting_hint}{language}",
+            ctx.title, ctx.description, memory_block, decisions_block
         )
     };
 
@@ -523,6 +912,7 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         .env("OVERMIND_TASK_TITLE", &ctx.title)
         .env("OVERMIND_TASK_DESCRIPTION", &ctx.description)
         .env("OVERMIND_AGENT_TRAITS", &ctx.agent_traits)
+        .env("OVERMIND_AGENT_MODEL", trait_model(&ctx.agent_traits))
         .env(
             "OVERMIND_MEMORY_CONTEXT",
             memory_context.as_deref().unwrap_or(""),
@@ -684,6 +1074,110 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     )
     .await?;
 
+    // What the run produced, besides (or instead of) a diff — M17.
+    //
+    // A knowledge run's deliverable is everything it wrote; a code run's is the
+    // diff, plus anything it deliberately put in `deliverables/`. Either way
+    // the bytes are copied somewhere durable first: the worktree is torn down,
+    // and an artifact that points into a deleted directory is not an artifact.
+    //
+    // Best-effort throughout: the session is already recorded, and a file that
+    // cannot be read must not undo that.
+    if f.session_status == "completed" {
+        let (root, inline_root) = match ctx.exec_kind {
+            ExecutionKind::Knowledge => (ctx.worktree_dir.clone(), true),
+            ExecutionKind::Code => (ctx.worktree_dir.join(DELIVERABLES_DIR), false),
+        };
+        let store = ctx
+            .state
+            .config
+            .data_dir
+            .join("artifacts")
+            .join(&ctx.session_id);
+        let mut n = 0usize;
+        for (rel, size) in files::collect_files(&root, MAX_ARTIFACTS).await {
+            let rel_str = files::safe_relative(&rel);
+            // Control files and the inputs we placed are not deliverables.
+            if rel_str.is_empty()
+                || rel_str == MEETING_REQUEST_FILE
+                || rel_str.starts_with(&format!("{INPUTS_DIR}/"))
+                || (inline_root && rel_str.starts_with(&format!("{DELIVERABLES_DIR}/")))
+            {
+                continue;
+            }
+            let mime = files::mime_for(&rel_str);
+            // Text small enough to read stays inline, so the drawer can show it
+            // without a second request; everything else is served from disk.
+            let content = if files::is_texty(mime) && size <= MAX_INLINE_BYTES {
+                tokio::fs::read_to_string(root.join(&rel)).await.ok()
+            } else {
+                None
+            };
+            let stored = store.join(&rel_str);
+            let copied = async {
+                tokio::fs::create_dir_all(stored.parent()?).await.ok()?;
+                tokio::fs::copy(root.join(&rel), &stored).await.ok()
+            }
+            .await
+            .is_some();
+            if !copied && content.is_none() {
+                continue; // nothing survives of this one; do not record a lie
+            }
+            sqlx::query(
+                "INSERT INTO task_artifacts
+                 (id, task_id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at)
+                 VALUES (?, ?, ?, 'document', ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&ctx.task_id)
+            .bind(&ctx.session_id)
+            .bind(&rel_str)
+            .bind(mime)
+            .bind(&content)
+            .bind(copied.then(|| stored.to_string_lossy().into_owned()))
+            .bind(size as i64)
+            .bind(&rel_str)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            audit::append(
+                &mut tx,
+                Some(&ctx.company_id),
+                Some(&ctx.task_id),
+                event_kind::ARTIFACT_CREATED,
+                &json!({ "session_id": ctx.session_id, "title": rel_str, "mime": mime, "size_bytes": size }),
+            )
+            .await?;
+            n += 1;
+        }
+        // A knowledge run must leave something in the drawer even when the
+        // agent wrote no file — the raw output is better than an empty panel.
+        // A code run that produced only a diff is complete without one.
+        if n == 0 && ctx.exec_kind == ExecutionKind::Knowledge {
+            sqlx::query(
+                "INSERT INTO task_artifacts
+                 (id, task_id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at)
+                 VALUES (?, ?, ?, 'document', 'Run output', 'text/plain', ?, NULL, ?, NULL, ?)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&ctx.task_id)
+            .bind(&ctx.session_id)
+            .bind(&f.output)
+            .bind(f.output.len() as i64)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            audit::append(
+                &mut tx,
+                Some(&ctx.company_id),
+                Some(&ctx.task_id),
+                event_kind::ARTIFACT_CREATED,
+                &json!({ "session_id": ctx.session_id, "title": "Run output" }),
+            )
+            .await?;
+        }
+    }
+
     // Cost capture: the Claude Code CLI (and our stubs) print a final JSON
     // object with total_cost_usd and usage. Missing/unparseable cost is not
     // an error — the session already carries the full output.
@@ -719,6 +1213,36 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     tx.commit().await?;
     ctx.state.notify(&ctx.company_id);
 
+    // Collaboration (ADR-0020): while working, the agent may have hit a call it
+    // should not make alone and left a MEETING_REQUEST.json behind. Raising it
+    // notifies the human and waits for approval — nobody meets on their own.
+    // Best-effort: a malformed request never fails an otherwise done session.
+    let request_path = ctx.worktree_dir.join(MEETING_REQUEST_FILE);
+    if let Ok(text) = tokio::fs::read_to_string(&request_path).await {
+        // Remove it first, so it never lands in the diff or a resumed run.
+        let _ = tokio::fs::remove_file(&request_path).await;
+        match serde_json::from_str::<Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(crate::meeting::Request::from_json)
+        {
+            Some(req) => {
+                if let Err(e) =
+                    crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req).await
+                {
+                    eprintln!(
+                        "meeting requested by session {} refused: {e}",
+                        ctx.session_id
+                    );
+                }
+            }
+            None => eprintln!(
+                "session {} left an unreadable {MEETING_REQUEST_FILE}",
+                ctx.session_id
+            ),
+        }
+    }
+
     // Record what the organization just learned. Best-effort; never fatal.
     if f.session_status == "completed" {
         ctx.state
@@ -739,12 +1263,12 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     Ok(())
 }
 
-struct ParsedCost {
-    model: String,
-    input_tokens: i64,
-    cached_input_tokens: i64,
-    output_tokens: i64,
-    cost_cents: i64,
+pub(crate) struct ParsedCost {
+    pub model: String,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_cents: i64,
 }
 
 fn last_json_object(output: &str) -> Option<Value> {
@@ -770,7 +1294,7 @@ fn parse_adapter_session_id(output: &str) -> Option<String> {
 
 /// Find the last line of output that is a JSON object carrying
 /// `total_cost_usd`, and extract cost + usage from it.
-fn parse_cost(output: &str) -> Option<ParsedCost> {
+pub(crate) fn parse_cost(output: &str) -> Option<ParsedCost> {
     let v = last_json_object(output)?;
     let usd = v.get("total_cost_usd").and_then(Value::as_f64)?;
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));

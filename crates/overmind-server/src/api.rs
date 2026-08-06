@@ -1,43 +1,82 @@
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::{AgentTraits, TaskStatus, TraitsPatch, event_kind};
+use crate::domain::{AgentTraits, DomainPatch, TaskStatus, TraitsPatch, event_kind};
 
 /// The full application: JSON API under `/api`, the live-update WebSocket at
 /// `/ws`, and (when built) the SPA served at the root with history fallback.
 pub fn app(state: AppState) -> Router {
-    let mut router = Router::new()
-        .nest("/api", api_router())
-        .route("/ws", get(crate::ws::handler));
+    let mut router = Router::new().nest("/api", api_router()).route(
+        "/ws",
+        get(crate::ws::handler).layer(axum::middleware::from_fn(crate::ws::guard_origin)),
+    );
 
     // Serve the built frontend if present; unknown paths fall back to
     // index.html so client-side routing works. Absent in API-only/dev mode
     // (Vite's dev server proxies /api and /ws to us instead).
+    // CORS is a **development-only** affordance, and deliberately absent in
+    // production. Overmind has no authentication and its API starts tasks that
+    // run a CLI on this machine, so running "only on localhost" is not the
+    // protection it sounds like: the browser is the attack surface, not the
+    // network. With a permissive policy, any page you happen to have open can
+    // POST to 127.0.0.1:7070 and start a task here.
+    //
+    // Serving the SPA ourselves means the UI is same-origin and needs no CORS
+    // at all; without the layer, a cross-origin JSON request fails its
+    // preflight and the browser refuses it. In dev the UI lives on Vite's
+    // origin, so we allow exactly that one.
+    //
+    // If you ever "fix a CORS error" by widening this, put authentication in
+    // first (M10).
     if state.config.web_dir.is_dir() {
         let index = state.config.web_dir.join("index.html");
         router = router.fallback_service(
             tower_http::services::ServeDir::new(&state.config.web_dir)
                 .fallback(tower_http::services::ServeFile::new(index)),
         );
+    } else {
+        use tower_http::cors::{Any, CorsLayer};
+        let dev_origins = [
+            "http://localhost:5173".parse().expect("static origin"),
+            "http://127.0.0.1:5173".parse().expect("static origin"),
+        ];
+        router = router.layer(
+            CorsLayer::new()
+                .allow_origin(dev_origins)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
     }
 
+    // Uploads are the point of M17, and axum's 2 MB default is under the size
+    // of an ordinary scanned PDF — small enough that "attach anything" would
+    // have failed on the first real file. 128 MB is chosen against what a
+    // person plausibly hands an agent (a dataset, a recording, a design file),
+    // not against what the machine can take.
     router
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state)
 }
+
+/// The largest single upload accepted. See the note in [`app`].
+pub const MAX_UPLOAD_BYTES: usize = 128 * 1024 * 1024;
 
 fn api_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/companies", post(create_company).get(list_companies))
         .route("/archetypes", get(list_archetypes))
+        .route("/domains", get(list_domains))
+        .route("/models", get(list_models))
+        .route("/companies/{company_id}/language", post(set_language))
+        .route("/languages", get(list_languages))
         .route(
             "/companies/{company_id}/agents",
             post(hire_agent).get(list_agents),
@@ -50,11 +89,58 @@ fn api_router() -> Router<AppState> {
             "/agents/{agent_id}/approval-gate",
             post(set_requires_approval),
         )
+        .route("/agents/{agent_id}/budget", post(set_agent_budget))
         .route("/agents/{agent_id}/revisions", get(list_revisions))
         .route("/agents/{agent_id}/rollback", post(rollback_agent))
         .route("/companies/{company_id}/approvals", get(list_approvals))
         .route("/approvals/{approval_id}/decision", post(decide_approval))
         .route("/companies/{company_id}/budget", get(budget_summary))
+        .route(
+            "/companies/{company_id}/agents/{agent_id}/conversation",
+            get(get_conversation),
+        )
+        .route(
+            "/companies/{company_id}/agents/{agent_id}/conversation/messages",
+            post(post_message),
+        )
+        .route(
+            "/companies/{company_id}/agents/{agent_id}/conversation/attachments",
+            post(upload_attachment),
+        )
+        .route(
+            "/companies/{company_id}/conversation/attachments/{attachment_id}",
+            get(download_attachment),
+        )
+        .route(
+            "/companies/{company_id}/meetings",
+            post(convene_meeting).get(list_meetings),
+        )
+        .route("/meetings/{meeting_id}", get(get_meeting))
+        .route(
+            "/companies/{company_id}/meetings/{meeting_id}/resume",
+            post(resume_meeting),
+        )
+        .route(
+            "/companies/{company_id}/org-proposals",
+            get(list_org_proposals),
+        )
+        .route("/org-proposals/{proposal_id}", get(get_org_proposal))
+        .route(
+            "/org-proposals/{proposal_id}/members/{member_id}",
+            post(set_member_excluded),
+        )
+        .route(
+            "/companies/{company_id}/notifications",
+            get(list_notifications),
+        )
+        .route(
+            "/companies/{company_id}/notifications/read",
+            post(read_all_notifications),
+        )
+        .route(
+            "/notifications/{notification_id}/read",
+            post(read_notification),
+        )
         .route(
             "/companies/{company_id}/projects",
             post(create_project).get(list_projects),
@@ -71,6 +157,16 @@ fn api_router() -> Router<AppState> {
         .route("/tasks/{task_id}/transition", post(transition_task))
         .route("/tasks/{task_id}/start", post(start_task))
         .route("/tasks/{task_id}/sessions", get(list_task_sessions))
+        .route("/tasks/{task_id}/artifacts", get(list_task_artifacts))
+        .route(
+            "/tasks/{task_id}/attachments",
+            post(upload_task_attachment).get(list_task_attachments),
+        )
+        .route(
+            "/tasks/{task_id}/attachments/{attachment_id}",
+            delete(remove_task_attachment),
+        )
+        .route("/artifacts/{artifact_id}/download", get(download_artifact))
         .route("/agents/{agent_id}/wakeup", post(request_wakeup))
         .route("/sessions/{session_id}", get(get_session))
         .route("/sessions/{session_id}/diff", get(get_session_diff))
@@ -112,6 +208,24 @@ impl From<crate::runner::RunnerError> for ApiError {
             RunnerError::OverBudget => ApiError::Blocked("agent is over its monthly budget".into()),
             RunnerError::Git(msg) => ApiError::Internal(msg.into()),
             RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
+        }
+    }
+}
+
+impl From<crate::ceo::CeoError> for ApiError {
+    fn from(e: crate::ceo::CeoError) -> Self {
+        use crate::ceo::CeoError;
+        match e {
+            CeoError::NotFound(what) => ApiError::NotFound(what),
+            CeoError::Invalid(msg) => ApiError::Invalid(msg),
+            // Over budget is a conflict with the world's current state, not a
+            // malformed request — the same shape as a refused task checkout.
+            CeoError::OverBudget(check) => ApiError::Conflict(format!(
+                "monthly budget reached: {} of {} spent",
+                crate::governance::euros(check.spent + check.reserved),
+                crate::governance::euros(check.cap),
+            )),
+            CeoError::Db(e) => ApiError::Internal(Box::new(e)),
         }
     }
 }
@@ -202,22 +316,52 @@ async fn create_company(
         &json!({ "name": req.name.trim() }),
     )
     .await?;
+
+    // A company is never empty (M15). It is founded with a CEO — the org
+    // leader (`reports_to` NULL, ADR-0019), on the strongest model, allowed to
+    // take on anything within its budget. You can talk to it from the first
+    // second and have it build the rest of the team, or ignore it and hire
+    // everyone yourself.
+    let ceo = hire(
+        &mut tx,
+        &id,
+        &HireAgent {
+            name: crate::db::random_ceo_name().to_string(),
+            archetype: crate::db::CEO_ARCHETYPE.to_string(),
+            // The leader is not a specialist in any one field (ADR-0021).
+            domain: None,
+            traits: TraitsPatch::default(),
+            custom_brief: None,
+            title: Some("CEO".to_string()),
+            reports_to: None,
+        },
+    )
+    .await?;
+
     tx.commit().await?;
     state.notify(&id);
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": id, "name": req.name.trim(), "created_at": created_at })),
+        Json(json!({
+            "id": id,
+            "name": req.name.trim(),
+            "language": crate::i18n::DEFAULT,
+            "created_at": created_at,
+            "ceo": ceo,
+        })),
     ))
 }
 
 async fn list_companies(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String, String)> =
-        sqlx::query_as("SELECT id, name, created_at FROM companies ORDER BY created_at")
+    let rows: Vec<(String, String, String, String)> =
+        sqlx::query_as("SELECT id, name, language, created_at FROM companies ORDER BY created_at")
             .fetch_all(&state.pool)
             .await?;
     let companies: Vec<Value> = rows
         .into_iter()
-        .map(|(id, name, created_at)| json!({ "id": id, "name": name, "created_at": created_at }))
+        .map(|(id, name, language, created_at)| {
+            json!({ "id": id, "name": name, "language": language, "created_at": created_at })
+        })
         .collect();
     Ok(Json(json!({ "companies": companies })))
 }
@@ -246,22 +390,74 @@ async fn list_archetypes(State(state): State<AppState>) -> Result<Json<Value>, A
     Ok(Json(json!({ "archetypes": archetypes })))
 }
 
+/// The domain catalog — the second axis of characterization (ADR-0021).
+async fn list_domains(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, slug, name, description, traits_patch FROM domains ORDER BY slug",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let domains = rows
+        .into_iter()
+        .map(|(id, slug, name, description, patch)| {
+            let patch: Value = serde_json::from_str(&patch)?;
+            Ok(json!({
+                "id": id,
+                "slug": slug,
+                "name": name,
+                "description": description,
+                "traits_patch": patch,
+            }))
+        })
+        .collect::<Result<Vec<Value>, serde_json::Error>>()?;
+    Ok(Json(json!({ "domains": domains })))
+}
+
+/// The models an agent may run on. The hire dialog offered three strings that
+/// were not model identifiers at all until ADR-0021; it now reads this.
+async fn list_models() -> Json<Value> {
+    Json(json!({ "models": crate::model::catalog() }))
+}
+
+/// Refuse a characterization the server cannot honour, at the boundary where it
+/// enters rather than at the prompt where it would finally break — the rule
+/// M16 already applies to language codes (ADR-0021).
+fn validate_traits(traits: &AgentTraits) -> Result<(), ApiError> {
+    if !crate::model::is_known(&traits.model) {
+        return Err(ApiError::Invalid(format!(
+            "unknown model `{}`",
+            traits.model
+        )));
+    }
+    if traits.multimodal && !crate::model::supports_vision(&traits.model) {
+        return Err(ApiError::Invalid(format!(
+            "`{}` cannot read images, so this agent cannot be characterized as multimodal",
+            traits.model
+        )));
+    }
+    Ok(())
+}
+
 // ---------- agents ----------
 
 #[derive(Deserialize)]
-struct HireAgent {
-    name: String,
-    /// Archetype slug (UX Level 1 "pick").
-    archetype: String,
-    /// Structured overrides on the archetype defaults (UX Level 2 "tune").
+pub(crate) struct HireAgent {
+    pub name: String,
+    /// Archetype slug — the *function* (UX Level 1 "pick").
+    pub archetype: String,
+    /// Domain slug — the *field* the function is applied in (ADR-0021).
+    /// `None` means the general domain, which adds nothing.
+    pub domain: Option<String>,
+    /// Structured overrides on the composed defaults (UX Level 2 "tune").
     #[serde(default)]
-    traits: TraitsPatch,
+    pub traits: TraitsPatch,
     /// Free-form additions (UX Level 3 "expert") — additive only.
-    custom_brief: Option<String>,
+    pub custom_brief: Option<String>,
     /// Free-text job title, e.g. "Senior Backend Engineer" (org chart).
-    title: Option<String>,
+    pub title: Option<String>,
     /// The agent this one reports to (must be an agent in the same company).
-    reports_to: Option<String>,
+    /// `None` means "under the org leader" — an org has exactly one root.
+    pub reports_to: Option<String>,
 }
 
 async fn hire_agent(
@@ -269,11 +465,7 @@ async fn hire_agent(
     Path(company_id): Path<String>,
     Json(req): Json<HireAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if req.name.trim().is_empty() {
-        return Err(ApiError::Invalid("agent name must not be empty".into()));
-    }
     let mut tx = state.pool.begin().await?;
-
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
         .fetch_optional(&mut *tx)
@@ -281,7 +473,24 @@ async fn hire_agent(
     if company.is_none() {
         return Err(ApiError::NotFound("company"));
     }
+    let hired = hire(&mut tx, &company_id, &req).await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok((StatusCode::CREATED, Json(hired)))
+}
 
+/// Hire one agent inside an open transaction, and return the row as the API
+/// shapes it. Shared by the endpoint, the founding CEO (M15) and — later — the
+/// CEO's proposed organization, so all three produce identical records:
+/// archetype defaults + patch, first config revision, audit event.
+pub(crate) async fn hire(
+    tx: &mut sqlx::SqliteConnection,
+    company_id: &str,
+    req: &HireAgent,
+) -> Result<Value, ApiError> {
+    if req.name.trim().is_empty() {
+        return Err(ApiError::Invalid("agent name must not be empty".into()));
+    }
     let archetype: Option<(String, String)> =
         sqlx::query_as("SELECT id, default_traits FROM archetypes WHERE slug = ?")
             .bind(&req.archetype)
@@ -291,22 +500,57 @@ async fn hire_agent(
         return Err(ApiError::NotFound("archetype"));
     };
 
+    // The field the function is applied in (ADR-0021). Unknown is a 404 for
+    // the same reason an unknown archetype is: a characterization we cannot
+    // resolve is worse than a refused hire.
+    let domain_slug = req.domain.as_deref().unwrap_or(crate::db::GENERAL_DOMAIN);
+    let domain: Option<(String, String)> =
+        sqlx::query_as("SELECT id, traits_patch FROM domains WHERE slug = ?")
+            .bind(domain_slug)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((domain_id, domain_patch)) = domain else {
+        return Err(ApiError::NotFound("domain"));
+    };
+    let domain_patch: DomainPatch = serde_json::from_str(&domain_patch).unwrap_or_default();
+
+    // Most general to most specific: the function's defaults, what the field
+    // adds, then what you tuned by hand.
     let defaults: AgentTraits = serde_json::from_str(&default_traits)?;
-    let traits = defaults.apply(req.traits);
+    let traits = defaults
+        .with_domain(&domain_patch)
+        .apply(req.traits.clone());
+    validate_traits(&traits)?;
     let traits_json = serde_json::to_string(&traits)?;
 
     // A manager, if given, must be an existing agent in this company.
-    if let Some(mgr) = &req.reports_to {
-        let ok: Option<(String,)> =
-            sqlx::query_as("SELECT id FROM agents WHERE id = ? AND company_id = ?")
-                .bind(mgr)
-                .bind(&company_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-        if ok.is_none() {
-            return Err(ApiError::NotFound("manager agent"));
+    // If none is given, the new hire reports to the org leader — an
+    // organization has one root (ADR-0019 reads the leader as `reports_to IS
+    // NULL`), so defaulting to "no manager" would quietly create a second one.
+    // Only the founding CEO itself is allowed to have no manager.
+    let reports_to: Option<String> = match &req.reports_to {
+        Some(mgr) => {
+            let ok: Option<(String,)> =
+                sqlx::query_as("SELECT id FROM agents WHERE id = ? AND company_id = ?")
+                    .bind(mgr)
+                    .bind(company_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if ok.is_none() {
+                return Err(ApiError::NotFound("manager agent"));
+            }
+            Some(mgr.clone())
         }
-    }
+        None => sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM agents
+             WHERE company_id = ? AND status = 'active' AND reports_to IS NULL
+             ORDER BY created_at LIMIT 1",
+        )
+        .bind(company_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(|(id,)| id),
+    };
     let title = req
         .title
         .as_deref()
@@ -315,17 +559,18 @@ async fn hire_agent(
 
     let (id, created_at) = (new_id(), now());
     sqlx::query(
-        "INSERT INTO agents (id, company_id, archetype_id, name, traits, custom_brief, title, reports_to, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+        "INSERT INTO agents (id, company_id, archetype_id, domain_id, name, traits, custom_brief, title, reports_to, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .bind(&id)
-    .bind(&company_id)
+    .bind(company_id)
     .bind(&archetype_id)
+    .bind(&domain_id)
     .bind(req.name.trim())
     .bind(&traits_json)
     .bind(&req.custom_brief)
     .bind(title)
-    .bind(&req.reports_to)
+    .bind(&reports_to)
     .bind(&created_at)
     .execute(&mut *tx)
     .await?;
@@ -333,45 +578,41 @@ async fn hire_agent(
     let snapshot = crate::governance::agent_snapshot(
         req.name.trim(),
         title,
-        req.reports_to.as_deref(),
+        reports_to.as_deref(),
         &serde_json::to_value(&traits)?,
         req.custom_brief.as_deref(),
         false,
     );
-    crate::governance::record_revision(&mut tx, &company_id, &id, "hire", &json!({}), &snapshot)
-        .await?;
+    crate::governance::record_revision(tx, company_id, &id, "hire", &json!({}), &snapshot).await?;
     audit::append(
-        &mut tx,
-        Some(&company_id),
+        tx,
+        Some(company_id),
         None,
         event_kind::AGENT_HIRED,
         &json!({
             "agent_id": id,
             "name": req.name.trim(),
             "archetype": req.archetype,
+            "domain": domain_slug,
             "title": title,
-            "reports_to": req.reports_to,
+            "reports_to": reports_to,
             "traits": serde_json::to_value(&traits)?,
         }),
     )
     .await?;
-    tx.commit().await?;
-    state.notify(&company_id);
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
+    Ok(json!({
             "id": id,
             "company_id": company_id,
             "name": req.name.trim(),
             "archetype": req.archetype,
+            "domain": domain_slug,
             "traits": serde_json::to_value(&traits)?,
             "custom_brief": req.custom_brief,
             "title": title,
-            "reports_to": req.reports_to,
+            "reports_to": reports_to,
             "status": "active",
             "created_at": created_at,
-        })),
-    ))
+    }))
 }
 
 /// (id, name, traits, custom_brief, status, title, reports_to, requires_approval, archetype slug)
@@ -385,6 +626,7 @@ type AgentRow = (
     Option<String>,
     i64,
     String,
+    Option<String>,
 );
 
 async fn list_agents(
@@ -392,8 +634,10 @@ async fn list_agents(
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<AgentRow> = sqlx::query_as(
-        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, a.requires_approval, ar.slug
-         FROM agents a JOIN archetypes ar ON ar.id = a.archetype_id
+        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, a.requires_approval, ar.slug, d.slug
+         FROM agents a
+         JOIN archetypes ar ON ar.id = a.archetype_id
+         LEFT JOIN domains d ON d.id = a.domain_id
          WHERE a.company_id = ? ORDER BY a.created_at",
     )
     .bind(&company_id)
@@ -412,12 +656,14 @@ async fn list_agents(
                 reports_to,
                 requires_approval,
                 archetype,
+                domain,
             )| {
                 let traits: Value = serde_json::from_str(&traits)?;
                 Ok(json!({
                     "id": id,
                     "name": name,
                     "archetype": archetype,
+                    "domain": domain,
                     "traits": traits,
                     "custom_brief": custom_brief,
                     "title": title,
@@ -678,6 +924,8 @@ struct CreateTask {
     description: String,
     goal_id: Option<String>,
     priority: Option<String>,
+    /// `code` (default) or `knowledge` (ADR-0017).
+    execution_kind: Option<String>,
 }
 
 async fn create_task(
@@ -691,6 +939,12 @@ async fn create_task(
     let priority = req.priority.as_deref().unwrap_or("medium");
     if !matches!(priority, "low" | "medium" | "high" | "urgent") {
         return Err(ApiError::Invalid(format!("unknown priority '{priority}'")));
+    }
+    let execution_kind = req.execution_kind.as_deref().unwrap_or("code");
+    if crate::domain::ExecutionKind::parse(execution_kind).is_none() {
+        return Err(ApiError::Invalid(format!(
+            "unknown execution_kind '{execution_kind}'"
+        )));
     }
     let mut tx = state.pool.begin().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
@@ -714,8 +968,8 @@ async fn create_task(
     }
     let (id, created_at) = (new_id(), now());
     sqlx::query(
-        "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'backlog', ?, ?, ?)",
+        "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'backlog', ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&company_id)
@@ -723,6 +977,7 @@ async fn create_task(
     .bind(req.title.trim())
     .bind(&req.description)
     .bind(priority)
+    .bind(execution_kind)
     .bind(&created_at)
     .bind(&created_at)
     .execute(&mut *tx)
@@ -732,7 +987,7 @@ async fn create_task(
         Some(&company_id),
         Some(&id),
         event_kind::TASK_CREATED,
-        &json!({ "title": req.title.trim(), "goal_id": req.goal_id, "priority": priority }),
+        &json!({ "title": req.title.trim(), "goal_id": req.goal_id, "priority": priority, "execution_kind": execution_kind }),
     )
     .await?;
     tx.commit().await?;
@@ -746,12 +1001,13 @@ async fn create_task(
             "title": req.title.trim(),
             "status": "backlog",
             "priority": priority,
+            "execution_kind": execution_kind,
             "created_at": created_at,
         })),
     ))
 }
 
-/// (id, goal_id, title, status, priority, assignee_agent_id, updated_at)
+/// (id, goal_id, title, status, priority, assignee_agent_id, execution_kind, updated_at)
 type TaskRow = (
     String,
     Option<String>,
@@ -760,6 +1016,7 @@ type TaskRow = (
     String,
     Option<String>,
     String,
+    String,
 );
 
 async fn list_tasks(
@@ -767,7 +1024,7 @@ async fn list_tasks(
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<TaskRow> = sqlx::query_as(
-        "SELECT id, goal_id, title, status, priority, assignee_agent_id, updated_at
+        "SELECT id, goal_id, title, status, priority, assignee_agent_id, execution_kind, updated_at
          FROM tasks WHERE company_id = ? ORDER BY created_at",
     )
     .bind(&company_id)
@@ -776,7 +1033,7 @@ async fn list_tasks(
     let tasks: Vec<Value> = rows
         .into_iter()
         .map(
-            |(id, goal_id, title, status, priority, assignee, updated_at)| {
+            |(id, goal_id, title, status, priority, assignee, execution_kind, updated_at)| {
                 json!({
                     "id": id,
                     "goal_id": goal_id,
@@ -784,6 +1041,7 @@ async fn list_tasks(
                     "status": status,
                     "priority": priority,
                     "assignee_agent_id": assignee,
+                    "execution_kind": execution_kind,
                     "updated_at": updated_at,
                 })
             },
@@ -1173,6 +1431,937 @@ async fn list_task_sessions(
     Ok(Json(json!({ "sessions": sessions })))
 }
 
+/// (id, session_id, kind, title, mime, content, file_path, created_at)
+/// (id, session_id, kind, title, mime, content, file_path, size_bytes,
+/// relative_path, created_at)
+type TaskArtifactRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    String,
+);
+
+/// Artifacts a task's knowledge run(s) produced (ADR-0017), newest first. The
+/// drawer shows these instead of a diff for `knowledge` tasks.
+async fn list_task_artifacts(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<TaskArtifactRow> = sqlx::query_as(
+        "SELECT id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at
+         FROM task_artifacts WHERE task_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&task_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let artifacts: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                session_id,
+                kind,
+                title,
+                mime,
+                content,
+                file_path,
+                size_bytes,
+                relative_path,
+                created_at,
+            )| {
+                json!({
+                    "id": id,
+                    "session_id": session_id,
+                    "kind": kind,
+                    "title": title,
+                    "mime": mime,
+                    "content": content,
+                    // Whether the bytes can be fetched — the client shows a
+                    // download only when there is something behind it.
+                    "downloadable": file_path.is_some(),
+                    "size_bytes": size_bytes,
+                    "relative_path": relative_path,
+                    "created_at": created_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({ "artifacts": artifacts })))
+}
+
+// ---------- conversation: talk to the CEO (M12 / ADR-0018) ----------
+
+#[derive(Deserialize)]
+struct PostMessage {
+    content: String,
+    /// Ids of attachments already uploaded to this thread (see upload_attachment).
+    #[serde(default)]
+    attachment_ids: Vec<String>,
+}
+
+/// Post a user message to an agent's thread. The agent's reply and any tasks it
+/// opens arrive asynchronously (announced over `/ws`).
+async fn post_message(
+    State(state): State<AppState>,
+    Path((company_id, agent_id)): Path<(String, String)>,
+    Json(req): Json<PostMessage>,
+) -> Result<impl IntoResponse, ApiError> {
+    let conversation_id = crate::ceo::post_user_message(
+        &state,
+        &company_id,
+        &agent_id,
+        &req.content,
+        &req.attachment_ids,
+    )
+    .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "conversation_id": conversation_id })),
+    ))
+}
+
+/// Upload a file/image to an agent's thread. Multipart with a `file` part.
+/// Returns the attachment id to include in the next `post_message`.
+async fn upload_attachment(
+    State(state): State<AppState>,
+    Path((company_id, agent_id)): Path<(String, String)>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut file: Option<(String, String, Vec<u8>)> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::Invalid(format!("malformed upload: {e}")))?
+    {
+        if field.name() == Some("file") {
+            let filename = field.file_name().unwrap_or("file").to_string();
+            let mime = field
+                .content_type()
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|e| ApiError::Invalid(format!("bad file: {e}")))?
+                .to_vec();
+            file = Some((filename, mime, bytes));
+        }
+    }
+    let (filename, mime, bytes) =
+        file.ok_or_else(|| ApiError::Invalid("a file part is required".into()))?;
+    let meta =
+        crate::ceo::store_attachment(&state, &company_id, &agent_id, &filename, &mime, &bytes)
+            .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": meta.id,
+            "filename": meta.filename,
+            "mime": meta.mime,
+            "size_bytes": meta.size_bytes,
+        })),
+    ))
+}
+
+/// Serve an attachment's bytes (for the UI to render images / offer downloads).
+async fn download_attachment(
+    State(state): State<AppState>,
+    Path((company_id, attachment_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT a.filename, a.mime, a.path FROM attachments a
+         JOIN conversations c ON c.id = a.conversation_id
+         WHERE a.id = ? AND c.company_id = ?",
+    )
+    .bind(&attachment_id)
+    .bind(&company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((filename, mime, path)) = row else {
+        return Err(ApiError::NotFound("attachment"));
+    };
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError::NotFound("attachment file"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    ))
+}
+
+/// Serve an artifact's bytes — the only way anything non-text a run produced
+/// gets off this machine and into the user's hands (M17).
+///
+/// `attachment` (not `inline`): an artifact is a deliverable, and the browser
+/// should save it rather than try to display a spreadsheet. The one exception
+/// is an image, which the drawer renders from this same URL.
+async fn download_artifact(
+    State(state): State<AppState>,
+    Path(artifact_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row: Option<(String, String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT title, mime, file_path, content FROM task_artifacts WHERE id = ?")
+            .bind(&artifact_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((title, mime, file_path, content)) = row else {
+        return Err(ApiError::NotFound("artifact"));
+    };
+    // Prefer the file; fall back to the inline text, so an artifact that was
+    // only ever stored as content is still downloadable.
+    let bytes = match file_path {
+        Some(p) => tokio::fs::read(&p)
+            .await
+            .map_err(|_| ApiError::NotFound("artifact file"))?,
+        None => content
+            .ok_or(ApiError::NotFound("artifact bytes"))?
+            .into_bytes(),
+    };
+    let filename = crate::files::safe_name(&title);
+    let disposition = if mime.starts_with("image/") {
+        format!("inline; filename=\"{filename}\"")
+    } else {
+        format!("attachment; filename=\"{filename}\"")
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    ))
+}
+
+/// Attach a file to a task, so an agent that picks it up gets it too (M17).
+/// Multipart with a `file` part, same shape as the conversation upload.
+async fn upload_task_attachment(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    multipart: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    let exists: Option<(String,)> = sqlx::query_as("SELECT company_id FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((company_id,)) = exists else {
+        return Err(ApiError::NotFound("task"));
+    };
+    let (filename, mime, bytes) = read_upload(multipart).await?;
+    let name = crate::files::safe_name(&filename);
+    // Trust the extension over the browser's content type: a browser reports
+    // `application/octet-stream` for anything it does not recognise, and the
+    // extension is what the agent will see anyway.
+    let mime = match crate::files::mime_for(&name) {
+        "application/octet-stream" => mime,
+        known => known.to_string(),
+    };
+    let id = uuid::Uuid::now_v7().to_string();
+    let dir = state.config.data_dir.join("attachments").join(&task_id);
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| ApiError::Invalid(format!("cannot create attachments dir: {e}")))?;
+    let path = dir.join(format!("{id}_{name}"));
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| ApiError::Invalid(format!("cannot write attachment: {e}")))?;
+    let size = bytes.len() as i64;
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO attachments
+         (id, conversation_id, task_id, message_id, origin, filename, mime, size_bytes, path, created_at)
+         VALUES (?, NULL, ?, NULL, 'user', ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&task_id)
+    .bind(&name)
+    .bind(&mime)
+    .bind(size)
+    .bind(path.to_string_lossy().as_ref())
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    crate::audit::append(
+        &mut tx,
+        Some(&company_id),
+        Some(&task_id),
+        crate::domain::event_kind::ATTACHMENT_ADDED,
+        &json!({ "task_id": task_id, "attachment_id": id, "filename": name, "mime": mime }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({
+        "id": id, "filename": name, "mime": mime, "size_bytes": size,
+    })))
+}
+
+/// Files attached to a task — what an agent picking it up will be handed.
+async fn list_task_attachments(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT id, filename, mime, size_bytes, created_at FROM attachments
+         WHERE task_id = ? ORDER BY created_at",
+    )
+    .bind(&task_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let attachments: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, filename, mime, size_bytes, created_at)| {
+            json!({
+                "id": id, "filename": filename, "mime": mime,
+                "size_bytes": size_bytes, "created_at": created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "attachments": attachments })))
+}
+
+/// Detach a file from a task. The row goes; the bytes on disk are left for the
+/// audit trail to point at, and cost nothing to keep.
+async fn remove_task_attachment(
+    State(state): State<AppState>,
+    Path((task_id, attachment_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let done = sqlx::query("DELETE FROM attachments WHERE id = ? AND task_id = ?")
+        .bind(&attachment_id)
+        .bind(&task_id)
+        .execute(&state.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("attachment"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// The single `file` part of a multipart upload.
+async fn read_upload(mut multipart: Multipart) -> Result<(String, String, Vec<u8>), ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::Invalid(format!("malformed upload: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().unwrap_or("file").to_string();
+        let mime = field
+            .content_type()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::Invalid(format!("bad file: {e}")))?
+            .to_vec();
+        if bytes.is_empty() {
+            return Err(ApiError::Invalid("attachment is empty".into()));
+        }
+        return Ok((filename, mime, bytes));
+    }
+    Err(ApiError::Invalid("no file part in upload".into()))
+}
+
+/// An agent's thread and its messages (null until the first message).
+async fn get_conversation(
+    State(state): State<AppState>,
+    Path((company_id, agent_id)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let convo: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, agent_id, title, created_at FROM conversations WHERE company_id = ? AND agent_id = ?",
+    )
+    .bind(&company_id)
+    .bind(&agent_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((id, agent_id, title, created_at)) = convo else {
+        return Ok(Json(json!({ "conversation": null, "messages": [] })));
+    };
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT id, role, content, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+    // Attachments, grouped by their message.
+    let atts: Vec<(String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, message_id, filename, mime, size_bytes FROM attachments
+         WHERE conversation_id = ? AND message_id IS NOT NULL ORDER BY created_at",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut by_msg: std::collections::HashMap<String, Vec<Value>> =
+        std::collections::HashMap::new();
+    for (aid, mid, fname, mime, size) in atts {
+        by_msg.entry(mid).or_default().push(json!({
+            "id": aid, "filename": fname, "mime": mime, "size_bytes": size,
+        }));
+    }
+    let messages: Vec<Value> = rows
+        .into_iter()
+        .map(|(mid, role, content, created)| {
+            let attachments = by_msg.remove(&mid).unwrap_or_default();
+            json!({ "id": mid, "role": role, "content": content, "created_at": created, "attachments": attachments })
+        })
+        .collect();
+    Ok(Json(json!({
+        "conversation": { "id": id, "agent_id": agent_id, "title": title, "created_at": created_at },
+        "messages": messages,
+    })))
+}
+
+// ---------- meetings: bounded deliberation (M13 / ADR-0020) ----------
+
+#[derive(Deserialize)]
+struct ConveneMeeting {
+    topic: String,
+    /// Agent ids, in speaking order. At least two.
+    participants: Vec<String>,
+    /// How many turns before the chair must close it (clamped to [1, 12]).
+    #[serde(default = "default_turn_cap")]
+    turn_cap: i64,
+}
+
+fn default_turn_cap() -> i64 {
+    6
+}
+
+/// Convene a meeting. The deliberation runs in the background; the transcript
+/// and the decision arrive as they happen (announced over `/ws`).
+async fn convene_meeting(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<ConveneMeeting>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = crate::meeting::convene(
+        &state,
+        &company_id,
+        &req.topic,
+        &req.participants,
+        req.turn_cap,
+    )
+    .await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
+}
+
+/// Pick a paused room back up (ADR-0022).
+///
+/// Runs in the background like the original deliberation: resuming can take as
+/// long as the remaining turns do, and the caller should not hold a request
+/// open for it. The room's status is the progress indicator.
+async fn resume_meeting(
+    State(state): State<AppState>,
+    Path((company_id, meeting_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Fail fast on "not paused" so the caller gets a real answer, then let the
+    // deliberation itself run detached.
+    let paused: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM meetings WHERE id = ? AND company_id = ? AND status = 'paused'",
+    )
+    .bind(&meeting_id)
+    .bind(&company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if paused.is_none() {
+        return Err(ApiError::Conflict("this meeting is not paused".into()));
+    }
+    let id = meeting_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::meeting::resume(&state, &company_id, &meeting_id).await {
+            eprintln!("resuming meeting {meeting_id} failed: {e}");
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
+}
+
+/// A company's meetings, newest first — including the ones still waiting on you.
+async fn list_meetings(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT m.id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap, m.status,
+                m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at
+         FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
+         WHERE m.company_id = ? ORDER BY m.created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let meetings: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                topic,
+                reason,
+                convener_agent_id,
+                convener_name,
+                turn_cap,
+                status,
+                decision,
+                decline_note,
+                approval_id,
+                created_at,
+                decided_at,
+            )| {
+                json!({
+                    "id": id, "topic": topic, "reason": reason,
+                    "convener_agent_id": convener_agent_id, "convener_name": convener_name,
+                    "turn_cap": turn_cap, "status": status, "decision": decision,
+                    "decline_note": decline_note, "approval_id": approval_id,
+                    "created_at": created_at, "decided_at": decided_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(json!({ "meetings": meetings })))
+}
+
+/// One meeting: who is in the room, the transcript, and the decision.
+async fn get_meeting(
+    State(state): State<AppState>,
+    Path(meeting_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type MeetingRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<MeetingRow> = sqlx::query_as(
+        "SELECT m.id, m.company_id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap,
+                m.status, m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at,
+                m.paused_note
+         FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
+         WHERE m.id = ?",
+    )
+    .bind(&meeting_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((
+        id,
+        company_id,
+        topic,
+        reason,
+        convener_agent_id,
+        convener_name,
+        turn_cap,
+        status,
+        decision,
+        decline_note,
+        approval_id,
+        created_at,
+        decided_at,
+        paused_note,
+    )) = row
+    else {
+        return Err(ApiError::NotFound("meeting"));
+    };
+    let participants: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT a.id, a.name, a.title FROM meeting_participants mp
+         JOIN agents a ON a.id = mp.agent_id
+         WHERE mp.meeting_id = ? ORDER BY mp.position",
+    )
+    .bind(&meeting_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let turns: Vec<(String, String, String, i64, String, String)> = sqlx::query_as(
+        "SELECT t.id, t.agent_id, a.name, t.ordinal, t.content, t.created_at
+         FROM meeting_turns t JOIN agents a ON a.id = t.agent_id
+         WHERE t.meeting_id = ? ORDER BY t.ordinal",
+    )
+    .bind(&meeting_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "meeting": {
+            "id": id, "company_id": company_id, "topic": topic, "reason": reason,
+            "convener_agent_id": convener_agent_id, "convener_name": convener_name,
+            "turn_cap": turn_cap, "status": status, "decision": decision,
+            "decline_note": decline_note, "approval_id": approval_id,
+            // Why the room is waiting, when it is (ADR-0022).
+            "paused_note": paused_note,
+            "created_at": created_at, "decided_at": decided_at,
+        },
+        "participants": participants.into_iter().map(|(id, name, title)| {
+            json!({ "id": id, "name": name, "title": title })
+        }).collect::<Vec<_>>(),
+        "turns": turns.into_iter().map(|(id, agent_id, name, ordinal, content, created_at)| {
+            json!({
+                "id": id, "agent_id": agent_id, "agent_name": name,
+                "ordinal": ordinal, "content": content, "created_at": created_at,
+            })
+        }).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SetLanguage {
+    language: String,
+}
+
+/// Choose the language the company works in (M16). It governs the interface
+/// *and* what the agents write, which is why it lives here and not in the
+/// browser: a per-tab preference cannot instruct an agent.
+async fn set_language(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<SetLanguage>,
+) -> Result<Json<Value>, ApiError> {
+    if !crate::i18n::is_supported(&req.language) {
+        return Err(ApiError::Invalid(format!(
+            "unsupported language `{}`",
+            req.language
+        )));
+    }
+    let done = sqlx::query("UPDATE companies SET language = ? WHERE id = ?")
+        .bind(&req.language)
+        .bind(&company_id)
+        .execute(&state.pool)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("company"));
+    }
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": company_id, "language": req.language })))
+}
+
+/// The languages on offer, each named in its own language.
+async fn list_languages() -> Json<Value> {
+    Json(json!({
+        "languages": crate::i18n::SUPPORTED
+            .iter()
+            .map(|(code, name)| json!({ "code": code, "name": name }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+// ---------- org proposals: the CEO designs a team, you decide (M15) ----------
+
+/// The proposals of a company, newest first, each with its members.
+async fn list_org_proposals(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT p.id, p.summary, a.name, p.status, p.decline_note, p.approval_id,
+                p.created_at, p.decided_at
+         FROM org_proposals p LEFT JOIN agents a ON a.id = p.proposed_by
+         WHERE p.company_id = ? ORDER BY p.created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut proposals = Vec::new();
+    for (id, summary, by, status, note, approval_id, created_at, decided_at) in rows {
+        let members = proposal_members(&state, &id).await?;
+        proposals.push(json!({
+            "id": id, "summary": summary, "proposed_by_name": by, "status": status,
+            "decline_note": note, "approval_id": approval_id,
+            "created_at": created_at, "decided_at": decided_at,
+            "members": members,
+        }));
+    }
+    Ok(Json(json!({ "proposals": proposals })))
+}
+
+async fn get_org_proposal(
+    State(state): State<AppState>,
+    Path(proposal_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT p.id, p.summary, a.name, p.status, p.decline_note, p.approval_id,
+                p.created_at, p.decided_at
+         FROM org_proposals p LEFT JOIN agents a ON a.id = p.proposed_by
+         WHERE p.id = ?",
+    )
+    .bind(&proposal_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((id, summary, by, status, note, approval_id, created_at, decided_at)) = row else {
+        return Err(ApiError::NotFound("org proposal"));
+    };
+    let members = proposal_members(&state, &id).await?;
+    Ok(Json(json!({
+        "proposal": {
+            "id": id, "summary": summary, "proposed_by_name": by, "status": status,
+            "decline_note": note, "approval_id": approval_id,
+            "created_at": created_at, "decided_at": decided_at,
+        },
+        "members": members,
+    })))
+}
+
+/// (id, position, name, archetype, domain, title, reports_to, brief, rationale, excluded, hired)
+type ProposalMemberRow = (
+    String,
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+);
+
+async fn proposal_members(state: &AppState, proposal_id: &str) -> Result<Vec<Value>, ApiError> {
+    let rows: Vec<ProposalMemberRow> = sqlx::query_as(
+        "SELECT id, position, name, archetype, domain, title, reports_to, brief, rationale,
+                excluded, hired_agent_id
+         FROM org_proposal_members WHERE proposal_id = ? ORDER BY position",
+    )
+    .bind(proposal_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                position,
+                name,
+                archetype,
+                domain,
+                title,
+                reports_to,
+                brief,
+                rationale,
+                excluded,
+                hired,
+            )| {
+                json!({
+                    "id": id, "position": position, "name": name, "archetype": archetype,
+                    "domain": domain, "title": title, "reports_to": reports_to, "brief": brief,
+                    "rationale": rationale, "excluded": excluded != 0, "hired_agent_id": hired,
+                })
+            },
+        )
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct SetExcluded {
+    excluded: bool,
+}
+
+/// Drop a member from a proposal (or put them back) before accepting the rest.
+/// Only while it is still `proposed`: an accepted chart is history.
+async fn set_member_excluded(
+    State(state): State<AppState>,
+    Path((proposal_id, member_id)): Path<(String, String)>,
+    Json(req): Json<SetExcluded>,
+) -> Result<Json<Value>, ApiError> {
+    let status: Option<(String,)> = sqlx::query_as("SELECT status FROM org_proposals WHERE id = ?")
+        .bind(&proposal_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((status,)) = status else {
+        return Err(ApiError::NotFound("org proposal"));
+    };
+    if status != "proposed" {
+        return Err(ApiError::Conflict(format!("proposal is already {status}")));
+    }
+    let done = sqlx::query(
+        "UPDATE org_proposal_members SET excluded = ? WHERE id = ? AND proposal_id = ?",
+    )
+    .bind(i64::from(req.excluded))
+    .bind(&member_id)
+    .bind(&proposal_id)
+    .execute(&state.pool)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("proposal member"));
+    }
+    Ok(Json(json!({ "id": member_id, "excluded": req.excluded })))
+}
+
+// ---------- notifications: how the company reaches you (ADR-0020) ----------
+
+#[derive(Deserialize)]
+struct NotificationQuery {
+    /// Only what you haven't seen yet.
+    #[serde(default)]
+    unread: bool,
+    #[serde(default = "default_notification_limit")]
+    limit: i64,
+}
+
+fn default_notification_limit() -> i64 {
+    50
+}
+
+/// A company's notifications, newest first, with the unread count for the badge.
+async fn list_notifications(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Query(q): Query<NotificationQuery>,
+) -> Result<Json<Value>, ApiError> {
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+    let sql = if q.unread {
+        "SELECT id, kind, title, body, params, agent_id, subject_type, subject_id, approval_id, read_at, created_at
+         FROM notifications WHERE company_id = ? AND read_at IS NULL
+         ORDER BY created_at DESC LIMIT ?"
+    } else {
+        "SELECT id, kind, title, body, params, agent_id, subject_type, subject_id, approval_id, read_at, created_at
+         FROM notifications WHERE company_id = ? ORDER BY created_at DESC LIMIT ?"
+    };
+    let rows: Vec<Row> = sqlx::query_as(sql)
+        .bind(&company_id)
+        .bind(q.limit.clamp(1, 500))
+        .fetch_all(&state.pool)
+        .await?;
+    let (unread,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM notifications WHERE company_id = ? AND read_at IS NULL",
+    )
+    .bind(&company_id)
+    .fetch_one(&state.pool)
+    .await?;
+    let notifications: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                kind,
+                title,
+                body,
+                params,
+                agent_id,
+                subject_type,
+                subject_id,
+                approval_id,
+                read_at,
+                created_at,
+            )| {
+                json!({
+                    "id": id, "kind": kind, "title": title, "body": body,
+                    // Rows written before M16 have no params; the client falls
+                    // back to the stored title and body for those.
+                    "params": params
+                        .and_then(|p: String| serde_json::from_str::<Value>(&p).ok()),
+                    "agent_id": agent_id, "subject_type": subject_type, "subject_id": subject_id,
+                    "approval_id": approval_id, "read_at": read_at, "created_at": created_at,
+                })
+            },
+        )
+        .collect();
+    Ok(Json(
+        json!({ "notifications": notifications, "unread": unread }),
+    ))
+}
+
+/// Mark one notification read. Idempotent: the first read wins.
+async fn read_notification(
+    State(state): State<AppState>,
+    Path(notification_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT company_id FROM notifications WHERE id = ?")
+            .bind(&notification_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((company_id,)) = row else {
+        return Err(ApiError::NotFound("notification"));
+    };
+    sqlx::query("UPDATE notifications SET read_at = ? WHERE id = ? AND read_at IS NULL")
+        .bind(now())
+        .bind(&notification_id)
+        .execute(&state.pool)
+        .await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": notification_id, "read": true })))
+}
+
+/// Clear the badge: mark everything in this company read.
+async fn read_all_notifications(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let done = sqlx::query(
+        "UPDATE notifications SET read_at = ? WHERE company_id = ? AND read_at IS NULL",
+    )
+    .bind(now())
+    .bind(&company_id)
+    .execute(&state.pool)
+    .await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "read": done.rows_affected() })))
+}
+
 // ---------- governance: lifecycle, approvals, budgets, config revisions ----------
 
 /// (company_id, name, title, reports_to, traits, custom_brief, requires_approval)
@@ -1319,6 +2508,82 @@ async fn set_requires_approval(
     ))
 }
 
+#[derive(Deserialize)]
+struct SetBudget {
+    monthly_budget_cents: i64,
+}
+
+/// Raise (or lower) an agent's monthly cap.
+///
+/// ADR-0022 tells the human "raise the cap or wait for the new month" when a
+/// turn is refused — which needs somewhere to raise it. Recorded as a config
+/// revision like any other characterization change, so the change to a
+/// governance control is itself governed and roll-backable (ADR-0012).
+async fn set_agent_budget(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<SetBudget>,
+) -> Result<Json<Value>, ApiError> {
+    /// (company_id, name, traits, title, custom_brief, requires_approval)
+    type BudgetAgentRow = (String, String, String, Option<String>, Option<String>, i64);
+
+    if req.monthly_budget_cents < 0 {
+        return Err(ApiError::Invalid("a budget cannot be negative".into()));
+    }
+    let mut tx = state.pool.begin().await?;
+    let agent: Option<BudgetAgentRow> = sqlx::query_as(
+        "SELECT company_id, name, traits, title, custom_brief, requires_approval
+         FROM agents WHERE id = ?",
+    )
+    .bind(&agent_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((company_id, name, traits_json, title, brief, requires_approval)) = agent else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    let mut traits: AgentTraits = serde_json::from_str(&traits_json)?;
+    let before = serde_json::to_value(&traits)?;
+    traits.monthly_budget_cents = req.monthly_budget_cents;
+    let after = serde_json::to_value(&traits)?;
+    sqlx::query("UPDATE agents SET traits = ? WHERE id = ?")
+        .bind(serde_json::to_string(&traits)?)
+        .bind(&agent_id)
+        .execute(&mut *tx)
+        .await?;
+    let snapshot = |t: &Value| {
+        crate::governance::agent_snapshot(
+            &name,
+            title.as_deref(),
+            None,
+            t,
+            brief.as_deref(),
+            requires_approval != 0,
+        )
+    };
+    crate::governance::record_revision(
+        &mut tx,
+        &company_id,
+        &agent_id,
+        "budget",
+        &snapshot(&before),
+        &snapshot(&after),
+    )
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_REVISED,
+        &json!({ "agent_id": agent_id, "monthly_budget_cents": req.monthly_budget_cents }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(
+        json!({ "id": agent_id, "monthly_budget_cents": req.monthly_budget_cents }),
+    ))
+}
+
 /// (id, type, status, summary, decision_note, created_at, decided_at)
 type ApprovalRow = (
     String,
@@ -1426,6 +2691,33 @@ async fn decide_approval(
                 }
                 crate::runner::StartResult::ApprovalRequired { .. } => {}
             }
+        }
+    }
+    // A team the CEO drew up (M15): approving hires everyone still on the list,
+    // rejecting tells the CEO why so it does not propose the same shape again.
+    if kind == "org_proposal" {
+        let p: Value = serde_json::from_str(&payload)?;
+        if let Some(proposal_id) = p["proposal_id"].as_str() {
+            if approve {
+                let hired = crate::org::accept(&state, proposal_id).await?;
+                result["hired"] = json!(hired.len());
+            } else {
+                crate::org::reject(&state, proposal_id, req.note.as_deref()).await?;
+            }
+            result["proposal_id"] = json!(proposal_id);
+        }
+    }
+    // A meeting an agent asked for: approving opens the room, rejecting closes
+    // the request and tells the agent that raised it (ADR-0020).
+    if kind == "meeting_request" {
+        let p: Value = serde_json::from_str(&payload)?;
+        if let Some(meeting_id) = p["meeting_id"].as_str() {
+            if approve {
+                crate::meeting::approve(&state, meeting_id).await?;
+            } else {
+                crate::meeting::decline(&state, meeting_id, req.note.as_deref()).await?;
+            }
+            result["meeting_id"] = json!(meeting_id);
         }
     }
     Ok(Json(result))
@@ -1539,19 +2831,14 @@ async fn budget_summary(
             .ok()
             .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
             .unwrap_or(0);
-        let spent: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(cost_cents), 0) FROM cost_events WHERE agent_id = ? AND occurred_at >= ?",
-        )
-        .bind(&id)
-        .bind(&window)
-        .fetch_one(&state.pool)
-        .await?;
-        let reserved: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_task_sessions WHERE agent_id = ? AND status IN ('queued','running')",
-        )
-        .bind(&id)
-        .fetch_one(&state.pool)
-        .await?;
+        // Through governance, not a private copy: this view used to run its own
+        // `reserved` query, which now would not see conversational turns at all
+        // (ADR-0022) — a summary that disagrees with the gate is worse than no
+        // summary.
+        let mut conn = state.pool.acquire().await?;
+        let spent = (crate::governance::spent_cents(&mut conn, &id, &window).await?,);
+        let reserved = (crate::governance::reserved_cents(&mut conn, &id).await?,);
+        drop(conn);
         out.push(json!({
             "agent_id": id,
             "name": name,
