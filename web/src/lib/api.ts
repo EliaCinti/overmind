@@ -117,7 +117,9 @@ export interface Notification {
 /** The main surfaces of the app. */
 export type View = "chat" | "board" | "meetings" | "org";
 
-export type MeetingStatus = "requested" | "open" | "decided" | "declined" | "failed";
+export type MeetingStatus = "requested" | "open" | "decided" | "declined" | "failed"
+  /** Out of budget mid-deliberation; waiting to be resumed (ADR-0022). */
+  | "paused";
 
 /** A meeting an agent asked for (or you convened). */
 export interface Meeting {
@@ -129,6 +131,8 @@ export interface Meeting {
   turn_cap: number;
   status: MeetingStatus;
   decision: string | null;
+  /** Why the room is waiting, when it is (ADR-0022). */
+  paused_note?: string | null;
   approval_id: string | null;
   created_at: string;
   decided_at: string | null;
@@ -348,6 +352,13 @@ export const api = {
     req<{ agents: Agent[] }>("GET", `/companies/${companyId}/agents`).then((r) => r.agents),
   hireAgent: (companyId: string, body: HireAgentBody) =>
     req<Agent>("POST", `/companies/${companyId}/agents`, body),
+  /** Raise (or lower) an agent's monthly cap — what unblocks a paused room. */
+  setAgentBudget: (agentId: string, monthlyBudgetCents: number) =>
+    req<{ id: string; monthly_budget_cents: number }>("POST", `/agents/${agentId}/budget`, {
+      monthly_budget_cents: monthlyBudgetCents,
+    }),
+  resumeMeeting: (companyId: string, meetingId: string) =>
+    req<{ id: string }>("POST", `/companies/${companyId}/meetings/${meetingId}/resume`, {}),
   reassignAgent: (agentId: string, body: { reports_to?: string | null; title?: string }) =>
     req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
   pauseAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/pause`),

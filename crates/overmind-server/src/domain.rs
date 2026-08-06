@@ -307,6 +307,7 @@ pub mod event_kind {
     pub const MEETING_DECIDED: &str = "meeting.decided";
     pub const MEETING_DECLINED: &str = "meeting.declined";
     pub const MEETING_DROPPED: &str = "meeting.dropped";
+    pub const MEETING_PAUSED: &str = "meeting.paused";
     pub const ORG_PROPOSED: &str = "org.proposed";
     pub const ORG_ACCEPTED: &str = "org.accepted";
     pub const ORG_REJECTED: &str = "org.rejected";

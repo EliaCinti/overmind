@@ -175,6 +175,8 @@ export const en = {
     deliberating: "deliberating…",
     decision: "Decision",
     carried: "Everyone in the room carries this into their work",
+    resume: "Resume",
+    pausedFallback: "An agent ran out of budget. Raise its cap, then resume.",
   },
   sessionStatus: {
     running: "running",
@@ -187,6 +189,7 @@ export const en = {
     decided: "Decided",
     declined: "Declined",
     failed: "Failed",
+    paused: "Out of budget",
   },
   inbox: {
     empty:
@@ -217,6 +220,12 @@ export const en = {
     orgRejectedBodyNote: "You declined the proposed team: {note}",
     approvalRequestedTitle: "{agent} wants to start a task",
     approvalRequestedBody: "Task: {task}\n\nThis agent is gated: it starts only once you approve.",
+    budgetExhaustedTitle: "{agent} is out of budget",
+    budgetExhaustedBody:
+      "{spent} of {limit} spent this month, so {agent} could not take its turn. Raise its cap, or wait for the new month.",
+    meetingPausedTitle: "Meeting paused: {topic}",
+    meetingPausedBody:
+      "{agent} reached its monthly budget ({spent} of {limit}), so the room stopped mid-discussion. Nothing is lost — raise the cap or wait for the new month, then resume it.",
   },
   org: {
     you: "You",
@@ -529,6 +538,8 @@ export const it: Dictionary = {
     noTurns: "Ancora nessun turno.",
     deliberating: "in corso…",
     decision: "Decisione",
+    resume: "Riprendi",
+    pausedFallback: "Un agente ha finito il budget. Alza il suo tetto, poi riprendi.",
     carried: "Chi era nella stanza porta questa decisione nel proprio lavoro",
   },
   sessionStatus: {
@@ -542,6 +553,7 @@ export const it: Dictionary = {
     decided: "Decisa",
     declined: "Rifiutata",
     failed: "Fallita",
+    paused: "Budget esaurito",
   },
   inbox: {
     empty:
@@ -568,6 +580,12 @@ export const it: Dictionary = {
     approvalRequestedTitle: "{agent} vuole avviare un task",
     approvalRequestedBody:
       "Task: {task}\n\nQuesto agente è sotto approvazione: parte solo quando dai l'ok.",
+    budgetExhaustedTitle: "{agent} ha finito il budget",
+    budgetExhaustedBody:
+      "{spent} di {limit} spesi questo mese, quindi {agent} non ha potuto fare il suo turno. Alza il suo tetto, o aspetta il mese nuovo.",
+    meetingPausedTitle: "Riunione in pausa: {topic}",
+    meetingPausedBody:
+      "{agent} ha raggiunto il budget mensile ({spent} di {limit}), quindi la stanza si è fermata a metà discussione. Non è andato perso niente — alza il tetto o aspetta il mese nuovo, poi riprendila.",
   },
   org: {
     you: "Tu",
@@ -819,6 +837,7 @@ export function useCatalogText(): (
  */
 export function useNotificationText(): (n: Notification) => { title: string; body: string } {
   const t = useT();
+  const { formatCents } = useFormats();
   return (n) => {
     const p = n.params;
     const fallback = { title: n.title, body: n.body };
@@ -853,6 +872,24 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
         return {
           title: t("notif.meetingDroppedTitle", { topic: v("topic") }),
           body: t("notif.meetingDroppedBody", { agent: v("agent"), why: v("why") }),
+        };
+      case "budget.exhausted":
+        return {
+          title: t("notif.budgetExhaustedTitle", { agent: v("agent") }),
+          body: t("notif.budgetExhaustedBody", {
+            agent: v("agent"),
+            spent: formatCents(Number(p.spentCents ?? 0)),
+            limit: formatCents(Number(p.limitCents ?? 0)),
+          }),
+        };
+      case "meeting.paused":
+        return {
+          title: t("notif.meetingPausedTitle", { topic: v("topic") }),
+          body: t("notif.meetingPausedBody", {
+            agent: v("agent"),
+            spent: formatCents(Number(p.spentCents ?? 0)),
+            limit: formatCents(Number(p.limitCents ?? 0)),
+          }),
         };
       case "meeting.failed":
         return {

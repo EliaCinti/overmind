@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
-import { AlertTriangle, Ban, Check, Gavel, Loader2, Users, X } from "lucide-react";
+import { AlertTriangle, Ban, Check, Gavel, Loader2, Play, Users, Wallet, X } from "lucide-react";
 import type { Meeting, MeetingDetail, MeetingStatus } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
@@ -65,6 +65,16 @@ export function Meetings({
       alive = false;
     };
   }, [selectedId, tick]);
+
+  const resume = async () => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      await api.resumeMeeting(companyId, detail.meeting.id);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const decide = async (approvalId: string, decision: "approve" | "reject") => {
     setBusy(true);
@@ -147,6 +157,21 @@ export function Meetings({
                   {t("meetings.cap", { n: detail.meeting.turn_cap })}
                 </span>
               </div>
+
+              {/* Out of budget mid-deliberation (ADR-0022). The transcript is
+                  intact and the room picks up where it stopped — so this is an
+                  action to take, not a failure to read. */}
+              {detail.meeting.status === "paused" && (
+                <div className="mt-4 flex items-center gap-2 rounded-md border border-primary/40 bg-primary/[0.04] p-3">
+                  <p className="flex-1 text-sm">
+                    {detail.meeting.paused_note ?? t("meetings.pausedFallback")}
+                  </p>
+                  <Button size="sm" variant="primary" disabled={busy} onClick={resume}>
+                    <Play className="h-4 w-4" />
+                    {t("meetings.resume")}
+                  </Button>
+                </div>
+              )}
 
               {detail.meeting.status === "requested" && detail.meeting.approval_id && (
                 <div className="mt-4 flex items-center gap-2 rounded-md border border-primary/40 bg-primary/[0.04] p-3">
@@ -237,6 +262,7 @@ function StatusPill({ status }: { status: MeetingStatus }) {
     decided: { tone: "var(--color-status-done)", Icon: Gavel },
     declined: { tone: "var(--color-muted-foreground)", Icon: Ban },
     failed: { tone: "var(--color-destructive)", Icon: AlertTriangle },
+    paused: { tone: "var(--color-status-blocked)", Icon: Wallet },
   };
   const { tone, Icon } = map[status];
   const label = t(`meetingStatus.${status}`);

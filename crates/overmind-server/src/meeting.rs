@@ -128,15 +128,20 @@ pub async fn request(
             "you already have a meeting request waiting on the human; carry on with what you have until it is answered".into(),
         ));
     }
+    // Paused rooms count here too (ADR-0022). The ceiling exists to stop rooms
+    // piling up unnoticed, and a room paused for budget is exactly a room
+    // piling up unnoticed — leaving it uncounted would reopen M13.5's hole from
+    // a new direction.
     let (queued,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM meetings WHERE company_id = ? AND status = 'requested'",
+        "SELECT COUNT(*) FROM meetings
+         WHERE company_id = ? AND status IN ('requested', 'paused')",
     )
     .bind(company_id)
     .fetch_one(&state.pool)
     .await?;
     if queued >= MAX_PENDING_PER_COMPANY {
         return Err(CeoError::Invalid(format!(
-            "the company already has {queued} meeting requests waiting on the human"
+            "the company already has {queued} meetings waiting on the human"
         )));
     }
 
@@ -533,6 +538,115 @@ async fn load_speakers(
         .collect())
 }
 
+/// The transcript so far, in order. Empty for a room that has not spoken yet.
+///
+/// This is what makes a paused meeting resumable at all (ADR-0022): M13 has
+/// persisted every contribution with its ordinal since the day it shipped, so
+/// nothing has to be reconstructed or guessed.
+async fn recorded_turns(
+    state: &AppState,
+    meeting_id: &str,
+) -> Result<Vec<(String, String)>, CeoError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT a.name, t.content FROM meeting_turns t
+         JOIN agents a ON a.id = t.agent_id
+         WHERE t.meeting_id = ? ORDER BY t.ordinal",
+    )
+    .bind(meeting_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Stop a room that has run out of budget, and tell the human what unblocks it.
+///
+/// Not a terminal state: the transcript stays, the turn cap is untouched, and
+/// `resume` picks up at the ordinal it stopped at. The turn cap deliberately
+/// does **not** refill — otherwise pausing would be the way to buy more
+/// deliberation than was ever approved (ADR-0022).
+async fn pause_meeting(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+    topic: &str,
+    speaker: &Speaker,
+    check: &crate::governance::BudgetCheck,
+) -> Result<(), CeoError> {
+    let note = format!(
+        "{} reached its monthly budget: {} of {} spent.",
+        speaker.name,
+        crate::governance::euros(check.spent + check.reserved),
+        crate::governance::euros(check.cap),
+    );
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE meetings SET status = 'paused', paused_agent_id = ?, paused_note = ?
+         WHERE id = ? AND status = 'open'",
+    )
+    .bind(&speaker.id)
+    .bind(&note)
+    .bind(meeting_id)
+    .execute(&mut *tx)
+    .await?;
+    crate::audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        crate::domain::event_kind::MEETING_PAUSED,
+        &json!({
+            "meeting_id": meeting_id,
+            "agent_id": speaker.id,
+            "limit_cents": check.cap,
+            "observed_cents": check.observed(),
+        }),
+    )
+    .await?;
+    let pushed = crate::notify::post(
+        &mut tx,
+        company_id,
+        crate::notify::New {
+            kind: crate::notify::kind::MEETING_PAUSED,
+            title: &format!("Meeting paused: {topic}"),
+            body: &format!("{note} Raise the cap or wait for the new month, then resume."),
+            params: json!({
+                "agent": speaker.name,
+                "topic": topic,
+                "spentCents": check.spent + check.reserved,
+                "limitCents": check.cap,
+            }),
+            agent_id: Some(&speaker.id),
+            subject: Some(("meeting", meeting_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    crate::notify::deliver(state, company_id, &pushed);
+    state.notify(company_id);
+    Ok(())
+}
+
+/// Pick a paused room back up, from the ordinal it stopped at.
+///
+/// Re-runs the same deliberation: if the agent still has no budget it simply
+/// pauses again, saying so, rather than half-running and leaving the room in a
+/// third state.
+pub async fn resume(state: &AppState, company_id: &str, meeting_id: &str) -> Result<(), CeoError> {
+    let reopened = sqlx::query(
+        "UPDATE meetings SET status = 'open', paused_agent_id = NULL, paused_note = NULL
+         WHERE id = ? AND company_id = ? AND status = 'paused'",
+    )
+    .bind(meeting_id)
+    .bind(company_id)
+    .execute(&state.pool)
+    .await?;
+    if reopened.rows_affected() != 1 {
+        return Err(CeoError::Invalid("this meeting is not paused".into()));
+    }
+    state.notify(company_id);
+    run_meeting(state, company_id, meeting_id).await
+}
+
 /// Round-robin turns up to the cap, then a closing turn by the chair if nobody
 /// has decided yet.
 async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Result<(), CeoError> {
@@ -578,18 +692,40 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
         speakers: &speakers,
         memory_context: memory_context.as_deref(),
     };
-    let mut transcript: Vec<(String, String)> = Vec::new();
-    for ordinal in 0..turn_cap {
+    // Whatever the room already said. Empty on a first run; populated when a
+    // paused meeting is resumed (ADR-0022), which is what makes resuming exact
+    // rather than approximate: the speaker is `ordinal % speakers.len()`, a
+    // pure function of the ordinal, so continuing from the recorded count lands
+    // on the agent whose turn it actually was.
+    let mut transcript = recorded_turns(state, meeting_id).await?;
+    let resumed_from = transcript.len() as i64;
+    for ordinal in resumed_from..turn_cap {
         let speaker = &speakers[(ordinal as usize) % speakers.len()];
         let prompt = turn_prompt(&agenda, speaker, &transcript, false);
-        let output = run_adapter(
+        let output = match run_adapter(
             state,
+            &crate::ceo::Turn {
+                company_id,
+                agent_id: &speaker.id,
+                kind: "meeting",
+                traits: &speaker.traits,
+            },
             &room,
             &prompt,
-            &speaker.traits,
             memory_context.as_deref(),
         )
-        .await?;
+        .await
+        {
+            Ok(out) => out,
+            // The room ran out of money. Nothing was spent, the transcript is
+            // durable, and this says nothing about the topic — so the room
+            // waits for you instead of being closed or forced to a conclusion
+            // it did not reach (ADR-0022).
+            Err(CeoError::OverBudget(check)) => {
+                return pause_meeting(state, company_id, meeting_id, &topic, speaker, &check).await;
+            }
+            Err(e) => return Err(e),
+        };
         let turn = turn_json(&output);
         let said = said_or_raw(turn.as_ref(), &output);
         record_turn(state, company_id, meeting_id, &speaker.id, ordinal, &said).await?;
@@ -622,14 +758,26 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
     // The cap is reached and nobody has called it: the chair closes.
     let speaker = &speakers[chair];
     let prompt = turn_prompt(&agenda, speaker, &transcript, true);
-    let output = run_adapter(
+    let output = match run_adapter(
         state,
+        &crate::ceo::Turn {
+            company_id,
+            agent_id: &speaker.id,
+            kind: "meeting",
+            traits: &speaker.traits,
+        },
         &room,
         &prompt,
-        &speaker.traits,
         memory_context.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(out) => out,
+        Err(CeoError::OverBudget(check)) => {
+            return pause_meeting(state, company_id, meeting_id, &topic, speaker, &check).await;
+        }
+        Err(e) => return Err(e),
+    };
     let turn = turn_json(&output);
     let said = said_or_raw(turn.as_ref(), &output);
     record_turn(state, company_id, meeting_id, &speaker.id, turn_cap, &said).await?;

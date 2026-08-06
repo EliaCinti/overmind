@@ -28,6 +28,11 @@ pub mod kind {
     pub const ORG_REJECTED: &str = "org.rejected";
     /// A gated agent wants to start a task and needs you (ADR-0012).
     pub const APPROVAL_REQUESTED: &str = "approval.requested";
+    /// An agent hit its monthly cap and could not take a turn (ADR-0022).
+    pub const BUDGET_EXHAUSTED: &str = "budget.exhausted";
+    /// A room stopped mid-deliberation for the same reason, and is waiting to
+    /// be resumed rather than being closed (ADR-0022).
+    pub const MEETING_PAUSED: &str = "meeting.paused";
 }
 
 /// A notification to record. `approval_id` is what makes it *actionable*: the

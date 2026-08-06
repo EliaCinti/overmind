@@ -89,6 +89,7 @@ fn api_router() -> Router<AppState> {
             "/agents/{agent_id}/approval-gate",
             post(set_requires_approval),
         )
+        .route("/agents/{agent_id}/budget", post(set_agent_budget))
         .route("/agents/{agent_id}/revisions", get(list_revisions))
         .route("/agents/{agent_id}/rollback", post(rollback_agent))
         .route("/companies/{company_id}/approvals", get(list_approvals))
@@ -115,6 +116,10 @@ fn api_router() -> Router<AppState> {
             post(convene_meeting).get(list_meetings),
         )
         .route("/meetings/{meeting_id}", get(get_meeting))
+        .route(
+            "/companies/{company_id}/meetings/{meeting_id}/resume",
+            post(resume_meeting),
+        )
         .route(
             "/companies/{company_id}/org-proposals",
             get(list_org_proposals),
@@ -213,6 +218,13 @@ impl From<crate::ceo::CeoError> for ApiError {
         match e {
             CeoError::NotFound(what) => ApiError::NotFound(what),
             CeoError::Invalid(msg) => ApiError::Invalid(msg),
+            // Over budget is a conflict with the world's current state, not a
+            // malformed request — the same shape as a refused task checkout.
+            CeoError::OverBudget(check) => ApiError::Conflict(format!(
+                "monthly budget reached: {} of {} spent",
+                crate::governance::euros(check.spent + check.reserved),
+                crate::governance::euros(check.cap),
+            )),
             CeoError::Db(e) => ApiError::Internal(Box::new(e)),
         }
     }
@@ -1847,6 +1859,36 @@ async fn convene_meeting(
     Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
 }
 
+/// Pick a paused room back up (ADR-0022).
+///
+/// Runs in the background like the original deliberation: resuming can take as
+/// long as the remaining turns do, and the caller should not hold a request
+/// open for it. The room's status is the progress indicator.
+async fn resume_meeting(
+    State(state): State<AppState>,
+    Path((company_id, meeting_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    // Fail fast on "not paused" so the caller gets a real answer, then let the
+    // deliberation itself run detached.
+    let paused: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM meetings WHERE id = ? AND company_id = ? AND status = 'paused'",
+    )
+    .bind(&meeting_id)
+    .bind(&company_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    if paused.is_none() {
+        return Err(ApiError::Conflict("this meeting is not paused".into()));
+    }
+    let id = meeting_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::meeting::resume(&state, &company_id, &meeting_id).await {
+            eprintln!("resuming meeting {meeting_id} failed: {e}");
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({ "id": id }))))
+}
+
 /// A company's meetings, newest first — including the ones still waiting on you.
 async fn list_meetings(
     State(state): State<AppState>,
@@ -1924,10 +1966,12 @@ async fn get_meeting(
         Option<String>,
         String,
         Option<String>,
+        Option<String>,
     );
     let row: Option<MeetingRow> = sqlx::query_as(
         "SELECT m.id, m.company_id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap,
-                m.status, m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at
+                m.status, m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at,
+                m.paused_note
          FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
          WHERE m.id = ?",
     )
@@ -1948,6 +1992,7 @@ async fn get_meeting(
         approval_id,
         created_at,
         decided_at,
+        paused_note,
     )) = row
     else {
         return Err(ApiError::NotFound("meeting"));
@@ -1974,6 +2019,8 @@ async fn get_meeting(
             "convener_agent_id": convener_agent_id, "convener_name": convener_name,
             "turn_cap": turn_cap, "status": status, "decision": decision,
             "decline_note": decline_note, "approval_id": approval_id,
+            // Why the room is waiting, when it is (ADR-0022).
+            "paused_note": paused_note,
             "created_at": created_at, "decided_at": decided_at,
         },
         "participants": participants.into_iter().map(|(id, name, title)| {
@@ -2461,6 +2508,82 @@ async fn set_requires_approval(
     ))
 }
 
+#[derive(Deserialize)]
+struct SetBudget {
+    monthly_budget_cents: i64,
+}
+
+/// Raise (or lower) an agent's monthly cap.
+///
+/// ADR-0022 tells the human "raise the cap or wait for the new month" when a
+/// turn is refused — which needs somewhere to raise it. Recorded as a config
+/// revision like any other characterization change, so the change to a
+/// governance control is itself governed and roll-backable (ADR-0012).
+async fn set_agent_budget(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<SetBudget>,
+) -> Result<Json<Value>, ApiError> {
+    /// (company_id, name, traits, title, custom_brief, requires_approval)
+    type BudgetAgentRow = (String, String, String, Option<String>, Option<String>, i64);
+
+    if req.monthly_budget_cents < 0 {
+        return Err(ApiError::Invalid("a budget cannot be negative".into()));
+    }
+    let mut tx = state.pool.begin().await?;
+    let agent: Option<BudgetAgentRow> = sqlx::query_as(
+        "SELECT company_id, name, traits, title, custom_brief, requires_approval
+         FROM agents WHERE id = ?",
+    )
+    .bind(&agent_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((company_id, name, traits_json, title, brief, requires_approval)) = agent else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    let mut traits: AgentTraits = serde_json::from_str(&traits_json)?;
+    let before = serde_json::to_value(&traits)?;
+    traits.monthly_budget_cents = req.monthly_budget_cents;
+    let after = serde_json::to_value(&traits)?;
+    sqlx::query("UPDATE agents SET traits = ? WHERE id = ?")
+        .bind(serde_json::to_string(&traits)?)
+        .bind(&agent_id)
+        .execute(&mut *tx)
+        .await?;
+    let snapshot = |t: &Value| {
+        crate::governance::agent_snapshot(
+            &name,
+            title.as_deref(),
+            None,
+            t,
+            brief.as_deref(),
+            requires_approval != 0,
+        )
+    };
+    crate::governance::record_revision(
+        &mut tx,
+        &company_id,
+        &agent_id,
+        "budget",
+        &snapshot(&before),
+        &snapshot(&after),
+    )
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_REVISED,
+        &json!({ "agent_id": agent_id, "monthly_budget_cents": req.monthly_budget_cents }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(
+        json!({ "id": agent_id, "monthly_budget_cents": req.monthly_budget_cents }),
+    ))
+}
+
 /// (id, type, status, summary, decision_note, created_at, decided_at)
 type ApprovalRow = (
     String,
@@ -2708,19 +2831,14 @@ async fn budget_summary(
             .ok()
             .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
             .unwrap_or(0);
-        let spent: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(cost_cents), 0) FROM cost_events WHERE agent_id = ? AND occurred_at >= ?",
-        )
-        .bind(&id)
-        .bind(&window)
-        .fetch_one(&state.pool)
-        .await?;
-        let reserved: (i64,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_task_sessions WHERE agent_id = ? AND status IN ('queued','running')",
-        )
-        .bind(&id)
-        .fetch_one(&state.pool)
-        .await?;
+        // Through governance, not a private copy: this view used to run its own
+        // `reserved` query, which now would not see conversational turns at all
+        // (ADR-0022) — a summary that disagrees with the gate is worse than no
+        // summary.
+        let mut conn = state.pool.acquire().await?;
+        let spent = (crate::governance::spent_cents(&mut conn, &id, &window).await?,);
+        let reserved = (crate::governance::reserved_cents(&mut conn, &id).await?,);
+        drop(conn);
         out.push(json!({
             "agent_id": id,
             "name": name,

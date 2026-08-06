@@ -420,37 +420,15 @@ pub async fn start_task(
 
     // Budget check, atomic with checkout. spent (this month) + reserved
     // (in-flight) + this run's estimate must fit under the cap.
-    if budget > 0 {
-        let window = governance::month_window_start();
-        let spent = governance::spent_cents(&mut tx, agent_id, &window).await?;
-        let reserved = governance::reserved_cents(&mut tx, agent_id).await?;
-        if spent + reserved + estimate > budget {
-            // Record the incident and commit that alone; the task is untouched.
-            sqlx::query(
-                "INSERT INTO budget_incidents (id, company_id, agent_id, window_start, threshold_type, amount_limit, amount_observed, status, created_at)
-                 VALUES (?, ?, ?, ?, 'hard', ?, ?, 'open', ?)",
-            )
-            .bind(uuid::Uuid::now_v7().to_string())
-            .bind(&company_id)
-            .bind(agent_id)
-            .bind(&window)
-            .bind(budget)
-            .bind(spent + reserved + estimate)
-            .bind(now())
-            .execute(&mut *tx)
-            .await?;
-            audit::append(
-                &mut tx,
-                Some(&company_id),
-                Some(task_id),
-                event_kind::BUDGET_BLOCKED,
-                &json!({ "agent_id": agent_id, "limit_cents": budget, "observed_cents": spent + reserved + estimate }),
-            )
-            .await?;
-            tx.commit().await?;
-            state.notify(&company_id);
-            return Err(RunnerError::OverBudget);
-        }
+    // One arithmetic, shared with conversational turns (ADR-0022) — a second
+    // implementation of "does this fit" is a second thing to drift.
+    let check = governance::check(&mut tx, agent_id, budget, estimate).await?;
+    if !check.fits {
+        // Record the incident and commit that alone; the task is untouched.
+        governance::record_overrun(&mut tx, &company_id, agent_id, Some(task_id), &check).await?;
+        tx.commit().await?;
+        state.notify(&company_id);
+        return Err(RunnerError::OverBudget);
     }
 
     // Atomic checkout: exactly one concurrent caller wins this UPDATE.
@@ -534,7 +512,7 @@ pub async fn start_task(
 }
 
 /// The monthly budget cap from an agent's serialized traits (0 = uncapped).
-fn trait_budget_cents(traits_json: &str) -> i64 {
+pub(crate) fn trait_budget_cents(traits_json: &str) -> i64 {
     serde_json::from_str::<Value>(traits_json)
         .ok()
         .and_then(|v| v.get("monthly_budget_cents").and_then(Value::as_i64))
@@ -1285,12 +1263,12 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     Ok(())
 }
 
-struct ParsedCost {
-    model: String,
-    input_tokens: i64,
-    cached_input_tokens: i64,
-    output_tokens: i64,
-    cost_cents: i64,
+pub(crate) struct ParsedCost {
+    pub model: String,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_cents: i64,
 }
 
 fn last_json_object(output: &str) -> Option<Value> {
@@ -1316,7 +1294,7 @@ fn parse_adapter_session_id(output: &str) -> Option<String> {
 
 /// Find the last line of output that is a JSON object carrying
 /// `total_cost_usd`, and extract cost + usage from it.
-fn parse_cost(output: &str) -> Option<ParsedCost> {
+pub(crate) fn parse_cost(output: &str) -> Option<ParsedCost> {
     let v = last_json_object(output)?;
     let usd = v.get("total_cost_usd").and_then(Value::as_f64)?;
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));

@@ -25,6 +25,10 @@ pub enum CeoError {
     NotFound(&'static str),
     #[error("{0}")]
     Invalid(String),
+    /// The agent's monthly cap will not cover this turn (ADR-0022). Carries the
+    /// numbers so the refusal can say what it is refusing on.
+    #[error("monthly budget reached")]
+    OverBudget(crate::governance::BudgetCheck),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -295,6 +299,46 @@ pub async fn post_user_message(
     Ok(conversation_id)
 }
 
+/// Tell the human an agent has hit its cap (ADR-0022).
+///
+/// Structured params, not a finished sentence: the inbox words it in the
+/// company's language (M16 slice D). `title`/`body` stay as the durable record
+/// and the fallback, in English, like every other notification.
+pub(crate) async fn budget_exhausted_notice(
+    state: &AppState,
+    company_id: &str,
+    agent_id: &str,
+    agent_name: &str,
+    check: &crate::governance::BudgetCheck,
+) -> Result<(), CeoError> {
+    let mut tx = state.pool.begin().await?;
+    let pushed = crate::notify::post(
+        &mut tx,
+        company_id,
+        crate::notify::New {
+            kind: crate::notify::kind::BUDGET_EXHAUSTED,
+            title: &format!("{agent_name} is out of budget"),
+            body: &format!(
+                "{} of {} spent this month. Raise the cap or wait for the new month.",
+                crate::governance::euros(check.spent + check.reserved),
+                crate::governance::euros(check.cap),
+            ),
+            params: json!({
+                "agent": agent_name,
+                "spentCents": check.spent + check.reserved,
+                "limitCents": check.cap,
+            }),
+            agent_id: Some(agent_id),
+            subject: Some(("agent", agent_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    crate::notify::deliver(state, company_id, &pushed);
+    Ok(())
+}
+
 async fn post_system_message(
     state: &AppState,
     company_id: &str,
@@ -539,7 +583,31 @@ async fn run_agent_turn(
     for (n, _, _, path) in &attachments {
         let _ = tokio::fs::copy(path, scratch.join(safe_name(n))).await;
     }
-    let output = run_adapter(state, &scratch, &prompt, &traits, memory_context.as_deref()).await?;
+    let turn = Turn {
+        company_id,
+        agent_id,
+        kind: "chat",
+        traits: &traits,
+    };
+    let output = match run_adapter(state, &turn, &scratch, &prompt, memory_context.as_deref()).await
+    {
+        Ok(out) => out,
+        // A person asked a question; "your agent is out of money" is an answer,
+        // not a failed request (ADR-0022). It goes in the thread, with the
+        // numbers, so the next move — raise the cap, or wait for the window —
+        // is obvious without going to look for it.
+        Err(CeoError::OverBudget(check)) => {
+            let body = format!(
+                "{name} has reached its monthly budget: {} of {} spent. Raise its cap, or wait for the new month, to continue.",
+                crate::governance::euros(check.spent + check.reserved),
+                crate::governance::euros(check.cap),
+            );
+            post_system_message(state, company_id, conversation_id, &body).await?;
+            budget_exhausted_notice(state, company_id, agent_id, &name, &check).await?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     // Parse the plan. A missing/garbled plan degrades to "reply with the raw
     // output, open no tasks" rather than failing the turn.
@@ -691,11 +759,74 @@ async fn run_agent_turn(
     Ok(())
 }
 
+/// Who is about to speak, and on whose budget (ADR-0022).
+///
+/// `run_adapter` could previously be called with traits alone, which is exactly
+/// why it was possible to spend money without anyone's cap being consulted.
+pub(crate) struct Turn<'a> {
+    pub company_id: &'a str,
+    pub agent_id: &'a str,
+    /// What the ledger will call this spend: `chat` or `meeting`.
+    pub kind: &'a str,
+    pub traits: &'a str,
+}
+
 /// Run the configured agent adapter with a prompt, in `cwd`, and return its raw
 /// stdout. Bounded by `session_timeout_secs` — an adapter that hangs can never
 /// hold a turn (or a meeting, ADR-0020) open forever. Shared by conversational
 /// turns and meetings.
+///
+/// The budget gate lives here (ADR-0022) because this is the one choke point
+/// every non-task invocation passes through. Before spending: reserve, atomically,
+/// against the same cap and the same arithmetic task checkout has used since M6.
+/// After: record what it actually cost, and release. A turn that does not fit is
+/// refused *before* the adapter is spawned, never after the money is gone.
 pub(crate) async fn run_adapter(
+    state: &AppState,
+    turn: &Turn<'_>,
+    cwd: &std::path::Path,
+    prompt: &str,
+    memory_context: Option<&str>,
+) -> Result<String, CeoError> {
+    let traits = turn.traits;
+    let cap = crate::runner::trait_budget_cents(traits);
+    let estimate = state.config.start_estimate_cents;
+
+    let mut tx = state.pool.begin().await?;
+    let check = crate::governance::check(&mut tx, turn.agent_id, cap, estimate).await?;
+    if !check.fits {
+        // Record the overrun and commit that alone — the same durable incident
+        // and audit event a refused task checkout leaves behind.
+        crate::governance::record_overrun(&mut tx, turn.company_id, turn.agent_id, None, &check)
+            .await?;
+        tx.commit().await?;
+        state.notify(turn.company_id);
+        return Err(CeoError::OverBudget(check));
+    }
+    let reservation = crate::governance::reserve_turn(
+        &mut tx,
+        turn.company_id,
+        turn.agent_id,
+        turn.kind,
+        estimate,
+    )
+    .await?;
+    tx.commit().await?;
+
+    let outcome = spawn_adapter(state, cwd, prompt, traits, memory_context).await;
+
+    // Whatever happened, the money is spent and the hold must go: a reservation
+    // that outlives its turn is a leak only a restart would clear.
+    if let Ok(output) = &outcome {
+        crate::governance::record_turn_cost(&state.pool, turn.company_id, turn.agent_id, output)
+            .await;
+    }
+    crate::governance::release_turn(&state.pool, &reservation).await;
+    outcome
+}
+
+/// The spawn itself, with no opinion about budgets.
+async fn spawn_adapter(
     state: &AppState,
     cwd: &std::path::Path,
     prompt: &str,
