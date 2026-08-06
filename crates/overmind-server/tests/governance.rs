@@ -139,7 +139,7 @@ async fn hire(env: &Env, name: &str, budget: i64) -> String {
         &format!("/api/companies/{}/agents", env.company),
         Some(json!({
             "name": name,
-            "archetype": "backend-developer",
+            "archetype": "builder",
             "traits": { "monthly_budget_cents": budget }
         })),
     )

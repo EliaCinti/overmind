@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::{AgentTraits, TaskStatus, TraitsPatch, event_kind};
+use crate::domain::{AgentTraits, DomainPatch, TaskStatus, TraitsPatch, event_kind};
 
 /// The full application: JSON API under `/api`, the live-update WebSocket at
 /// `/ws`, and (when built) the SPA served at the root with history fallback.
@@ -73,6 +73,8 @@ fn api_router() -> Router<AppState> {
         .route("/health", get(health))
         .route("/companies", post(create_company).get(list_companies))
         .route("/archetypes", get(list_archetypes))
+        .route("/domains", get(list_domains))
+        .route("/models", get(list_models))
         .route("/companies/{company_id}/language", post(set_language))
         .route("/languages", get(list_languages))
         .route(
@@ -314,6 +316,8 @@ async fn create_company(
         &HireAgent {
             name: crate::db::random_ceo_name().to_string(),
             archetype: crate::db::CEO_ARCHETYPE.to_string(),
+            // The leader is not a specialist in any one field (ADR-0021).
+            domain: None,
             traits: TraitsPatch::default(),
             custom_brief: None,
             title: Some("CEO".to_string()),
@@ -374,14 +378,65 @@ async fn list_archetypes(State(state): State<AppState>) -> Result<Json<Value>, A
     Ok(Json(json!({ "archetypes": archetypes })))
 }
 
+/// The domain catalog — the second axis of characterization (ADR-0021).
+async fn list_domains(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, slug, name, description, traits_patch FROM domains ORDER BY slug",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let domains = rows
+        .into_iter()
+        .map(|(id, slug, name, description, patch)| {
+            let patch: Value = serde_json::from_str(&patch)?;
+            Ok(json!({
+                "id": id,
+                "slug": slug,
+                "name": name,
+                "description": description,
+                "traits_patch": patch,
+            }))
+        })
+        .collect::<Result<Vec<Value>, serde_json::Error>>()?;
+    Ok(Json(json!({ "domains": domains })))
+}
+
+/// The models an agent may run on. The hire dialog offered three strings that
+/// were not model identifiers at all until ADR-0021; it now reads this.
+async fn list_models() -> Json<Value> {
+    Json(json!({ "models": crate::model::catalog() }))
+}
+
+/// Refuse a characterization the server cannot honour, at the boundary where it
+/// enters rather than at the prompt where it would finally break — the rule
+/// M16 already applies to language codes (ADR-0021).
+fn validate_traits(traits: &AgentTraits) -> Result<(), ApiError> {
+    if !crate::model::is_known(&traits.model) {
+        return Err(ApiError::Invalid(format!(
+            "unknown model `{}`",
+            traits.model
+        )));
+    }
+    if traits.multimodal && !crate::model::supports_vision(&traits.model) {
+        return Err(ApiError::Invalid(format!(
+            "`{}` cannot read images, so this agent cannot be characterized as multimodal",
+            traits.model
+        )));
+    }
+    Ok(())
+}
+
 // ---------- agents ----------
 
 #[derive(Deserialize)]
 pub(crate) struct HireAgent {
     pub name: String,
-    /// Archetype slug (UX Level 1 "pick").
+    /// Archetype slug — the *function* (UX Level 1 "pick").
     pub archetype: String,
-    /// Structured overrides on the archetype defaults (UX Level 2 "tune").
+    /// Domain slug — the *field* the function is applied in (ADR-0021).
+    /// `None` means the general domain, which adds nothing.
+    pub domain: Option<String>,
+    /// Structured overrides on the composed defaults (UX Level 2 "tune").
     #[serde(default)]
     pub traits: TraitsPatch,
     /// Free-form additions (UX Level 3 "expert") — additive only.
@@ -433,8 +488,27 @@ pub(crate) async fn hire(
         return Err(ApiError::NotFound("archetype"));
     };
 
+    // The field the function is applied in (ADR-0021). Unknown is a 404 for
+    // the same reason an unknown archetype is: a characterization we cannot
+    // resolve is worse than a refused hire.
+    let domain_slug = req.domain.as_deref().unwrap_or(crate::db::GENERAL_DOMAIN);
+    let domain: Option<(String, String)> =
+        sqlx::query_as("SELECT id, traits_patch FROM domains WHERE slug = ?")
+            .bind(domain_slug)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((domain_id, domain_patch)) = domain else {
+        return Err(ApiError::NotFound("domain"));
+    };
+    let domain_patch: DomainPatch = serde_json::from_str(&domain_patch).unwrap_or_default();
+
+    // Most general to most specific: the function's defaults, what the field
+    // adds, then what you tuned by hand.
     let defaults: AgentTraits = serde_json::from_str(&default_traits)?;
-    let traits = defaults.apply(req.traits.clone());
+    let traits = defaults
+        .with_domain(&domain_patch)
+        .apply(req.traits.clone());
+    validate_traits(&traits)?;
     let traits_json = serde_json::to_string(&traits)?;
 
     // A manager, if given, must be an existing agent in this company.
@@ -473,12 +547,13 @@ pub(crate) async fn hire(
 
     let (id, created_at) = (new_id(), now());
     sqlx::query(
-        "INSERT INTO agents (id, company_id, archetype_id, name, traits, custom_brief, title, reports_to, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+        "INSERT INTO agents (id, company_id, archetype_id, domain_id, name, traits, custom_brief, title, reports_to, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)",
     )
     .bind(&id)
     .bind(company_id)
     .bind(&archetype_id)
+    .bind(&domain_id)
     .bind(req.name.trim())
     .bind(&traits_json)
     .bind(&req.custom_brief)
@@ -506,6 +581,7 @@ pub(crate) async fn hire(
             "agent_id": id,
             "name": req.name.trim(),
             "archetype": req.archetype,
+            "domain": domain_slug,
             "title": title,
             "reports_to": reports_to,
             "traits": serde_json::to_value(&traits)?,
@@ -517,6 +593,7 @@ pub(crate) async fn hire(
             "company_id": company_id,
             "name": req.name.trim(),
             "archetype": req.archetype,
+            "domain": domain_slug,
             "traits": serde_json::to_value(&traits)?,
             "custom_brief": req.custom_brief,
             "title": title,
@@ -537,6 +614,7 @@ type AgentRow = (
     Option<String>,
     i64,
     String,
+    Option<String>,
 );
 
 async fn list_agents(
@@ -544,8 +622,10 @@ async fn list_agents(
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<AgentRow> = sqlx::query_as(
-        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, a.requires_approval, ar.slug
-         FROM agents a JOIN archetypes ar ON ar.id = a.archetype_id
+        "SELECT a.id, a.name, a.traits, a.custom_brief, a.status, a.title, a.reports_to, a.requires_approval, ar.slug, d.slug
+         FROM agents a
+         JOIN archetypes ar ON ar.id = a.archetype_id
+         LEFT JOIN domains d ON d.id = a.domain_id
          WHERE a.company_id = ? ORDER BY a.created_at",
     )
     .bind(&company_id)
@@ -564,12 +644,14 @@ async fn list_agents(
                 reports_to,
                 requires_approval,
                 archetype,
+                domain,
             )| {
                 let traits: Value = serde_json::from_str(&traits)?;
                 Ok(json!({
                     "id": id,
                     "name": name,
                     "archetype": archetype,
+                    "domain": domain,
                     "traits": traits,
                     "custom_brief": custom_brief,
                     "title": title,
@@ -2023,12 +2105,13 @@ async fn get_org_proposal(
     })))
 }
 
-/// (id, position, name, archetype, title, reports_to, brief, rationale, excluded, hired)
+/// (id, position, name, archetype, domain, title, reports_to, brief, rationale, excluded, hired)
 type ProposalMemberRow = (
     String,
     i64,
     String,
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -2039,7 +2122,7 @@ type ProposalMemberRow = (
 
 async fn proposal_members(state: &AppState, proposal_id: &str) -> Result<Vec<Value>, ApiError> {
     let rows: Vec<ProposalMemberRow> = sqlx::query_as(
-        "SELECT id, position, name, archetype, title, reports_to, brief, rationale,
+        "SELECT id, position, name, archetype, domain, title, reports_to, brief, rationale,
                 excluded, hired_agent_id
          FROM org_proposal_members WHERE proposal_id = ? ORDER BY position",
     )
@@ -2054,6 +2137,7 @@ async fn proposal_members(state: &AppState, proposal_id: &str) -> Result<Vec<Val
                 position,
                 name,
                 archetype,
+                domain,
                 title,
                 reports_to,
                 brief,
@@ -2063,7 +2147,7 @@ async fn proposal_members(state: &AppState, proposal_id: &str) -> Result<Vec<Val
             )| {
                 json!({
                     "id": id, "position": position, "name": name, "archetype": archetype,
-                    "title": title, "reports_to": reports_to, "brief": brief,
+                    "domain": domain, "title": title, "reports_to": reports_to, "brief": brief,
                     "rationale": rationale, "excluded": excluded != 0, "hired_agent_id": hired,
                 })
             },

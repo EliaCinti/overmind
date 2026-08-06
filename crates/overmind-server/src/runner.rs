@@ -88,6 +88,9 @@ pub(crate) struct Persona {
     /// Job title if set, else the archetype's human name.
     pub role: String,
     pub focus_areas: Vec<String>,
+    /// One line about the field the agent works in, from its domain
+    /// (ADR-0021). Empty for the general domain, which adds nothing.
+    pub domain_context: String,
     pub brief: Option<String>,
 }
 
@@ -102,6 +105,9 @@ impl Persona {
                 self.focus_areas.join(", ")
             ));
         }
+        if !self.domain_context.trim().is_empty() {
+            s.push_str(&format!("\n{}", self.domain_context.trim()));
+        }
         if let Some(brief) = self
             .brief
             .as_deref()
@@ -115,15 +121,24 @@ impl Persona {
     }
 }
 
-/// (name, title, archetype name, traits JSON, custom_brief)
-type PersonaRow = (String, Option<String>, String, String, Option<String>);
+/// (name, title, archetype name, traits JSON, custom_brief, domain patch JSON)
+type PersonaRow = (
+    String,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 /// Load an agent's characterization for the prompt. Best-effort by design:
 /// a missing archetype row must not stop work, it just costs the persona.
 async fn load_persona(state: &AppState, agent_id: &str) -> Option<Persona> {
     let row: Option<PersonaRow> = sqlx::query_as(
-        "SELECT a.name, a.title, ar.name, a.traits, a.custom_brief
-         FROM agents a JOIN archetypes ar ON ar.id = a.archetype_id
+        "SELECT a.name, a.title, ar.name, a.traits, a.custom_brief, d.traits_patch
+         FROM agents a
+         JOIN archetypes ar ON ar.id = a.archetype_id
+         LEFT JOIN domains d ON d.id = a.domain_id
          WHERE a.id = ?",
     )
     .bind(agent_id)
@@ -131,7 +146,13 @@ async fn load_persona(state: &AppState, agent_id: &str) -> Option<Persona> {
     .await
     .ok()
     .flatten();
-    let (name, title, archetype_name, traits, brief) = row?;
+    let (name, title, archetype_name, traits, brief, domain_patch) = row?;
+    // A LEFT JOIN: an agent hired before ADR-0021 has no domain, and works
+    // exactly as it did — the line is simply absent from its prompt.
+    let domain_context = domain_patch
+        .and_then(|json| serde_json::from_str::<crate::domain::DomainPatch>(&json).ok())
+        .map(|p| p.context)
+        .unwrap_or_default();
     let focus_areas = serde_json::from_str::<Value>(&traits)
         .ok()
         .and_then(|v| {
@@ -147,6 +168,7 @@ async fn load_persona(state: &AppState, agent_id: &str) -> Option<Persona> {
         name,
         role: title.unwrap_or(archetype_name),
         focus_areas,
+        domain_context,
         brief,
     })
 }
@@ -274,6 +296,26 @@ pub async fn start_task(
         return Err(RunnerError::Blocked(format!(
             "this agent is not characterized for {exec_kind_str} work (missing `{required}`)"
         )));
+    }
+
+    // Multimodal gate (ADR-0021). Same shape as the capability gate above, and
+    // the same honesty about what it is: not a claim that the spawned CLI
+    // cannot open a PNG, but a refusal to hand an agent material it was never
+    // characterized to judge. A researcher who has never been asked to look at
+    // anything should not silently become the one grading your projector.
+    if !trait_multimodal(&agent_traits) {
+        let visual: Vec<String> = task_inputs(state, task_id)
+            .await
+            .into_iter()
+            .filter(|(_, mime, _, _)| crate::files::is_visual(mime))
+            .map(|(name, _, _, _)| name)
+            .collect();
+        if !visual.is_empty() {
+            return Err(RunnerError::Blocked(format!(
+                "this task carries material to look at ({}) and this agent is not characterized for visual work",
+                visual.join(", ")
+            )));
+        }
     }
 
     // A `code` run needs a git repo to branch a worktree from; a `knowledge`
@@ -515,6 +557,38 @@ fn trait_permissions(traits_json: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether the agent is characterized to work with visual material (ADR-0021).
+/// An unreadable traits blob yields `false`, on the same fail-closed grounds as
+/// [`trait_permissions`].
+pub(crate) fn trait_multimodal(traits_json: &str) -> bool {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| v.get("multimodal").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// Which model runs this agent. Falls back to the catalog default rather than
+/// to nothing: a traits blob we cannot read is a reason to run the agent
+/// plainly, not a reason to invoke the CLI with an empty `--model`.
+pub(crate) fn trait_model(traits_json: &str) -> String {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| v.get("model").and_then(Value::as_str).map(str::to_string))
+        .filter(|m| crate::model::is_known(m))
+        .unwrap_or_else(|| crate::model::default_model().id.to_string())
+}
+
+/// The adapter invocation (ADR-0021). Configurable — tests use a stub — and the
+/// default drives the Claude Code CLI headless, on the model the agent is
+/// actually characterized for. Until M14 slice 3 this string existed in two
+/// copies and named no model at all, so `AgentTraits.model` was decorative.
+pub(crate) fn agent_command(state: &AppState) -> String {
+    state.config.agent_cmd.clone().unwrap_or_else(|| {
+        "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" --output-format json"
+            .to_string()
+    })
+}
+
 /// Resume a session that is marked queued/running in the DB but has no live
 /// runner in this process (server restart, crashed runner). Called by the
 /// heartbeat scheduler.
@@ -746,12 +820,7 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
 }
 
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
-    // The adapter command is configurable (tests use a stub); the default
-    // drives the Claude Code CLI headless with a JSON result.
-    let agent_cmd =
-        ctx.state.config.agent_cmd.clone().unwrap_or_else(|| {
-            "claude -p \"$OVERMIND_TASK_PROMPT\" --output-format json".to_string()
-        });
+    let agent_cmd = agent_command(&ctx.state);
     // Load what the organization remembers about this kind of work, and put
     // it in front of the agent (and in an env var). A no-op when memory is off.
     let memory_context = ctx
@@ -865,6 +934,7 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         .env("OVERMIND_TASK_TITLE", &ctx.title)
         .env("OVERMIND_TASK_DESCRIPTION", &ctx.description)
         .env("OVERMIND_AGENT_TRAITS", &ctx.agent_traits)
+        .env("OVERMIND_AGENT_MODEL", trait_model(&ctx.agent_traits))
         .env(
             "OVERMIND_MEMORY_CONTEXT",
             memory_context.as_deref().unwrap_or(""),

@@ -8,7 +8,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use tokio::sync::broadcast;
 
-use crate::domain::{AgentTraits, Autonomy, ReviewStrictness};
+use crate::domain::{AgentTraits, Autonomy, DomainPatch, ReviewStrictness};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -152,6 +152,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
 
     sqlx::migrate!("./migrations").run(&pool).await?;
     seed_archetypes(&pool).await?;
+    seed_domains(&pool).await?;
     let (events, _) = broadcast::channel(256);
     let memory = crate::mcp::Memory::from_config(config.memory_cmd.clone());
     Ok(AppState {
@@ -166,8 +167,15 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
 /// The archetype every company is founded with (M15).
 pub const CEO_ARCHETYPE: &str = "chief-executive";
 
-/// The CEO thinks for the whole company, so it gets the strongest model.
-pub const CEO_MODEL: &str = "claude-opus-4-8";
+/// The domain an agent has when none was chosen (ADR-0021).
+pub const GENERAL_DOMAIN: &str = "general";
+
+/// The CEO thinks for the whole company, so it gets the strongest model. A
+/// lookup rather than a constant (ADR-0021): "the strongest model" stays true
+/// as the catalog moves, instead of being true on the day it was typed.
+pub fn ceo_model() -> &'static str {
+    crate::model::strongest().id
+}
 
 /// Names the system picks from when it founds a company's CEO. Short, easy to
 /// say, and deliberately not tied to a gender or a language — you will be
@@ -187,9 +195,15 @@ pub fn random_ceo_name() -> &'static str {
     CEO_NAMES[n % CEO_NAMES.len()]
 }
 
-/// The built-in archetype catalog (UX.md: "the catalog is a product surface").
-/// Idempotent: inserts only slugs that don't exist yet, so user-added
-/// archetypes and future catalog versions coexist.
+/// The built-in **function** catalog (UX.md: "the catalog is a product
+/// surface"). Since ADR-0021 an archetype answers exactly one question — *what
+/// kind of work does this agent do* — and the field it does it in is a separate
+/// axis (see [`builtin_domains`]). "Media & A/V quality" is `reviewer ×
+/// media-av`: two clicks and no free text, rather than a row of its own.
+///
+/// Idempotent: only slugs that don't exist yet are inserted, so user-added
+/// archetypes, future catalog versions, and the pre-ADR-0021 rows already
+/// sitting in an existing database all coexist.
 fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentTraits)> {
     let base = |focus: &[&str], perms: &[&str], autonomy, strictness| AgentTraits {
         focus_areas: focus.iter().map(|s| s.to_string()).collect(),
@@ -197,7 +211,9 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
         autonomy,
         review_strictness: strictness,
         monthly_budget_cents: 5_000,
-        model: "claude-sonnet".to_string(),
+        model: crate::model::default_model().id.to_string(),
+        // A function is not visual by itself; the domain decides that.
+        multimodal: false,
     };
     vec![
         (
@@ -229,37 +245,17 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
                 autonomy: Autonomy::ActWithinBudget,
                 review_strictness: ReviewStrictness::Standard,
                 monthly_budget_cents: 2_000,
-                model: CEO_MODEL.to_string(),
+                model: ceo_model().to_string(),
+                // The leader reads whatever you bring to the conversation.
+                multimodal: true,
             },
         ),
         (
-            "security-engineer",
-            "Security Engineer",
-            "Reviews code and configuration for vulnerabilities (OWASP-class issues, secrets handling, dependency risks). Reads everything, changes nothing without review.",
+            "builder",
+            "Builder",
+            "Builds the thing itself: implements, assembles, configures, and makes it work. Hands changes over for review rather than putting them live.",
             base(
-                &[
-                    "vulnerabilities",
-                    "secrets-handling",
-                    "dependencies",
-                    "authz",
-                ],
-                &[
-                    "task:code",
-                    "task:knowledge",
-                    "repo:read",
-                    "pr:comment",
-                    "pr:create",
-                ],
-                Autonomy::ProposeOnly,
-                ReviewStrictness::Strict,
-            ),
-        ),
-        (
-            "backend-developer",
-            "Backend Developer",
-            "Implements server-side features and fixes: APIs, data models, business logic, tests.",
-            base(
-                &["api", "data-model", "business-logic", "tests"],
+                &["implementation", "assembly", "configuration", "tests"],
                 &[
                     "task:code",
                     "task:knowledge",
@@ -272,28 +268,11 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             ),
         ),
         (
-            "frontend-developer",
-            "Frontend Developer",
-            "Implements UI components, styling and client-side logic, with attention to accessibility.",
+            "reviewer",
+            "Reviewer",
+            "Judges work against a standard — correctness, quality, safety, compliance — and says what is wrong and why. Reads everything, changes nothing.",
             base(
-                &["ui-components", "styling", "accessibility", "client-state"],
-                &[
-                    "task:code",
-                    "task:knowledge",
-                    "repo:read",
-                    "repo:write-branch",
-                    "pr:create",
-                ],
-                Autonomy::ActWithApproval,
-                ReviewStrictness::Standard,
-            ),
-        ),
-        (
-            "code-reviewer",
-            "Code Reviewer",
-            "Reviews pull requests for correctness, clarity and maintainability. Never pushes code.",
-            base(
-                &["correctness", "maintainability", "style"],
+                &["correctness", "quality", "risks", "standards"],
                 &[
                     "task:code",
                     "task:knowledge",
@@ -308,7 +287,7 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
         (
             "researcher",
             "Researcher",
-            "Investigates questions, compares options, produces sourced write-ups. No code access needed.",
+            "Investigates open questions, compares the options honestly, and writes up what it found with the sources it found it in. Needs no access to your code.",
             base(
                 &["investigation", "comparison", "sources"],
                 &["task:knowledge", "web:read", "docs:write"],
@@ -317,14 +296,149 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
             ),
         ),
         (
-            "technical-writer",
-            "Technical Writer",
-            "Writes and maintains documentation: guides, references, changelogs.",
+            "writer",
+            "Writer",
+            "Turns what the company knows into something a person can read: guides, references, briefs, changelogs.",
             base(
-                &["guides", "reference", "changelog"],
+                &["clarity", "structure", "accuracy"],
                 &["task:knowledge", "repo:read", "docs:write", "pr:create"],
                 Autonomy::ActWithApproval,
                 ReviewStrictness::Standard,
+            ),
+        ),
+        (
+            "analyst",
+            "Analyst",
+            "Works the numbers: costs, projections, comparisons, unit economics. Shows the model it used, not only the answer it reached.",
+            base(
+                &["modelling", "estimates", "trade-offs"],
+                &["task:knowledge", "web:read", "docs:write"],
+                Autonomy::ActWithinBudget,
+                ReviewStrictness::Standard,
+            ),
+        ),
+    ]
+}
+
+/// The built-in **domain** catalog (ADR-0021): the field an agent works in,
+/// orthogonal to the function it performs there.
+///
+/// A domain is additive by construction — it contributes focus areas, declared
+/// capabilities, whether the field is visual by nature, and one line telling
+/// the agent where it is standing. It never grants `task:code` /
+/// `task:knowledge`: which kind of work an agent may be checked out onto is a
+/// property of the function, not of the subject matter.
+fn builtin_domains() -> Vec<(&'static str, &'static str, &'static str, DomainPatch)> {
+    let d = |focus: &[&str], perms: &[&str], multimodal, context: &str| DomainPatch {
+        focus_areas: focus.iter().map(|s| s.to_string()).collect(),
+        permissions: perms.iter().map(|s| s.to_string()).collect(),
+        multimodal,
+        context: context.to_string(),
+    };
+    vec![
+        (
+            GENERAL_DOMAIN,
+            "General",
+            "No particular field. Pick this when the work is not about one subject in particular — the function alone describes it.",
+            DomainPatch::default(),
+        ),
+        (
+            "software",
+            "Software",
+            "Software as a whole: source, architecture, and the tests that hold it up.",
+            d(
+                &["architecture", "maintainability", "tests"],
+                &["repo:read"],
+                false,
+                "You work on software: its source, its architecture, and the tests that hold it up.",
+            ),
+        ),
+        (
+            "backend",
+            "Backend",
+            "The server side: APIs, data models, business logic, and the durability of all three.",
+            d(
+                &["api", "data-model", "business-logic"],
+                &["repo:read"],
+                false,
+                "You work on the server side: APIs, data models, business logic, and the durability of all three.",
+            ),
+        ),
+        (
+            "frontend",
+            "Frontend",
+            "The interface people actually touch: components, styling, accessibility, client state.",
+            d(
+                &["ui-components", "styling", "accessibility", "client-state"],
+                &["repo:read"],
+                true,
+                "You work on the interface people actually touch: components, styling, accessibility and client state. Screenshots and mockups are evidence, not decoration — look at them.",
+            ),
+        ),
+        (
+            "security",
+            "Security",
+            "Vulnerabilities, secrets handling, dependency risk, and who is allowed to do what.",
+            d(
+                &[
+                    "vulnerabilities",
+                    "secrets-handling",
+                    "dependencies",
+                    "authz",
+                ],
+                &["repo:read"],
+                false,
+                "You work on security: OWASP-class vulnerabilities, secrets handling, dependency and supply-chain risk, and who is allowed to do what.",
+            ),
+        ),
+        (
+            "media-av",
+            "Media & A/V",
+            "Picture and sound: display and projection, audio reproduction, calibration, room acoustics, equipment.",
+            d(
+                &[
+                    "picture-quality",
+                    "sound-quality",
+                    "calibration",
+                    "room-acoustics",
+                    "equipment",
+                ],
+                &["web:read"],
+                true,
+                "You work on picture and sound: display and projection quality, audio reproduction, calibration, room acoustics, and the equipment that produces them. You are expected to look at the material and judge what it actually is, not only read its specifications.",
+            ),
+        ),
+        (
+            "home-systems",
+            "Home & Building Systems",
+            "Physical spaces and what gets installed in them: layout, wiring, mounting, standards, cost.",
+            d(
+                &["layout", "wiring", "installation", "standards", "budget"],
+                &["web:read"],
+                true,
+                "You work on physical spaces and the systems installed in them: layout, wiring routes, mounting, the standards that apply, and what it costs to do properly. Photographs and plans of the actual space are evidence — look at them.",
+            ),
+        ),
+        (
+            "finance",
+            "Finance",
+            "Money: costs, projections, unit economics, and the risk hiding in both.",
+            d(
+                &["costs", "projections", "unit-economics", "risk"],
+                &["web:read"],
+                false,
+                "You work on money: costs, projections, unit economics, and the risk hiding in all of them. State your assumptions where you had to make them.",
+            ),
+        ),
+        (
+            "legal",
+            "Legal & Compliance",
+            "Contracts, licensing, compliance and obligations — and knowing when a qualified human must sign off.",
+            d(
+                &["contracts", "compliance", "licensing", "obligations"],
+                &["web:read"],
+                false,
+                "You work on contracts, licensing, compliance and obligations. Say plainly when something needs a qualified human to sign off, rather than answering as if you were one.",
             ),
         ),
     ]
@@ -349,4 +463,43 @@ async fn seed_archetypes(pool: &SqlitePool) -> Result<(), InitError> {
         .await?;
     }
     Ok(())
+}
+
+/// Seed the domain catalog (ADR-0021). Idempotent on the same terms as
+/// [`seed_archetypes`]: a slug that already exists is left exactly as it is,
+/// so a user's own domain is never overwritten by a catalog update.
+async fn seed_domains(pool: &SqlitePool) -> Result<(), InitError> {
+    for (slug, name, description, patch) in builtin_domains() {
+        let patch_json = serde_json::to_string(&patch)?;
+        sqlx::query(
+            "INSERT INTO domains (id, slug, name, description, traits_patch, created_at)
+             SELECT ?, ?, ?, ?, ?, ?
+             WHERE NOT EXISTS (SELECT 1 FROM domains WHERE slug = ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(slug)
+        .bind(name)
+        .bind(description)
+        .bind(patch_json)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(slug)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Load a domain's patch by slug. `None` for an unknown slug, so callers can
+/// tell "no such domain" from "the general domain, which adds nothing".
+pub async fn domain_patch(
+    pool: &SqlitePool,
+    slug: &str,
+) -> Result<Option<DomainPatch>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT traits_patch FROM domains WHERE slug = ?")
+        .bind(slug)
+        .fetch_optional(pool)
+        .await?;
+    // A patch that will not parse is a seeding bug, not a reason to refuse the
+    // hire: fall back to adding nothing rather than failing the request.
+    Ok(row.map(|(json,)| serde_json::from_str(&json).unwrap_or_default()))
 }

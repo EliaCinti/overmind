@@ -258,7 +258,7 @@ async fn three_agents_work_three_tasks_in_parallel() {
     let mut agents = Vec::new();
     let mut tasks = Vec::new();
     for i in 0..3 {
-        agents.push(hire(&env, &format!("Agent {i}"), "backend-developer").await);
+        agents.push(hire(&env, &format!("Agent {i}"), "builder").await);
         tasks.push(make_todo_task(&env, &format!("Task {i}")).await);
     }
 
@@ -299,7 +299,7 @@ async fn timeout_kills_session_and_releases_task() {
         c.session_timeout_secs = 1
     })
     .await;
-    let agent_id = hire(&env, "Slowpoke", "backend-developer").await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
     let task_id = make_todo_task(&env, "Never finishes").await;
 
     let (status, started) = send(
@@ -337,7 +337,7 @@ async fn restart_recovery_resumes_orphaned_session() {
     // crash mid-run would leave it (running in the DB, worktree on disk, no
     // live process).
     let env = build_env(HAPPY_STUB, Some(db_url.clone()), |_| {}).await;
-    let agent_id = hire(&env, "Phoenix", "backend-developer").await;
+    let agent_id = hire(&env, "Phoenix", "builder").await;
     let task_id = make_todo_task(&env, "Survives restarts").await;
 
     let repo = env.root.join("repo");
@@ -441,9 +441,9 @@ async fn wakeup_enforces_agent_autonomy() {
         "outcome: {outcome:?}"
     );
 
-    // act_with_approval (backend-developer): the wakeup must NOT start work.
+    // act_with_approval (builder): the wakeup must NOT start work.
     let env2 = build_env(HAPPY_STUB, None, |_| {}).await;
-    let agent2 = hire(&env2, "Waitsforhumans", "backend-developer").await;
+    let agent2 = hire(&env2, "Waitsforhumans", "builder").await;
     let task2 = make_todo_task(&env2, "Needs a human").await;
     let (_, wakeup2) = send(
         &env2.app,

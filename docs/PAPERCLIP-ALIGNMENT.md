@@ -32,7 +32,8 @@
 ## Recorded deviations
 
 1. **`audit_events` instead of `activity_log`** — our audit log is hash-chained and append-only-enforced (ADR-0006); the name signals the stronger guarantee. The *concept* maps 1:1.
-2. **Archetypes** — Paperclip has no archetype catalog; this is an Overmind addition (ADR-0005), layered on top of their agent model, not replacing it.
+2. **Archetypes and domains** — Paperclip has no catalog of either. Their `agents` table carries `role TEXT NOT NULL DEFAULT 'general'` and a free-text `capabilities` column; ours carries a seeded **function** (archetype) and a seeded **field** (domain), each contributing typed traits. An Overmind addition (ADR-0005, extended by ADR-0021), layered on top of their agent model rather than replacing it — `role`/`capabilities` remain the shape we would map back onto.
+   Checked again before M14 slice 3 (2026-08-06): nothing to port. Their model is strictly thinner, and structured-first characterization is a pillar of ours (UX.md), so ours wins.
 3. **Memory (`MemoryProvider`/Wadachi)** — no Paperclip equivalent; Overmind differentiator (ADR-0003/0004).
 4. **Execution layer (worktrees, diff review)** — from Vibe Kanban, not Paperclip.
 

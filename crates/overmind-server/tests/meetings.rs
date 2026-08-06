@@ -94,7 +94,7 @@ async fn setup(stub_script: &str) -> TestEnv {
         let app = app.clone();
         let company_id = company_id.clone();
         async move {
-            let mut body = json!({ "name": name, "archetype": "backend-developer" });
+            let mut body = json!({ "name": name, "archetype": "builder" });
             if let Some(boss) = reports_to {
                 body["reports_to"] = json!(boss);
             }
@@ -245,11 +245,7 @@ async fn an_agent_asks_for_a_meeting_and_nothing_runs_until_you_say_so() {
     // …and it carries the *parts* the sentence was made of, so a client can
     // word it in the company's language instead of showing our English (M16).
     // The convener's own reason travels through untouched.
-    assert_eq!(
-        n["params"]["agent"],
-        json!("Bruno (backend-developer)"),
-        "{n}"
-    );
+    assert_eq!(n["params"]["agent"], json!("Bruno (builder)"), "{n}");
     assert_eq!(
         n["params"]["topic"],
         json!("How do we secure the login flow"),

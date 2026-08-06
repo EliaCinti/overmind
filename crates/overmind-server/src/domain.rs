@@ -154,7 +154,27 @@ pub struct AgentTraits {
     pub autonomy: Autonomy,
     pub review_strictness: ReviewStrictness,
     pub monthly_budget_cents: i64,
+    /// Which model runs this agent. Validated against [`crate::model`] wherever
+    /// traits enter the system — an id the catalog does not name is refused at
+    /// the boundary, not stored and handed to a prompt later.
     pub model: String,
+    /// Whether the agent is characterized to work with visual material —
+    /// images, screenshots, diagrams, video stills (ADR-0021).
+    ///
+    /// Enforced at checkout: a task carrying image inputs may only be handed to
+    /// an agent that declares this. That is the same *kind* of rule as
+    /// `task:code` — not a claim about what the spawned CLI can do, but a
+    /// refusal to hand an agent work it was never characterized for.
+    ///
+    /// It is also checked against the model at hire time, where it is vacuous
+    /// today: every model in the catalog can read images. Written anyway,
+    /// because the catalog is where that fact lives and a model without vision
+    /// is a plausible next entry.
+    ///
+    /// `#[serde(default)]` so agents hired before ADR-0021 read as `false`
+    /// rather than failing to deserialize.
+    #[serde(default)]
+    pub multimodal: bool,
 }
 
 /// Partial override applied on top of an archetype's defaults at hire time
@@ -167,6 +187,32 @@ pub struct TraitsPatch {
     pub review_strictness: Option<ReviewStrictness>,
     pub monthly_budget_cents: Option<i64>,
     pub model: Option<String>,
+    pub multimodal: Option<bool>,
+}
+
+/// What a domain contributes on top of a function's defaults (ADR-0021).
+///
+/// Additive by construction: a domain may add focus areas, add *declared*
+/// capabilities, say the field is visual by nature, and describe itself to the
+/// agent in one line. It cannot remove anything, and it cannot grant
+/// `task:code` / `task:knowledge` — which kind of work an agent may be checked
+/// out onto is a property of the function, not of the subject matter.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DomainPatch {
+    #[serde(default)]
+    pub focus_areas: Vec<String>,
+    /// Declared capabilities only. Any `task:*` entry here is dropped when the
+    /// patch is applied — see [`AgentTraits::with_domain`].
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    /// Whether work in this field is visual by nature (A/V, design, physical
+    /// spaces). Seeds `multimodal`; the user can still turn it off at hire.
+    #[serde(default)]
+    pub multimodal: bool,
+    /// One line telling the agent what field it works in, compiled into its
+    /// prompt alongside the persona (ADR-0005).
+    #[serde(default)]
+    pub context: String,
 }
 
 impl AgentTraits {
@@ -189,6 +235,32 @@ impl AgentTraits {
         if let Some(v) = patch.model {
             self.model = v;
         }
+        if let Some(v) = patch.multimodal {
+            self.multimodal = v;
+        }
+        self
+    }
+
+    /// Fold a domain's contribution in, between the function's defaults and the
+    /// user's own tuning (ADR-0021). Additive: focus areas and declared
+    /// capabilities are merged without duplicates, `multimodal` can only be
+    /// turned *on* here, and `task:*` is ignored — a field of work does not
+    /// decide what kind of task an agent may be checked out onto.
+    pub fn with_domain(mut self, patch: &DomainPatch) -> Self {
+        for area in &patch.focus_areas {
+            if !self.focus_areas.contains(area) {
+                self.focus_areas.push(area.clone());
+            }
+        }
+        for grant in &patch.permissions {
+            if grant == perm::TASK_CODE || grant == perm::TASK_KNOWLEDGE {
+                continue;
+            }
+            if !self.permissions.contains(grant) {
+                self.permissions.push(grant.clone());
+            }
+        }
+        self.multimodal |= patch.multimodal;
         self
     }
 }

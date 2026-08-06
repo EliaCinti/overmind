@@ -412,7 +412,7 @@ async fn a_code_run_hands_back_a_diff_and_a_document_without_mixing_them() {
         &app,
         "POST",
         &format!("/api/companies/{company_id}/agents"),
-        Some(json!({ "name": "Builder", "archetype": "backend-developer" })),
+        Some(json!({ "name": "Builder", "archetype": "builder" })),
     )
     .await;
     let agent_id = agent["id"].as_str().expect("agent").to_string();

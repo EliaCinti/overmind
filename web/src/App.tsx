@@ -3,6 +3,8 @@ import type {
   Agent,
   AgentBudget,
   Archetype,
+  Domain,
+  Model,
   Company,
   LanguageCode,
   Notification,
@@ -37,6 +39,8 @@ export default function App() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [companyId, setCompanyId] = useState<string | null>(null);
   const [archetypes, setArchetypes] = useState<Archetype[]>([]);
+  const [domains, setDomains] = useState<Domain[]>([]);
+  const [models, setModels] = useState<Model[]>([]);
 
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -68,12 +72,19 @@ export default function App() {
     setHireOpen(true);
   };
 
-  // Bootstrap: companies + archetype catalog.
+  // Bootstrap: companies + both catalogs + the models we ship (ADR-0021).
   useEffect(() => {
-    Promise.all([api.listCompanies(), api.listArchetypes()])
-      .then(([cs, arch]) => {
+    Promise.all([
+      api.listCompanies(),
+      api.listArchetypes(),
+      api.listDomains(),
+      api.listModels(),
+    ])
+      .then(([cs, arch, doms, mods]) => {
         setCompanies(cs);
         setArchetypes(arch);
+        setDomains(doms);
+        setModels(mods);
         const last = localStorage.getItem(LAST_COMPANY);
         setCompanyId(cs.find((c) => c.id === last)?.id ?? cs[0]?.id ?? null);
       })
@@ -269,6 +280,8 @@ export default function App() {
               onOpenChange={setHireOpen}
               companyId={companyId}
               archetypes={archetypes}
+              domains={domains}
+              models={models}
               agents={agents}
               defaultManager={hireManager}
               onHired={bump}

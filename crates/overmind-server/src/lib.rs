@@ -8,6 +8,7 @@ pub mod governance;
 pub mod i18n;
 pub mod mcp;
 pub mod meeting;
+pub mod model;
 pub mod notify;
 pub mod org;
 pub mod runner;

@@ -17,14 +17,42 @@ export interface AgentTraits {
   review_strictness: ReviewStrictness;
   monthly_budget_cents: number;
   model: string;
+  /** Characterized to work with visual material (ADR-0021). */
+  multimodal: boolean;
 }
 
+/** The *function* an agent performs (ADR-0021). */
 export interface Archetype {
   id: string;
   slug: string;
   name: string;
   description: string;
   default_traits: AgentTraits;
+}
+
+/** The *field* it performs it in — the second axis (ADR-0021). */
+export interface Domain {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  traits_patch: {
+    focus_areas: string[];
+    permissions: string[];
+    multimodal: boolean;
+    context: string;
+  };
+}
+
+/**
+ * A model an agent may run on. The dialog used to offer three hand-written
+ * strings that were not model identifiers at all; it now reads the server's
+ * catalog, which is the only thing that knows what we actually ship.
+ */
+export interface Model {
+  id: string;
+  display_name: string;
+  vision: boolean;
 }
 
 export type LanguageCode = "en" | "it";
@@ -41,6 +69,8 @@ export interface Agent {
   id: string;
   name: string;
   archetype: string;
+  /** `null` for agents hired before ADR-0021. */
+  domain: string | null;
   traits: AgentTraits;
   custom_brief: string | null;
   title: string | null;
@@ -127,6 +157,7 @@ export interface OrgProposalMember {
   position: number;
   name: string;
   archetype: string;
+  domain: string | null;
   title: string | null;
   reports_to: string | null;
   brief: string | null;
@@ -293,6 +324,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 export interface HireAgentBody {
   name: string;
   archetype: string;
+  domain?: string | null;
   traits?: Partial<AgentTraits>;
   custom_brief?: string | null;
   title?: string | null;
@@ -309,6 +341,8 @@ export const api = {
 
   listArchetypes: () =>
     req<{ archetypes: Archetype[] }>("GET", "/archetypes").then((r) => r.archetypes),
+  listDomains: () => req<{ domains: Domain[] }>("GET", "/domains").then((r) => r.domains),
+  listModels: () => req<{ models: Model[] }>("GET", "/models").then((r) => r.models),
 
   listAgents: (companyId: string) =>
     req<{ agents: Agent[] }>("GET", `/companies/${companyId}/agents`).then((r) => r.agents),

@@ -122,7 +122,7 @@ async fn setup(stub_script: &str) -> TestEnv {
         &app,
         "POST",
         &format!("/api/companies/{company_id}/agents"),
-        Some(json!({ "name": "Builder", "archetype": "backend-developer" })),
+        Some(json!({ "name": "Builder", "archetype": "builder" })),
     )
     .await;
     let agent_id = agent["id"].as_str().expect("agent id").to_string();
@@ -729,7 +729,7 @@ async fn agent_conversation_ripples_to_teammates() {
         &env.app,
         "POST",
         &format!("/api/companies/{}/agents", env.company_id),
-        Some(json!({ "name": "Guard", "archetype": "backend-developer", "reports_to": env.agent_id })),
+        Some(json!({ "name": "Guard", "archetype": "builder", "reports_to": env.agent_id })),
     )
     .await;
     let guard_id = guard["id"].as_str().expect("guard id").to_string();
@@ -737,9 +737,7 @@ async fn agent_conversation_ripples_to_teammates() {
         &env.app,
         "POST",
         &format!("/api/companies/{}/agents", env.company_id),
-        Some(
-            json!({ "name": "Iris", "archetype": "backend-developer", "reports_to": env.agent_id }),
-        ),
+        Some(json!({ "name": "Iris", "archetype": "builder", "reports_to": env.agent_id })),
     )
     .await;
     let iris_id = iris["id"].as_str().expect("iris id").to_string();

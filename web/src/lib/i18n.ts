@@ -87,6 +87,52 @@ export const en = {
     standard: "Standard",
     strict: "Strict",
   },
+  // The two axes of characterization (ADR-0021). Keyed by the server's own
+  // slugs, like `status` and `autonomy`, so a catalog row added server-side
+  // fails the build until every language names it. A slug that is *not* here is
+  // a user's own row — `useCatalogText` shows its stored prose rather than
+  // inventing a translation.
+  archetype: {
+    "chief-executive": "Chief Executive",
+    builder: "Builder",
+    reviewer: "Reviewer",
+    researcher: "Researcher",
+    writer: "Writer",
+    analyst: "Analyst",
+  },
+  archetypeDesc: {
+    "chief-executive":
+      "Runs the company. Turns what you want into an organization and a plan, delegates rather than executing, and escalates the calls that are yours.",
+    builder: "Builds the thing itself: implements, assembles, configures. Hands changes over for review rather than putting them live.",
+    reviewer:
+      "Judges work against a standard — correctness, quality, safety — and says what is wrong and why. Reads everything, changes nothing.",
+    researcher:
+      "Investigates open questions, compares the options honestly, and writes up what it found with its sources.",
+    writer: "Turns what the company knows into something a person can read: guides, references, briefs.",
+    analyst: "Works the numbers: costs, projections, comparisons. Shows the model it used, not only the answer.",
+  },
+  domain: {
+    general: "General",
+    software: "Software",
+    backend: "Backend",
+    frontend: "Frontend",
+    security: "Security",
+    "media-av": "Media & A/V",
+    "home-systems": "Home & Building Systems",
+    finance: "Finance",
+    legal: "Legal & Compliance",
+  },
+  domainDesc: {
+    general: "No particular field. Pick this when the work is not about one subject in particular.",
+    software: "Software as a whole: source, architecture, and the tests that hold it up.",
+    backend: "The server side: APIs, data models, business logic.",
+    frontend: "The interface people actually touch: components, styling, accessibility.",
+    security: "Vulnerabilities, secrets handling, dependency risk, and who is allowed to do what.",
+    "media-av": "Picture and sound: display and projection, audio reproduction, calibration, acoustics.",
+    "home-systems": "Physical spaces and what gets installed in them: layout, wiring, mounting, standards.",
+    finance: "Money: costs, projections, unit economics, and the risk hiding in both.",
+    legal: "Contracts, licensing, compliance — and knowing when a qualified human must sign off.",
+  },
   board: {
     noRepo:
       "No git repo connected. Agents can research, write documents and decide — connect a repo when you want them writing code.",
@@ -240,6 +286,14 @@ export const en = {
   hire: {
     title: "Hire an agent",
     pickDesc: "Pick a role to start — everything is preconfigured.",
+    pickFunctionDesc: "Pick what kind of work this agent does.",
+    pickDomainDesc: "Now the field it works in — it adds focus and capabilities on top.",
+    domainStep: "Field",
+    fieldOf: "{function} · pick a field",
+    multimodal: "Works with images",
+    multimodalHint:
+      "Looks at pictures, screenshots and diagrams. Tasks that carry them can only go to an agent that does.",
+    previewLooks: " It looks at visual material.",
     tune: "tune the details",
     expert: "expert mode",
     name: "Name",
@@ -389,6 +443,50 @@ export const it: Dictionary = {
     lenient: "Permissiva",
     standard: "Standard",
     strict: "Severa",
+  },
+  archetype: {
+    "chief-executive": "Direzione",
+    builder: "Costruttore",
+    reviewer: "Revisore",
+    researcher: "Ricercatore",
+    writer: "Redattore",
+    analyst: "Analista",
+  },
+  archetypeDesc: {
+    "chief-executive":
+      "Guida l'azienda. Trasforma quel che vuoi in un'organizzazione e un piano, delega invece di eseguire, e ti rimanda le decisioni che sono tue.",
+    builder:
+      "Costruisce la cosa: implementa, assembla, configura. Consegna le modifiche in revisione invece di metterle in produzione.",
+    reviewer:
+      "Giudica il lavoro rispetto a uno standard — correttezza, qualità, sicurezza — e dice cosa non va e perché. Legge tutto, non tocca nulla.",
+    researcher:
+      "Indaga le domande aperte, confronta le opzioni onestamente, e scrive quel che ha trovato con le sue fonti.",
+    writer:
+      "Trasforma quel che l'azienda sa in qualcosa che una persona può leggere: guide, riferimenti, sintesi.",
+    analyst:
+      "Lavora i numeri: costi, proiezioni, confronti. Mostra il modello che ha usato, non solo il risultato.",
+  },
+  domain: {
+    general: "Generale",
+    software: "Software",
+    backend: "Backend",
+    frontend: "Frontend",
+    security: "Sicurezza",
+    "media-av": "Audio & Video",
+    "home-systems": "Casa & Impianti",
+    finance: "Finanza",
+    legal: "Legale & Conformità",
+  },
+  domainDesc: {
+    general: "Nessun campo in particolare. Scegli questo quando il lavoro non è su un argomento specifico.",
+    software: "Il software nel suo insieme: sorgente, architettura, e i test che lo reggono.",
+    backend: "Il lato server: API, modelli di dati, logica di business.",
+    frontend: "L'interfaccia che le persone toccano davvero: componenti, stile, accessibilità.",
+    security: "Vulnerabilità, gestione dei segreti, rischio nelle dipendenze, e chi può fare cosa.",
+    "media-av": "Immagine e suono: display e proiezione, riproduzione audio, calibrazione, acustica.",
+    "home-systems": "Spazi fisici e ciò che ci si installa: disposizione, cablaggi, staffaggio, normative.",
+    finance: "I soldi: costi, proiezioni, economia unitaria, e il rischio nascosto in entrambi.",
+    legal: "Contratti, licenze, conformità — e sapere quando serve la firma di un umano qualificato.",
   },
   board: {
     noRepo:
@@ -542,6 +640,14 @@ export const it: Dictionary = {
   hire: {
     title: "Assumi un agente",
     pickDesc: "Scegli un ruolo per iniziare — è già tutto configurato.",
+    pickFunctionDesc: "Scegli che tipo di lavoro fa questo agente.",
+    pickDomainDesc: "Ora il campo in cui lo fa — aggiunge focus e capacità sopra al ruolo.",
+    domainStep: "Campo",
+    fieldOf: "{function} · scegli un campo",
+    multimodal: "Lavora con le immagini",
+    multimodalHint:
+      "Guarda foto, screenshot e diagrammi. I task che ne contengono possono andare solo a un agente che lo fa.",
+    previewLooks: " Guarda il materiale visivo.",
     tune: "regola i dettagli",
     expert: "modalità esperto",
     name: "Nome",
@@ -667,6 +773,38 @@ export function useT(): Translate {
       (out, [k, v]) => out.replaceAll(`{${k}}`, String(v)),
       template,
     );
+  };
+}
+
+/**
+ * Catalog prose, worded here (ADR-0021).
+ *
+ * The archetype and domain catalogs are *data*: seedable, extensible, and
+ * carrying English `name` / `description` columns the server hands out as-is.
+ * Rendering those columns put raw English inside an interface M16 had made
+ * fully Italian. So the same rule as notifications applies — the server sends
+ * the identity, the client writes the words.
+ *
+ * The fallback is the point: a slug we do not know is a row a user or a plugin
+ * added, and its own prose is a far better answer than its slug.
+ */
+export function useCatalogText(): (
+  kind: "archetype" | "domain",
+  slug: string,
+  stored: { name: string; description: string },
+) => { name: string; description: string } {
+  const language = useLanguage();
+  const dict = DICTIONARIES[language] ?? en;
+  return (kind, slug, stored) => {
+    const descKind = `${kind}Desc` as "archetypeDesc" | "domainDesc";
+    const names = dict[kind] as Record<string, string>;
+    const descs = dict[descKind] as Record<string, string>;
+    const enNames = en[kind] as Record<string, string>;
+    const enDescs = en[descKind] as Record<string, string>;
+    return {
+      name: names?.[slug] ?? enNames?.[slug] ?? stored.name,
+      description: descs?.[slug] ?? enDescs?.[slug] ?? stored.description,
+    };
   };
 }
 

@@ -184,7 +184,7 @@ async fn run_one_task(env: &Env, title: &str) -> Value {
         &env.app,
         "POST",
         &format!("/api/companies/{}/agents", env.company),
-        Some(json!({ "name": "Worker", "archetype": "backend-developer" })),
+        Some(json!({ "name": "Worker", "archetype": "builder" })),
     )
     .await;
     let agent = agent["id"].as_str().expect("id").to_string();
@@ -351,7 +351,7 @@ async fn concurrent_tasks_use_memory_in_parallel() {
             &env.app,
             "POST",
             &format!("/api/companies/{}/agents", env.company),
-            Some(json!({ "name": format!("W{i}"), "archetype": "backend-developer" })),
+            Some(json!({ "name": format!("W{i}"), "archetype": "builder" })),
         )
         .await;
         let agent = agent["id"].as_str().expect("id").to_string();

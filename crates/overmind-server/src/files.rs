@@ -128,6 +128,15 @@ pub fn mime_for(name: &str) -> &'static str {
     }
 }
 
+/// Whether this content type is something you have to *look* at.
+///
+/// Drives the multimodal gate at checkout (ADR-0021): a task carrying one of
+/// these may only go to an agent characterized for visual work. SVG is excluded
+/// on purpose — it is markup, readable as text by an agent that cannot see.
+pub fn is_visual(mime: &str) -> bool {
+    mime.starts_with("image/") && mime != "image/svg+xml"
+}
+
 /// Whether this content type is text a human can read in place.
 ///
 /// Drives one decision only: render it inline, or offer a download. The

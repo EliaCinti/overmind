@@ -1,36 +1,12 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import {
-  Bot,
-  Check,
-  CornerDownRight,
-  Eye,
-  FileText,
-  Palette,
-  RotateCcw,
-  Search,
-  Server,
-  Shield,
-  Sparkles,
-  UserMinus,
-  UserPlus,
-  X,
-} from "lucide-react";
+import { Check, CornerDownRight, RotateCcw, Sparkles, UserMinus, UserPlus, X } from "lucide-react";
 import type { OrgProposal as Proposal, OrgProposalMember } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
-import { useT } from "../lib/i18n";
-
-const ICONS: Record<string, typeof Bot> = {
-  "chief-executive": Sparkles,
-  "security-engineer": Shield,
-  "backend-developer": Server,
-  "frontend-developer": Palette,
-  "code-reviewer": Eye,
-  researcher: Search,
-  "technical-writer": FileText,
-};
+import { useCatalogText, useT } from "../lib/i18n";
+import { FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
 
 /**
  * The team the CEO drew up, before it exists.
@@ -188,7 +164,8 @@ function ProposedNode({
   onToggle: () => void;
 }) {
   const t = useT();
-  const Icon = ICONS[member.archetype] ?? Bot;
+  const catalog = useCatalogText();
+  const Icon = FUNCTION_ICONS[member.archetype] ?? FALLBACK_ICON;
   const out = member.excluded;
 
   return (
@@ -230,13 +207,19 @@ function ProposedNode({
                 · {member.title}
               </span>
             )}
+            {/* Both axes, in words (ADR-0021): `reviewer` alone does not tell
+                you whether this hire grades projectors or pull requests. */}
             <span
               className={cn(
-                "mono rounded px-1.5 py-0.5 text-[11px]",
+                "rounded px-1.5 py-0.5 text-[11px]",
                 out ? "text-muted-foreground/50" : "bg-muted text-muted-foreground",
               )}
             >
-              {member.archetype}
+              {catalog("archetype", member.archetype, { name: member.archetype, description: "" })
+                .name}
+              {member.domain && member.domain !== "general"
+                ? ` · ${catalog("domain", member.domain, { name: member.domain, description: "" }).name}`
+                : ""}
             </span>
           </div>
 

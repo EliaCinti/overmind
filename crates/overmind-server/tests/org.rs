@@ -52,7 +52,7 @@ async fn hire(
     reports_to: Option<&str>,
     title: Option<&str>,
 ) -> (StatusCode, Value) {
-    let mut body = json!({ "name": name, "archetype": "backend-developer" });
+    let mut body = json!({ "name": name, "archetype": "builder" });
     if let Some(m) = reports_to {
         body["reports_to"] = json!(m);
     }

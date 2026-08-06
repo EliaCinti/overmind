@@ -42,7 +42,7 @@ async fn send(
 
 /// A CEO that answers an idea with a three-person team, two levels deep.
 const PROPOSES_A_TEAM_STUB: &str = r#"#!/bin/sh
-echo '{"reply":"Here is the team I would build.","tasks":[],"team":{"summary":"A home cinema needs one person on picture and sound, one on the room itself, and someone to keep the budget honest.","members":[{"name":"Vera","archetype":"researcher","title":"Media & A/V quality","why":"picks the projector and calibrates it"},{"name":"Bo","archetype":"technical-writer","title":"Room & acoustics","reports_to":"Vera","why":"writes up the treatment plan"},{"name":"Sam","archetype":"code-reviewer","title":"Budget control","why":"checks every choice against what you said you would spend"}]}}'
+echo '{"reply":"Here is the team I would build.","tasks":[],"team":{"summary":"A home cinema needs one person on picture and sound, one on the room itself, and someone to keep the budget honest.","members":[{"name":"Vera","archetype":"researcher","title":"Media & A/V quality","why":"picks the projector and calibrates it"},{"name":"Bo","archetype":"writer","title":"Room & acoustics","reports_to":"Vera","why":"writes up the treatment plan"},{"name":"Sam","archetype":"reviewer","title":"Budget control","why":"checks every choice against what you said you would spend"}]}}'
 "#;
 
 async fn setup(stub: &str) -> (axum::Router, String, String) {
@@ -94,7 +94,18 @@ async fn a_company_is_founded_with_a_ceo() {
         !ceo["name"].as_str().unwrap_or("").is_empty(),
         "the system gives it a name: {ceo}"
     );
-    assert_eq!(ceo["traits"]["model"], json!("claude-opus-4-8"));
+    // The claim is "the CEO runs on the strongest model", not "the CEO runs on
+    // whichever model was current the day this line was typed" (ADR-0021).
+    // Pinning the literal here is how `model` drifted into fiction in the first
+    // place, so assert the property and let the catalog be the authority.
+    assert_eq!(
+        ceo["traits"]["model"],
+        json!(overmind_server::model::strongest().id)
+    );
+    assert!(
+        overmind_server::model::is_known(ceo["traits"]["model"].as_str().unwrap_or_default()),
+        "the CEO's model must be one we actually ship: {ceo}"
+    );
     assert_eq!(ceo["traits"]["monthly_budget_cents"], json!(2000));
     // Within budget it may take on anything.
     let perms = ceo["traits"]["permissions"]

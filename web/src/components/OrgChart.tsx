@@ -1,39 +1,14 @@
 import { useState } from "react";
 import { motion } from "motion/react";
-import {
-  Shield,
-  Server,
-  Palette,
-  Eye,
-  Search,
-  FileText,
-  Bot,
-  Crown,
-  UserPlus,
-  Pencil,
-  Check,
-  X,
-  Pause,
-  Play,
-  Ban,
-  ShieldCheck,
-} from "lucide-react";
+import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
 import type { Agent, AgentBudget, OrgProposal } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
 import { cn } from "../lib/utils";
 import { useT, useFormats } from "../lib/i18n";
+import { FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
 import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
-
-const ICONS: Record<string, typeof Bot> = {
-  "security-engineer": Shield,
-  "backend-developer": Server,
-  "frontend-developer": Palette,
-  "code-reviewer": Eye,
-  researcher: Search,
-  "technical-writer": FileText,
-};
 
 export function OrgChart({
   agents,
@@ -161,7 +136,7 @@ function Node({
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
-  const Icon = ICONS[agent.archetype] ?? Bot;
+  const Icon = FUNCTION_ICONS[agent.archetype] ?? FALLBACK_ICON;
   const paused = agent.status === "paused";
 
   // Valid managers = anyone except self (server also rejects cycles).

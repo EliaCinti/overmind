@@ -41,7 +41,11 @@ fn new_id() -> String {
 #[derive(Debug, Clone)]
 pub struct MemberSpec {
     pub name: String,
+    /// The function this hire performs (ADR-0021).
     pub archetype: String,
+    /// The field it performs it in. `None` reads as the general domain, so a
+    /// proposal drawn up before ADR-0021 stays acceptable.
+    pub domain: Option<String>,
     pub title: Option<String>,
     /// The **name** of another member, or `None` to report to the CEO.
     pub reports_to: Option<String>,
@@ -84,6 +88,7 @@ impl Proposal {
                 Some(MemberSpec {
                     name,
                     archetype,
+                    domain: text("domain"),
                     title: text("title"),
                     reports_to: text("reports_to"),
                     brief: text("brief"),
@@ -127,8 +132,8 @@ pub async fn propose(
         ));
     }
 
-    // Every archetype must exist: a proposal you cannot accept is worse than
-    // no proposal, and the CEO should learn the catalog it actually has.
+    // Both axes must exist: a proposal you cannot accept is worse than no
+    // proposal, and the CEO should learn the catalog it actually has.
     for m in &proposal.members {
         let known: Option<(String,)> = sqlx::query_as("SELECT id FROM archetypes WHERE slug = ?")
             .bind(&m.archetype)
@@ -139,6 +144,18 @@ pub async fn propose(
                 "no such archetype: `{}` (for {})",
                 m.archetype, m.name
             )));
+        }
+        if let Some(domain) = &m.domain {
+            let known: Option<(String,)> = sqlx::query_as("SELECT id FROM domains WHERE slug = ?")
+                .bind(domain)
+                .fetch_optional(&state.pool)
+                .await?;
+            if known.is_none() {
+                return Err(CeoError::Invalid(format!(
+                    "no such domain: `{domain}` (for {})",
+                    m.name
+                )));
+            }
         }
     }
 
@@ -199,14 +216,15 @@ pub async fn propose(
     for (position, m) in proposal.members.iter().enumerate() {
         sqlx::query(
             "INSERT INTO org_proposal_members
-             (id, proposal_id, position, name, archetype, title, reports_to, brief, rationale)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, proposal_id, position, name, archetype, domain, title, reports_to, brief, rationale)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(new_id())
         .bind(&proposal_id)
         .bind(position as i64)
         .bind(&m.name)
         .bind(&m.archetype)
+        .bind(&m.domain)
         .bind(&m.title)
         .bind(&m.reports_to)
         .bind(&m.brief)
@@ -252,11 +270,12 @@ pub async fn propose(
     Ok(proposal_id)
 }
 
-/// (id, name, archetype, title, reports_to, brief)
+/// (id, name, archetype, domain, title, reports_to, brief)
 type MemberRow = (
     String,
     String,
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -282,7 +301,7 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
     }
 
     let members: Vec<MemberRow> = sqlx::query_as(
-        "SELECT id, name, archetype, title, reports_to, brief FROM org_proposal_members
+        "SELECT id, name, archetype, domain, title, reports_to, brief FROM org_proposal_members
          WHERE proposal_id = ? AND excluded = 0 ORDER BY position",
     )
     .bind(proposal_id)
@@ -305,7 +324,7 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
         let mut placed_any = false;
         let mut still: Vec<&MemberRow> = Vec::new();
         for m in pending {
-            let (member_id, name, archetype, title, reports_to, brief) = m;
+            let (member_id, name, archetype, domain, title, reports_to, brief) = m;
             let manager = match reports_to
                 .as_deref()
                 .map(str::trim)
@@ -328,6 +347,7 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
                 &crate::api::HireAgent {
                     name: name.clone(),
                     archetype: archetype.clone(),
+                    domain: domain.clone(),
                     traits: Default::default(),
                     custom_brief: brief.clone(),
                     title: title.clone(),
@@ -353,13 +373,14 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
             // Nothing resolved this pass: the rest report to the CEO.
             pending = still;
             for m in pending.iter() {
-                let (member_id, name, archetype, title, _rt, brief) = *m;
+                let (member_id, name, archetype, domain, title, _rt, brief) = *m;
                 let agent = crate::api::hire(
                     &mut tx,
                     &company_id,
                     &crate::api::HireAgent {
                         name: name.clone(),
                         archetype: archetype.clone(),
+                        domain: domain.clone(),
                         traits: Default::default(),
                         custom_brief: brief.clone(),
                         title: title.clone(),
