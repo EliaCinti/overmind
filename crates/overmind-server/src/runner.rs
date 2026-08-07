@@ -904,10 +904,17 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         None
     };
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(&agent_cmd)
-        .current_dir(&ctx.worktree_dir)
+    // Caged: the agent may write its own run directory and nothing else
+    // (ADR-0023). `~/.ssh`, the browser profile and Overmind's own database
+    // are unreachable from in there.
+    let mut cmd = crate::sandbox::command(
+        &ctx.state.config,
+        &crate::sandbox::Cage {
+            run_dir: &ctx.worktree_dir,
+        },
+        &agent_cmd,
+    );
+    cmd.current_dir(&ctx.worktree_dir)
         .env("OVERMIND_TASK_PROMPT", &prompt)
         .env("OVERMIND_TASK_TITLE", &ctx.title)
         .env("OVERMIND_TASK_DESCRIPTION", &ctx.description)

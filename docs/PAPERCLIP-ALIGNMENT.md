@@ -36,6 +36,7 @@
    Checked again before M14 slice 3 (2026-08-06): nothing to port. Their model is strictly thinner, and structured-first characterization is a pillar of ours (UX.md), so ours wins.
 3. **Memory (`MemoryProvider`/Wadachi)** — no Paperclip equivalent; Overmind differentiator (ADR-0003/0004).
 4. **Execution layer (worktrees, diff review)** — from Vibe Kanban, not Paperclip.
+5. **Sandboxing** — Paperclip isolates through leased provider environments (`environments.driver`, `environment_leases.provider_lease_id`), a cloud-oriented, multi-tenant shape; their own `sandbox-exec` usage is confined to a single test file. Overmind runs on one person's laptop, so we take the OS-level primitive directly (ADR-0023) and adopt their *vocabulary* — environment, driver — without their mechanism. Checked before M10 slice 1 (2026-08-07).
 
 ## Process
 

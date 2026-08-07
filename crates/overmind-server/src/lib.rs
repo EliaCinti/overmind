@@ -12,6 +12,7 @@ pub mod model;
 pub mod notify;
 pub mod org;
 pub mod runner;
+pub mod sandbox;
 pub mod scheduler;
 pub mod ws;
 

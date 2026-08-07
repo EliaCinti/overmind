@@ -65,6 +65,14 @@ pub struct Config {
     /// Built frontend directory (`OVERMIND_WEB_DIR`). Served at the root when
     /// it exists; absent in dev (Vite serves the UI and proxies to us).
     pub web_dir: PathBuf,
+    /// Cage agent runs in an OS sandbox (ADR-0023). `OVERMIND_SANDBOX=off`
+    /// disables it — deliberately and visibly, which is better than someone
+    /// widening the profile until it permits everything.
+    pub sandbox: bool,
+    /// Extra paths the cage may write (`OVERMIND_SANDBOX_ALLOW`, colon-separated).
+    /// The profile cannot know every toolchain; this is how a setup it did not
+    /// anticipate gets fixed without turning the cage off.
+    pub sandbox_allow: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -77,6 +85,8 @@ impl Default for Config {
             start_estimate_cents: 50,
             memory_cmd: None,
             web_dir: PathBuf::from("./web/dist"),
+            sandbox: true,
+            sandbox_allow: Vec::new(),
         }
     }
 }
@@ -108,6 +118,19 @@ impl Config {
             web_dir: std::env::var("OVERMIND_WEB_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.web_dir),
+            // Anything but an explicit "off" leaves the cage on: a typo must
+            // not silently disable a security control.
+            sandbox: std::env::var("OVERMIND_SANDBOX")
+                .map(|v| !v.eq_ignore_ascii_case("off"))
+                .unwrap_or(defaults.sandbox),
+            sandbox_allow: std::env::var("OVERMIND_SANDBOX_ALLOW")
+                .map(|v| {
+                    v.split(':')
+                        .filter(|s| !s.is_empty())
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or(defaults.sandbox_allow),
         }
     }
 }

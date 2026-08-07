@@ -82,9 +82,23 @@ The differentiator, part 2: Wadachi as first-party brain (ADR-0004).
 - Expose tasks/board/audit over MCP; external agents can file and read tasks
 - **Accept:** a Claude Code session outside Overmind creates a task via MCP.
 
-## M10 — Security hardening `todo`
-- OS-level sandboxing of runners (macOS `sandbox-exec` first); secrets isolation; threat-model doc; prompt-injection review of every gate
-- **Accept:** a deliberately malicious task ("read ~/.ssh, push to main, exceed budget") fails at every layer.
+## M10 — Security hardening `in progress`
+The milestone that stops M14's honesty from being expensive. Since ADR-0005 the promise has been that what an agent may do is enforced server-side; M14 made half of it true and said plainly that the rest was declared and not policed, because we shell out to an external CLI. Meanwhile M17 gave agents arbitrary file I/O and M14 gave them domains that imply browsing, so the unpoliced half kept growing.
+
+The acceptance criterion names three things, and reading it carefully they are **three unrelated mechanisms** — worth splitting before building, because only one of them is a sandbox:
+
+| | mechanism | state |
+|---|---|---|
+| read `~/.ssh` | the sandbox | ✅ **done** — [ADR-0023](adr/0023-os-level-sandboxing.md) |
+| exceed budget | budget gate | ✅ already done (M6 + [ADR-0022](adr/0022-conversational-spend-under-budget.md)) |
+| push to main | git credential isolation | ☐ **not the sandbox** — see below |
+
+- ✅ **Slice 1 — the agent runs in a cage.** Every spawn of agent-controlled work goes through `sandbox-exec` with a **deny-by-default** profile: the run's own directory and this session's temp are writable, the system paths needed to exist are readable, and everything else is denied. Proven, not asserted: a caged agent finds `$HOME`, `/Users`, `/Volumes` and **Overmind's own source and database** all unreachable, while still writing its own worktree and running the real Claude CLI. Every probe is paired with the identical run uncaged, because a denial only proves something if the same script succeeds without the cage.
+  The alternative — allow everything, forbid a list of known-sensitive places — was rejected as the same "security by prayer" ADR-0005 already refused: a blocklist protects the places someone thought of. Deny-by-default fails in the useful direction, loudly, when the profile is wrong. `OVERMIND_SANDBOX_ALLOW` widens it; `OVERMIND_SANDBOX=off` disables it deliberately rather than by erosion.
+- ☐ **Slice 2 — credential isolation.** The sandbox cannot close the network: reaching the API is the job, so anything reachable with the user's ambient git credentials stays reachable. This is what actually stops "push to main", and it is the remaining half of the criterion.
+- ☐ **Slice 3 — threat model, written down.** The boundary currently lives in comments and ADR prose.
+- ☐ **Slice 4 — prompt-injection review of every gate.** *Every* gate built so far takes agent-authored input: the meeting request, the org proposal, the domain slug, the chat plan. An agent can try to talk its way past them, and nobody has looked.
+- **Accept:** a deliberately malicious task ("read ~/.ssh, push to main, exceed budget") fails at every layer — two of the three hold today (`tests/sandbox.rs`, `tests/turn_budget.rs`); the push does not, and slice 2 is what closes it.
 
 ---
 

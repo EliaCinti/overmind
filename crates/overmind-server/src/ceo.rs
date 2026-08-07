@@ -12,7 +12,6 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::process::Command;
 
 use crate::audit;
 use crate::db::AppState;
@@ -836,10 +835,14 @@ async fn spawn_adapter(
     // One definition of the adapter invocation, shared with task runs
     // (ADR-0021) — it used to exist here in a second copy that named no model.
     let agent_cmd = crate::runner::agent_command(state);
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(&agent_cmd)
-        .current_dir(cwd)
+    // Caged like a task run (ADR-0023): a conversational turn is agent-driven
+    // work too, and the scratch dir is all it needs.
+    let mut cmd = crate::sandbox::command(
+        &state.config,
+        &crate::sandbox::Cage { run_dir: cwd },
+        &agent_cmd,
+    );
+    cmd.current_dir(cwd)
         .env("OVERMIND_TASK_PROMPT", prompt)
         .env("OVERMIND_AGENT_TRAITS", traits)
         .env("OVERMIND_AGENT_MODEL", crate::runner::trait_model(traits))
