@@ -153,6 +153,58 @@ pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
     }
 }
 
+/// Environment that isolates an agent's git from the user's credentials
+/// (ADR-0023, slice 2).
+///
+/// The cage alone does not settle this. It denies `~/.ssh` and the keychain,
+/// which happens to stop a push — but it stops git *entirely*, because git
+/// reads `~/.gitconfig` before it does anything at all and a denial there is
+/// fatal. An agent on a `code` task could not run `git status`. Breaking the
+/// tool is not the same as securing it.
+///
+/// So git is given its own configuration instead of the user's:
+///
+/// - `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` point at `/dev/null`, so
+///   `~/.gitconfig` is neither read nor needed — git works again.
+/// - `credential.helper` is reset to empty through `GIT_CONFIG_COUNT`, which
+///   git applies at command-line precedence. That matters: a *repository* can
+///   configure its own helper in `.git/config`, and the run directory is
+///   writable, so an agent could otherwise configure one for itself. An empty
+///   value resets the list rather than adding to it.
+/// - No prompt, no askpass, and no ssh transport at all.
+///
+/// Measured, not assumed: outside any sandbox, the same push against a
+/// nonexistent repository answers `Repository not found` without this (git
+/// authenticated fine) and `could not read Username` with it. The two layers
+/// are genuinely independent.
+///
+/// What stays possible on purpose: everything local — status, diff, log,
+/// commit in the worktree — and anonymous fetches over HTTPS. Removing
+/// credentials is not the same as removing the network, and read-only access
+/// to public code is a legitimate part of the job.
+pub fn git_isolation() -> Vec<(&'static str, String)> {
+    vec![
+        // The user's git identity and settings are not the agent's.
+        ("GIT_CONFIG_GLOBAL", "/dev/null".into()),
+        ("GIT_CONFIG_SYSTEM", "/dev/null".into()),
+        // Never block a run waiting for a password nobody will type.
+        ("GIT_TERMINAL_PROMPT", "0".into()),
+        ("GIT_ASKPASS", "/usr/bin/false".into()),
+        ("SSH_ASKPASS", "/usr/bin/false".into()),
+        // No ssh transport: the keys are denied by the cage anyway, and this
+        // turns a confusing host-key error into a plain refusal.
+        ("GIT_SSH_COMMAND", "/usr/bin/false".into()),
+        // Command-line precedence, so a repository cannot out-configure it.
+        ("GIT_CONFIG_COUNT", "3".into()),
+        ("GIT_CONFIG_KEY_0", "user.name".into()),
+        ("GIT_CONFIG_VALUE_0", "Overmind agent".into()),
+        ("GIT_CONFIG_KEY_1", "user.email".into()),
+        ("GIT_CONFIG_VALUE_1", "agent@overmind.local".into()),
+        ("GIT_CONFIG_KEY_2", "credential.helper".into()),
+        ("GIT_CONFIG_VALUE_2", String::new()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +258,26 @@ mod tests {
         )
         .expect("profile");
         assert!(!text.contains("two\nlines"), "{text}");
+    }
+
+    #[test]
+    fn git_gets_its_own_identity_and_no_credentials() {
+        let env: std::collections::HashMap<_, _> = git_isolation().into_iter().collect();
+        assert_eq!(
+            env.get("GIT_CONFIG_GLOBAL").map(String::as_str),
+            Some("/dev/null")
+        );
+        assert_eq!(
+            env.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        // The empty value is the whole point: it resets the helper list rather
+        // than appending to it, and it must survive being put in a map.
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_2").map(String::as_str),
+            Some("credential.helper")
+        );
+        assert_eq!(env.get("GIT_CONFIG_VALUE_2").map(String::as_str), Some(""));
     }
 
     #[test]

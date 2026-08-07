@@ -914,6 +914,9 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         },
         &agent_cmd,
     );
+    for (k, v) in crate::sandbox::git_isolation() {
+        cmd.env(k, v);
+    }
     cmd.current_dir(&ctx.worktree_dir)
         .env("OVERMIND_TASK_PROMPT", &prompt)
         .env("OVERMIND_TASK_TITLE", &ctx.title)

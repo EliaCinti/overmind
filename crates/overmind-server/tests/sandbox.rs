@@ -63,10 +63,14 @@ async fn send(
 /// Run one knowledge task with the given sandbox setting and return the
 /// artifacts the stub left behind, keyed by filename.
 async fn probe(sandbox: bool) -> std::collections::HashMap<String, String> {
+    probe_with(sandbox, PROBING_STUB).await
+}
+
+async fn probe_with(sandbox: bool, stub: &str) -> std::collections::HashMap<String, String> {
     let root = std::env::temp_dir().join(format!("overmind-sb-{}", uuid::Uuid::now_v7().simple()));
     std::fs::create_dir_all(&root).expect("create test root");
     let script = root.join("stub.sh");
-    std::fs::write(&script, PROBING_STUB).expect("write stub");
+    std::fs::write(&script, stub).expect("write stub");
 
     let config = overmind_server::Config {
         agent_cmd: Some(format!("sh {}", script.display())),
@@ -193,5 +197,47 @@ async fn the_same_agent_uncaged_reaches_everything() {
         free.get("mine.txt").map(String::as_str),
         Some("inside"),
         "{free:?}"
+    );
+}
+
+/// Slice 2: git works, and has nothing to push with.
+///
+/// The stub is deliberately hostile — it configures a credential helper in its
+/// *own* repository, which is the one place an agent can write config. If the
+/// isolation only overrode the user's global file, that would be the way round it.
+const GIT_STUB: &str = r#"#!/bin/sh
+git init -q . 2>/dev/null
+git config credential.helper osxkeychain
+echo hello > f.txt && git add f.txt
+( git commit -q -m probe >/dev/null 2>&1 && echo WORKS || echo BROKEN ) > commit.txt
+git config --get-all credential.helper | tail -1 > lasthelper.txt
+( printf 'protocol=https\nhost=github.com\n\n' | git credential fill 2>/dev/null | grep -q '^password=' && echo GOTCREDS || echo NOCREDS ) > creds.txt
+echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+
+#[tokio::test]
+async fn git_still_works_and_has_no_credentials_to_push_with() {
+    let out = probe_with(true, GIT_STUB).await;
+
+    // The cage alone would have broken git outright: it reads ~/.gitconfig
+    // before doing anything, and a denial there is fatal. Breaking the tool is
+    // not securing it.
+    assert_eq!(
+        out.get("commit.txt").map(String::as_str),
+        Some("WORKS"),
+        "an agent must still be able to use git on its own worktree: {out:?}"
+    );
+
+    // Our reset is applied at command-line precedence, so it lands *after* the
+    // repository's own helper and empties the list rather than joining it.
+    assert_eq!(
+        out.get("lasthelper.txt").map(String::as_str),
+        Some(""),
+        "the repo configured a helper and it must not be the last word: {out:?}"
+    );
+    assert_eq!(
+        out.get("creds.txt").map(String::as_str),
+        Some("NOCREDS"),
+        "no credentials reach the agent, whatever the repo asked for: {out:?}"
     );
 }

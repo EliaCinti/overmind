@@ -130,6 +130,42 @@ editing a profile until it permits everything.
   not the gap between `repo:write` and what the sandbox knows about git. An
   agent with the worktree writable can still commit to it; what it can no longer
   do is read your keys or touch anything outside its own run.
-- **The network stays open**, so anything reachable with ambient credentials
-  stays reachable. Credential isolation is the next slice, and until it lands
-  the third line of M10's acceptance criterion is not met.
+- **The network stays open**, so the agent can reach the API — but what it can
+  reach *as you* is settled separately, in the slice below.
+
+## Addendum — credential isolation (slice 2, same day)
+
+Slice 1 appeared to stop `git push` for free: the cage denies `~/.ssh` and the
+keychain. That reading was wrong in a way worth recording, because it looked
+like a win. Git reads `~/.gitconfig` before it does anything at all, so the
+denial is fatal to *every* git command — an agent working a `code` task could
+not run `git status`. The push was not blocked; git was broken. Breaking a tool
+is not securing it, and a security property obtained by accident is one nobody
+can reason about.
+
+So the agent gets its own git configuration rather than the user's:
+`GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` point at `/dev/null` (git works
+again, and never reads the user's identity or settings); prompts, askpass and
+the ssh transport are all disabled; and `credential.helper` is reset to empty
+through `GIT_CONFIG_COUNT`, which git applies at **command-line precedence**.
+
+That last detail is the load-bearing one. A *repository* can configure its own
+credential helper in `.git/config`, and the run directory is writable by the
+agent — so overriding only the user's global file would leave the agent free to
+configure a helper for itself. An empty value at the highest precedence resets
+the list instead of joining it.
+
+**Measured, not assumed.** Outside any sandbox, the same push against a
+nonexistent repository answers `remote: Repository not found` without this —
+git authenticated perfectly well — and `could not read Username` with it. The
+two layers are therefore independent rather than two names for one effect,
+which is what makes this defence in depth rather than a story about it.
+
+**Deliberately still possible:** everything local (status, diff, log, commit in
+the worktree) and anonymous fetches over HTTPS. Removing credentials is not
+removing the network, and reading public code is a legitimate part of the job.
+
+**Consequence:** commits an agent makes are authored by `Overmind agent
+<agent@overmind.local>`, not by you. That is better provenance than the
+alternative, and it is a visible change to anyone who was expecting their own
+name on a worktree commit.

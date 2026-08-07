@@ -842,6 +842,9 @@ async fn spawn_adapter(
         &crate::sandbox::Cage { run_dir: cwd },
         &agent_cmd,
     );
+    for (k, v) in crate::sandbox::git_isolation() {
+        cmd.env(k, v);
+    }
     cmd.current_dir(cwd)
         .env("OVERMIND_TASK_PROMPT", prompt)
         .env("OVERMIND_AGENT_TRAITS", traits)
