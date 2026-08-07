@@ -62,16 +62,12 @@ impl Request {
     /// as `MEETING_REQUEST.json` in its working directory. Returns `None` for
     /// anything without a topic: a meeting about nothing is not a request.
     pub fn from_json(v: &Value) -> Option<Request> {
-        let topic = v.get("topic").and_then(Value::as_str)?.trim().to_string();
+        let topic = crate::ceo::clamp_agent_text(v.get("topic").and_then(Value::as_str)?);
         if topic.is_empty() {
             return None;
         }
-        let reason = v
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let reason =
+            crate::ceo::clamp_agent_text(v.get("reason").and_then(Value::as_str).unwrap_or(""));
         let participants = v
             .get("participants")
             .and_then(Value::as_array)
@@ -880,7 +876,7 @@ fn turn_prompt(
     } else {
         transcript
             .iter()
-            .map(|(who, what)| format!("{who}: {what}"))
+            .map(|(who, what)| crate::ceo::transcript_turn(who, what))
             .collect::<Vec<_>>()
             .join("\n")
     };

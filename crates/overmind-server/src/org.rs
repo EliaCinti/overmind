@@ -81,9 +81,8 @@ impl Proposal {
                 let text = |k: &str| {
                     m.get(k)
                         .and_then(Value::as_str)
-                        .map(str::trim)
+                        .map(crate::ceo::clamp_agent_text)
                         .filter(|s| !s.is_empty())
-                        .map(str::to_string)
                 };
                 Some(MemberSpec {
                     name,

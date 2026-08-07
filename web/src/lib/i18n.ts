@@ -159,6 +159,7 @@ export const en = {
     hintTeammate: "{name} can act in their role and pull in teammates when it affects them.",
     unreachable: "Could not reach the agent.",
     agent: "Agent",
+    escalation: "Escalation",
   },
   meetings: {
     emptyTitle: "No meetings yet",
@@ -523,6 +524,7 @@ export const it: Dictionary = {
     hintTeammate: "{name} può agire nel suo ruolo e coinvolgere i colleghi quando li riguarda.",
     unreachable: "Non è stato possibile raggiungere l'agente.",
     agent: "Agente",
+    escalation: "Escalation",
   },
   meetings: {
     emptyTitle: "Nessuna riunione",

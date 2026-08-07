@@ -815,11 +815,11 @@ async fn agent_conversation_ripples_to_teammates() {
             .as_array()
             .map(|m| {
                 m.iter().any(|x| {
-                    x["role"] == "system"
-                        && x["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .contains("Escalation from Iris")
+                    // Since M10 slice 4 this arrives as `escalation`, not
+                    // `system`: an agent's words must not wear Overmind's own
+                    // voice, in the thread or in the leader's next prompt.
+                    x["role"] == "escalation"
+                        && x["content"].as_str().unwrap_or("").contains("From Iris")
                 })
             })
             .unwrap_or(false)

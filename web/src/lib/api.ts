@@ -236,7 +236,13 @@ export interface Artifact {
 }
 
 /** A turn in the CEO conversation (M12 / ADR-0018). */
-export type MessageRole = "user" | "ceo" | "system";
+/**
+ * `system` is Overmind's own voice; `escalation` is an agent's, routed to the
+ * leader's thread. They are separate roles on purpose — an agent that can write
+ * a `system` message can tell you the system said something it did not
+ * (ADR-0023, M10 slice 4).
+ */
+export type MessageRole = "user" | "ceo" | "system" | "escalation";
 
 /** A file/image attached to a message. */
 export interface Attachment {

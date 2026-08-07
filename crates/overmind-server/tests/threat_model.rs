@@ -18,6 +18,10 @@ fn tests_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
+fn src_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
+}
+
 fn threat_model() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/THREAT-MODEL.md")
@@ -67,11 +71,15 @@ fn every_boundary_the_threat_model_claims_names_a_test_that_exists() {
         referenced.len()
     );
 
+    // Both surfaces: integration tests, and the unit tests that hold the
+    // boundaries whose logic is pure enough to test directly.
     let mut all_sources = String::new();
-    for entry in std::fs::read_dir(tests_dir()).expect("read tests dir") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().is_some_and(|e| e == "rs") {
-            all_sources.push_str(&std::fs::read_to_string(&path).expect("read test file"));
+    for dir in [tests_dir(), src_dir()] {
+        for entry in std::fs::read_dir(&dir).expect("read source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                all_sources.push_str(&std::fs::read_to_string(&path).expect("read source file"));
+            }
         }
     }
 
