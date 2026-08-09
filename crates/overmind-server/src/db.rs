@@ -210,11 +210,19 @@ const CEO_NAMES: &[&str] = &[
 
 /// A name for a newly founded company's CEO. Not cryptographically random and
 /// it does not need to be: it only has to feel chosen rather than defaulted.
+///
+/// It used to index the list by `subsec_nanos()`, which is not random at all
+/// where the clock is coarse. macOS reports whole microseconds, so the value is
+/// always a multiple of 1000 and `1000 % 16 == 8` — only indices 0 and 8 could
+/// ever come up, and every company founded on a Mac got "Aria" or "Nico".
+///
+/// That was a cosmetic bug with an expensive shadow: the same skew meant a CI
+/// flake that depends on which name is drawn was unreproducible on the machine
+/// the code is written on. A random source that differs by platform makes
+/// "works locally" mean less than it should.
 pub fn random_ceo_name() -> &'static str {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as usize)
-        .unwrap_or(0);
+    // v7's tail is 62 random bits, and uuid is already here.
+    let n = uuid::Uuid::now_v7().as_bytes()[15] as usize;
     CEO_NAMES[n % CEO_NAMES.len()]
 }
 
@@ -525,4 +533,28 @@ pub async fn domain_patch(
     // A patch that will not parse is a seeding bug, not a reason to refuse the
     // hire: fall back to adding nothing rather than failing the request.
     Ok(row.map(|(json,)| serde_json::from_str(&json).unwrap_or_default()))
+}
+
+#[cfg(test)]
+mod ceo_name_tests {
+    use super::{CEO_NAMES, random_ceo_name};
+    use std::collections::BTreeSet;
+
+    /// The whole list has to be reachable. Indexing by `subsec_nanos()` looked
+    /// random and, on a platform with a microsecond clock, could only ever
+    /// produce two of the sixteen — which is also why a CI flake that turned on
+    /// the drawn name never once reproduced on a Mac.
+    #[test]
+    fn every_name_can_come_up() {
+        let seen: BTreeSet<&str> = (0..4_000).map(|_| random_ceo_name()).collect();
+        assert_eq!(
+            seen.len(),
+            CEO_NAMES.len(),
+            "unreachable names: {:?}",
+            CEO_NAMES
+                .iter()
+                .filter(|n| !seen.contains(*n))
+                .collect::<Vec<_>>()
+        );
+    }
 }
