@@ -535,8 +535,9 @@ async fn run_agent_turn(
         .unwrap_or_default();
 
     let memory_context = state
-        .memory
-        .get_context(&state.config.data_dir.to_string_lossy(), &last_user)
+        .memory_for(company_id)
+        .await
+        .get_context(&state.brain_dir(company_id).to_string_lossy(), &last_user)
         .await;
     let memory_block = memory_context
         .as_deref()

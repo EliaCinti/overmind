@@ -666,8 +666,9 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
     let chair = speakers.iter().position(|s| s.is_leader).unwrap_or(0);
 
     let memory_context = state
-        .memory
-        .get_context(&state.config.data_dir.to_string_lossy(), &topic)
+        .memory_for(company_id)
+        .await
+        .get_context(&state.brain_dir(company_id).to_string_lossy(), &topic)
         .await;
     // The company's language (M16): a room must not deliberate in English
     // under an Italian interface.
@@ -1107,7 +1108,8 @@ async fn conclude(
     // Why the company decided this outlives the meeting (ADR-0013).
     // Best-effort: no memory server configured is a normal, silent no-op.
     state
-        .memory
+        .memory_for(company_id)
+        .await
         .store_decision(
             decision,
             &format!("Decided in a meeting on \"{topic}\"."),

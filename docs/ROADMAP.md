@@ -71,12 +71,17 @@ The differentiator, part 1: memory over MCP ([ADR-0013](adr/0013-memory-over-mcp
 - [x] `GET /memory/status` + a UI memory indicator
 - **Accept:** verified against **real Wadachi** (throwaway brain) — task 1's completion was stored, task 2's agent received it via real `get_context` (avoiding the "past mistake") ✓; with no provider and with a deliberately broken provider, tasks complete identically ✓ (3 memory integration tests + real-Wadachi E2E, 2026-07-20).
 
-## M8 — Managed brain + memory UI `todo`
+## M8 — Managed brain + memory UI `in-progress`
 The differentiator, part 2: Wadachi as first-party brain (ADR-0004).
-- Overmind provisions, launches and supervises a dedicated Wadachi instance per company (`<data-dir>/companies/<company>/brain/`); never touches a personal brain
-- Memory UI: browser of org memories, decisions linked to the tasks that produced them
-- Depends on Wadachi supporting concurrent multi-agent access (tracked in the Wadachi repo)
-- **Accept:** a fresh company gets a working brain in one click; a decision stored by an agent is visible in the UI linked to its task; disabling the brain leaves the org fully functional.
+
+M7 shipped the contract but not isolation: there is one brain, shared by every company on the server, and companies are told apart by an argument (`store_memory` passes `company_id` as `project`) rather than by a boundary. Worse, it is likely to be the *user's own* brain — the obvious thing to point `OVERMIND_MEMORY_CMD` at — which ADR-0004 and rule 6 of CLAUDE.md both forbid, today by care alone.
+
+**The Wadachi dependency this milestone used to declare is satisfied.** Concurrent multi-agent access landed in **Wadachi 0.14.0 (2026-07-20)**: WAL + `busy_timeout` on every connection, atomic `index.md` rewrites, `O_CREAT|O_EXCL` on memory files (a TOCTOU race before), three concurrency tests including 24 parallel writers. The blocker outlived the fact by three weeks; the work is now entirely inside Overmind.
+
+- ☐ **Slice 1 — every company gets its own brain.** `<data-dir>/companies/<company>/brain/`, provisioned by creating the directory and passing `BRAIN_DIR` to the memory server — no Wadachi-specific command, so the ADR-0003 provider contract stays generic ([ADR-0024](adr/0024-managed-per-company-brain.md)). Per-company `brain_enabled` switch; `OVERMIND_MANAGED_BRAIN=off` keeps the old shared-brain behaviour.
+- ☐ **Slice 2 — the memory UI.** Browser of org memories, decisions linked to the tasks that produced them. Needs read tools over MCP (`list_memories`, `recall`, `list_decisions`) and a task↔memory link, which does not exist yet: `store_memory` records the title and description but nothing that points back at the task.
+- ☐ **Slice 3 — supervision, if it earns it.** ADR-0024 deliberately deferred a long-lived per-company server process (now possible via `wadachi serve-http`) in favour of M7's stdio pool. Revisit only if pool churn shows up as latency.
+- **Accept:** a fresh company gets a working brain in one click; two companies cannot see each other's memories; a decision stored by an agent is visible in the UI linked to its task; disabling the brain leaves the org fully functional.
 
 ## M9 — Overmind as MCP server `todo`
 - Expose tasks/board/audit over MCP; external agents can file and read tasks

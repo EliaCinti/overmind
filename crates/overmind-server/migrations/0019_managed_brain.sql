@@ -1,0 +1,19 @@
+-- M8 slice 1 (ADR-0024): every company gets its own brain.
+--
+-- The brain itself is a directory on disk — `<data-dir>/companies/<id>/brain/`
+-- — not a row, so nothing here stores a path. Deriving it from the company id
+-- keeps the two impossible to desync: there is no way to have a company whose
+-- recorded brain path points somewhere the directory isn't.
+--
+-- What does need recording is the switch. A company can be run with its brain
+-- off, and that has to survive a restart, so it is state rather than an env
+-- var. Off behaves exactly like "no provider configured": every memory call is
+-- a no-op and the org stays fully functional — the graceful-degradation rule
+-- from ADR-0003, which M7 already tests.
+--
+-- Default 1 (on) applies to existing rows too: on upgrade, companies that were
+-- sharing one brain each start writing into a fresh empty one of their own.
+-- Nothing is moved and nothing is lost; the old brain is untouched and still
+-- reachable with OVERMIND_MANAGED_BRAIN=off. ADR-0024 explains why no import
+-- is offered.
+ALTER TABLE companies ADD COLUMN brain_enabled INTEGER NOT NULL DEFAULT 1;

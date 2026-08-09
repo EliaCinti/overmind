@@ -76,6 +76,10 @@ fn api_router() -> Router<AppState> {
         .route("/domains", get(list_domains))
         .route("/models", get(list_models))
         .route("/companies/{company_id}/language", post(set_language))
+        .route(
+            "/companies/{company_id}/brain",
+            get(brain_status).post(set_brain_enabled),
+        )
         .route("/languages", get(list_languages))
         .route(
             "/companies/{company_id}/agents",
@@ -175,9 +179,14 @@ fn api_router() -> Router<AppState> {
         .route("/memory/status", get(memory_status))
 }
 
-/// Whether organizational memory (Wadachi/MCP) is wired up — for the UI badge.
+/// Whether organizational memory (Wadachi/MCP) is wired up at all — for the UI
+/// badge. Server-wide: what a *given* company's brain is doing is
+/// `GET /companies/{id}/brain` (ADR-0024).
 async fn memory_status(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "enabled": state.memory.is_enabled() }))
+    Json(json!({
+        "enabled": state.memory.is_enabled(),
+        "managed": state.config.managed_brain && state.memory.is_enabled(),
+    }))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -339,6 +348,24 @@ async fn create_company(
     .await?;
 
     tx.commit().await?;
+
+    // "One click and a company has a brain" (ADR-0004), and the click is this
+    // one. `memory_for` would create the directory lazily at the first memory
+    // call anyway — doing it here is what makes the brain something you can go
+    // and look at from the moment the company exists, rather than something
+    // that appears once an agent happens to remember something.
+    if state.config.managed_brain && state.memory.is_enabled() {
+        let dir = state.brain_dir(&id);
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+            // Not fatal: memory is best-effort, and a company without a brain
+            // is a company that works (ADR-0003).
+            eprintln!(
+                "could not provision brain at {} (ignored): {e}",
+                dir.display()
+            );
+        }
+    }
+
     state.notify(&id);
     Ok((
         StatusCode::CREATED,
@@ -347,20 +374,28 @@ async fn create_company(
             "name": req.name.trim(),
             "language": crate::i18n::DEFAULT,
             "created_at": created_at,
+            "brain_enabled": true,
             "ceo": ceo,
         })),
     ))
 }
 
 async fn list_companies(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String, String, String)> =
-        sqlx::query_as("SELECT id, name, language, created_at FROM companies ORDER BY created_at")
-            .fetch_all(&state.pool)
-            .await?;
+    let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, name, language, created_at, brain_enabled FROM companies ORDER BY created_at",
+    )
+    .fetch_all(&state.pool)
+    .await?;
     let companies: Vec<Value> = rows
         .into_iter()
-        .map(|(id, name, language, created_at)| {
-            json!({ "id": id, "name": name, "language": language, "created_at": created_at })
+        .map(|(id, name, language, created_at, brain)| {
+            json!({
+                "id": id,
+                "name": name,
+                "language": language,
+                "created_at": created_at,
+                "brain_enabled": brain != 0,
+            })
         })
         .collect();
     Ok(Json(json!({ "companies": companies })))
@@ -2072,6 +2107,70 @@ async fn set_language(
     }
     state.notify(&company_id);
     Ok(Json(json!({ "id": company_id, "language": req.language })))
+}
+
+// ---------- the company's brain (M8, ADR-0024) ----------
+
+#[derive(Deserialize)]
+struct SetBrainEnabled {
+    enabled: bool,
+}
+
+/// What this company's memory actually is right now: whether a provider is
+/// configured at all, whether this company's brain is switched on, and — when
+/// brains are managed — where it lives. The path is worth returning: a managed
+/// brain is a directory, and being able to open it in Obsidian or back it up is
+/// most of the point of it being one.
+async fn brain_status(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let enabled: Option<i64> =
+        sqlx::query_scalar("SELECT brain_enabled FROM companies WHERE id = ?")
+            .bind(&company_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let enabled = enabled.ok_or(ApiError::NotFound("company"))? != 0;
+    let managed = state.config.managed_brain && state.memory.is_enabled();
+    Ok(Json(json!({
+        "provider_configured": state.memory.is_enabled(),
+        "managed": managed,
+        "enabled": enabled,
+        // Only meaningful when managed: otherwise the brain is wherever the
+        // memory command points, which is the user's business and not ours to
+        // report as if we chose it.
+        "brain_dir": managed.then(|| state.brain_dir(&company_id).to_string_lossy().into_owned()),
+    })))
+}
+
+/// Switch this company's brain on or off. Off is the no-provider path: agents
+/// keep working, they just stop remembering — which is a thing you may
+/// legitimately want, and is an acceptance criterion of M8.
+async fn set_brain_enabled(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<SetBrainEnabled>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.pool.begin().await?;
+    let done = sqlx::query("UPDATE companies SET brain_enabled = ? WHERE id = ?")
+        .bind(i64::from(req.enabled))
+        .bind(&company_id)
+        .execute(&mut *tx)
+        .await?;
+    if done.rows_affected() == 0 {
+        return Err(ApiError::NotFound("company"));
+    }
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::BRAIN_TOGGLED,
+        &json!({ "enabled": req.enabled }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": company_id, "enabled": req.enabled })))
 }
 
 /// The languages on offer, each named in its own language.

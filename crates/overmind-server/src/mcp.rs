@@ -72,9 +72,20 @@ impl Memory {
         }
     }
 
-    /// A memory bound to a specific brain directory (used by the managed-brain
-    /// path in M8). Sets `BRAIN_DIR` and gets its **own** connection pool (a
-    /// different brain needs different server processes).
+    /// A memory that does nothing, for a company whose brain is switched off.
+    /// Identical to having no provider configured — the graceful-degradation
+    /// path M7 already tests, reused rather than re-invented.
+    pub fn disabled() -> Self {
+        Memory::from_config(None)
+    }
+
+    /// A memory bound to a specific brain directory — the managed per-company
+    /// brain of ADR-0024. Sets `BRAIN_DIR` and gets its **own** connection pool,
+    /// because a pooled connection is a live server process already pointed at
+    /// a brain: reusing one across brains would answer from the wrong company.
+    ///
+    /// Callers should go through [`crate::db::AppState::memory_for`], which
+    /// caches the result — each call here builds a fresh pool.
     pub fn with_brain_dir(&self, brain_dir: &str) -> Self {
         let mut env = (*self.env).clone();
         env.push(("BRAIN_DIR".to_string(), brain_dir.to_string()));

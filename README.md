@@ -201,10 +201,14 @@ cd web && npm run dev
 Point Overmind at any MCP memory server exposing `get_context` / `store_memory` / `store_decision` — [Wadachi](https://github.com/EliaCinti/wadachi) is the reference:
 
 ```sh
-OVERMIND_MEMORY_CMD="BRAIN_DIR=/path/to/brain wadachi" cargo run
+OVERMIND_MEMORY_CMD="wadachi" cargo run
 ```
 
 Agents then load org context before working and record what they learned. Unset it and Overmind runs identically, memoryless.
+
+**Each company gets its own brain** ([ADR-0024](docs/adr/0024-managed-per-company-brain.md)), at `<data-dir>/companies/<company-id>/brain/`. Overmind creates the directory and passes it to the memory server as `BRAIN_DIR`; your personal brain is never touched.
+
+> **Do not set `BRAIN_DIR` inside the command.** `OVERMIND_MEMORY_CMD="BRAIN_DIR=/my/brain wadachi"` runs through a shell, so that assignment wins over the one Overmind sets — every company would silently share `/my/brain`. If sharing one brain is what you want, say so with `OVERMIND_MANAGED_BRAIN=off`, which is visible and does not depend on shell precedence.
 
 ### Configuration
 
@@ -216,6 +220,7 @@ Agents then load org context before working and record what they learned. Unset 
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: Claude Code CLI) |
 | `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory) |
 | `OVERMIND_MEMORY_POOL` | Concurrent memory connections (default `4`) |
+| `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |
 | `OVERMIND_HEARTBEAT_SECS` | Scheduler tick (default `30`) |
 | `OVERMIND_SESSION_TIMEOUT_SECS` | Kill sessions over this (default `3600`) |
 | `OVERMIND_START_ESTIMATE_CENTS` | Budget reservation per start (default `50`) |
