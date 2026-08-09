@@ -1381,6 +1381,14 @@ async fn get_session(
         "workspace_path": workspace_path,
         "base_sha": base_sha,
         "output": output,
+        // What the agent actually said, lifted out of the adapter's envelope.
+        // The envelope is diagnostic and stays in `output`; it is not a report.
+        // A person opening a finished run wants the agent's own summary, not
+        // `ephemeral_1h_input_tokens` — the same confusion that once showed a
+        // raw envelope as a chat reply.
+        "said": output.as_deref().map(crate::ceo::agent_text).filter(|s| {
+            !s.trim().is_empty() && output.as_deref() != Some(s.as_str())
+        }),
         "exit_code": exit_code,
         "last_error": last_error,
         "cost_cents": cost.map(|(c,)| c).unwrap_or(0),

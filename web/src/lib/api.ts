@@ -276,6 +276,8 @@ export interface Session {
   workspace_path: string;
   base_sha: string | null;
   output: string | null;
+  /** The agent's own words, unwrapped from the adapter's envelope. */
+  said: string | null;
   exit_code: number | null;
   last_error: string | null;
   cost_cents: number;

@@ -1043,6 +1043,28 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     }
 }
 
+/// What the adapter said went wrong, when it said anything.
+///
+/// "agent exited with code 1" is true and useless. The Claude Code CLI puts the
+/// reason in its result envelope — `"Credit balance is too low"` is the one that
+/// stopped the smoke run, and a person reading the drawer had to find it inside
+/// a wall of JSON to learn their account was empty. Errors a human can act on
+/// are worth more than exit codes.
+fn adapter_failure(output: &str) -> Option<String> {
+    let envelope: Value = output
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line.trim()).ok())?;
+    if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let said = envelope.get("result").and_then(Value::as_str)?.trim();
+    if said.is_empty() {
+        return None;
+    }
+    Some(crate::ceo::clamp_agent_text(said))
+}
+
 async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerError> {
     struct Final {
         session_status: &'static str,
@@ -1064,9 +1086,12 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         },
         Outcome::AgentFailure { output, exit_code } => Final {
             session_status: "failed",
+            last_error: Some(
+                adapter_failure(&output)
+                    .unwrap_or_else(|| format!("agent exited with code {exit_code}")),
+            ),
             output,
             exit_code: Some(exit_code),
-            last_error: Some(format!("agent exited with code {exit_code}")),
             task_to: "blocked",
             release: false,
         },
@@ -1519,6 +1544,37 @@ mod tests {
         assert!(parse_cost("plain output, no json").is_none());
         assert!(parse_cost("{\"no_cost\":true}").is_none());
         assert!(parse_adapter_session_id("no json").is_none());
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::adapter_failure;
+
+    /// The envelope that ended the live smoke run, trimmed to the fields that
+    /// matter. Kept verbatim in shape because this is the one thing a stub
+    /// cannot teach us — see `tests/fixtures/`.
+    const CREDIT_EXHAUSTED: &str = r#"{"is_error":true,"subtype":"success","result":"Credit balance is too low","terminal_reason":"api_error","total_cost_usd":0}"#;
+
+    #[test]
+    fn a_failed_run_reports_what_the_adapter_said() {
+        assert_eq!(
+            adapter_failure(CREDIT_EXHAUSTED).as_deref(),
+            Some("Credit balance is too low"),
+            "the reason was in the envelope all along"
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_without_saying_why_falls_back_to_the_exit_code() {
+        // Non-JSON output, and a well-formed envelope that is not an error:
+        // neither has a message worth showing instead of the exit code.
+        assert_eq!(adapter_failure("Segmentation fault"), None);
+        assert_eq!(
+            adapter_failure(r#"{"is_error":false,"result":"all good"}"#),
+            None
+        );
+        assert_eq!(adapter_failure(r#"{"is_error":true,"result":"  "}"#), None);
     }
 }
 

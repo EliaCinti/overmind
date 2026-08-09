@@ -273,10 +273,28 @@ function Inner({
               </p>
             )}
 
-            {session.output && (
-              <pre className="mono max-h-72 overflow-auto rounded-md border border-border bg-muted/50 p-3 text-xs leading-relaxed whitespace-pre-wrap">
-                {session.output}
-              </pre>
+            {/* What the agent said comes first and in prose; the adapter's
+                envelope is diagnostic, so it folds away. Showing the envelope
+                as the report is how a wall of `ttft_ms` ended up being the
+                thing a person read after a run. */}
+            {session.said ? (
+              <>
+                <p className="text-sm leading-relaxed whitespace-pre-wrap">{session.said}</p>
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                    {t("task.rawOutput")}
+                  </summary>
+                  <pre className="mono mt-2 max-h-72 overflow-auto rounded-md border border-border bg-muted/50 p-3 text-xs leading-relaxed whitespace-pre-wrap">
+                    {session.output}
+                  </pre>
+                </details>
+              </>
+            ) : (
+              session.output && (
+                <pre className="mono max-h-72 overflow-auto rounded-md border border-border bg-muted/50 p-3 text-xs leading-relaxed whitespace-pre-wrap">
+                  {session.output}
+                </pre>
+              )
             )}
 
             {/* A code run's primary deliverable is its diff; a knowledge
