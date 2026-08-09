@@ -159,6 +159,7 @@ export const en = {
     hintTeammate: "{name} can act in their role and pull in teammates when it affects them.",
     unreachable: "Could not reach the agent.",
     agent: "Agent",
+    escalation: "Escalation",
   },
   meetings: {
     emptyTitle: "No meetings yet",
@@ -273,6 +274,7 @@ export const en = {
     noActiveAgents: "No active agents — hire one first.",
     latestRun: "Latest run",
     viewDiff: "View diff",
+    rawOutput: "Adapter output",
     noChanges: "No changes in the worktree.",
     loadingDocs: "Loading documents…",
     noDocs: "No documents produced yet.",
@@ -523,6 +525,7 @@ export const it: Dictionary = {
     hintTeammate: "{name} può agire nel suo ruolo e coinvolgere i colleghi quando li riguarda.",
     unreachable: "Non è stato possibile raggiungere l'agente.",
     agent: "Agente",
+    escalation: "Escalation",
   },
   meetings: {
     emptyTitle: "Nessuna riunione",
@@ -636,6 +639,7 @@ export const it: Dictionary = {
     noActiveAgents: "Nessun agente attivo — assumine uno prima.",
     latestRun: "Ultima esecuzione",
     viewDiff: "Vedi il diff",
+    rawOutput: "Output dell'adattatore",
     noChanges: "Nessuna modifica nel worktree.",
     loadingDocs: "Caricamento documenti…",
     noDocs: "Ancora nessun documento prodotto.",

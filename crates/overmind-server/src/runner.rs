@@ -246,6 +246,41 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
 /// launches nothing unless `bypass_approval` (i.e. the approval was granted);
 /// a start that would push the agent past its monthly budget is stopped here,
 /// atomically, and recorded as a budget incident.
+/// The goal a company's `code` tasks attach to, or `None` when that is not
+/// Overmind's to decide.
+///
+/// The frontend has always resolved this (`web/src/lib/repo.ts` creates it,
+/// `CreateTaskDialog` passes it) and the server never did, which is how tasks
+/// opened by an agent came out orphaned — see the addendum to
+/// [ADR-0008](../../../docs/adr/0008-execution-sessions-and-atomic-checkout.md).
+///
+/// One rule, applied here and again at start: **never guess which repository,
+/// filing within one is fine.** So a second repo-backed project makes this
+/// `None` — which codebase an agent works in is a decision with consequences,
+/// and the task is better visibly unattached than quietly attached to the wrong
+/// thing. Choosing among several goals of the *same* project only decides where
+/// the task is filed, so the oldest wins and a human can move it.
+pub(crate) async fn default_goal(state: &AppState, company_id: &str) -> Option<String> {
+    let projects: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT w.project_id FROM project_workspaces w
+         JOIN projects p ON p.id = w.project_id
+         WHERE p.company_id = ? AND w.is_primary = 1",
+    )
+    .bind(company_id)
+    .fetch_all(&state.pool)
+    .await
+    .ok()?;
+    let [project_id] = projects.as_slice() else {
+        return None;
+    };
+    sqlx::query_scalar("SELECT id FROM goals WHERE project_id = ? ORDER BY created_at, id LIMIT 1")
+        .bind(project_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub async fn start_task(
     state: &AppState,
     task_id: &str,
@@ -322,22 +357,45 @@ pub async fn start_task(
     // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
     let workspace: Option<(String, Option<String>)> = match exec_kind {
         ExecutionKind::Code => {
-            let Some(goal_id) = goal_id else {
-                return Err(RunnerError::Invalid(
-                    "task has no goal: attach it to a project with a workspace first".into(),
-                ));
+            let ws: Option<(String, Option<String>)> = match &goal_id {
+                Some(goal_id) => {
+                    sqlx::query_as(
+                        "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                         JOIN goals g ON g.project_id = w.project_id
+                         WHERE g.id = ? AND w.is_primary = 1",
+                    )
+                    .bind(goal_id)
+                    .fetch_optional(&state.pool)
+                    .await?
+                }
+                // An orphan — opened before a repo was connected, or by a build
+                // that did not attach it. When the company has exactly one
+                // repository there is nothing to decide, so decide it; when it
+                // has several, the choice is genuinely the user's and guessing
+                // would run an agent against the wrong codebase.
+                None => {
+                    let repos: Vec<(String, Option<String>)> = sqlx::query_as(
+                        "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                         JOIN projects p ON p.id = w.project_id
+                         WHERE p.company_id = ? AND w.is_primary = 1
+                         ORDER BY w.cwd",
+                    )
+                    .bind(&company_id)
+                    .fetch_all(&state.pool)
+                    .await?;
+                    if repos.len() > 1 {
+                        return Err(RunnerError::Invalid(
+                            "this task is not attached to a project, and the company has more \
+                             than one repository: attach it to a goal first"
+                                .into(),
+                        ));
+                    }
+                    repos.into_iter().next()
+                }
             };
-            let ws: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT w.cwd, w.default_ref FROM project_workspaces w
-                 JOIN goals g ON g.project_id = w.project_id
-                 WHERE g.id = ? AND w.is_primary = 1",
-            )
-            .bind(&goal_id)
-            .fetch_optional(&state.pool)
-            .await?;
             let Some(ws) = ws else {
                 return Err(RunnerError::Invalid(
-                    "the task's project has no primary workspace".into(),
+                    "no repository to work in: connect one to this company first".into(),
                 ));
             };
             Some(ws)
@@ -560,11 +618,29 @@ pub(crate) fn trait_model(traits_json: &str) -> String {
 /// default drives the Claude Code CLI headless, on the model the agent is
 /// actually characterized for. Until M14 slice 3 this string existed in two
 /// copies and named no model at all, so `AgentTraits.model` was decorative.
-pub(crate) fn agent_command(state: &AppState) -> String {
-    state.config.agent_cmd.clone().unwrap_or_else(|| {
-        "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" --output-format json"
-            .to_string()
-    })
+pub(crate) fn agent_command(state: &AppState, caged: bool) -> String {
+    if let Some(configured) = state.config.agent_cmd.clone() {
+        return configured;
+    }
+    let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
+                   --output-format json"
+        .to_string();
+    // Headless has nobody to ask. The CLI's permission system assumes a person
+    // at a terminal, so in `-p` mode every Edit, Write and Bash is denied and
+    // the agent can only read — which is how the smoke run found that no `code`
+    // task had ever produced a diff against the real adapter. Stubs are shell
+    // scripts and write freely, so every test was green over it.
+    //
+    // The flag is safe *here and only here*: ADR-0023 moved enforcement to the
+    // OS, and a caged agent can write to its run directory and nowhere else,
+    // with no credentials to push anything. Asking a permission question nobody
+    // can answer is not a second boundary, it is a deadlock. Uncaged, we do not
+    // pass it: the CLI's own prompt is then the only thing left, and a
+    // read-only agent beats an unconstrained one.
+    if caged {
+        cmd.push_str(" --dangerously-skip-permissions");
+    }
+    cmd
 }
 
 /// Resume a session that is marked queued/running in the DB but has no live
@@ -798,7 +874,10 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
 }
 
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
-    let agent_cmd = agent_command(&ctx.state);
+    let cage = crate::sandbox::Cage {
+        run_dir: &ctx.worktree_dir,
+    };
+    let agent_cmd = agent_command(&ctx.state, crate::sandbox::caged(&ctx.state.config, &cage));
     // Load what the organization remembers about this kind of work, and put
     // it in front of the agent (and in an env var). A no-op when memory is off.
     let memory_context = ctx
@@ -904,10 +983,14 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         None
     };
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(&agent_cmd)
-        .current_dir(&ctx.worktree_dir)
+    // Caged: the agent may write its own run directory and nothing else
+    // (ADR-0023). `~/.ssh`, the browser profile and Overmind's own database
+    // are unreachable from in there.
+    let mut cmd = crate::sandbox::command(&ctx.state.config, &cage, &agent_cmd);
+    for (k, v) in crate::sandbox::git_isolation() {
+        cmd.env(k, v);
+    }
+    cmd.current_dir(&ctx.worktree_dir)
         .env("OVERMIND_TASK_PROMPT", &prompt)
         .env("OVERMIND_TASK_TITLE", &ctx.title)
         .env("OVERMIND_TASK_DESCRIPTION", &ctx.description)
@@ -960,6 +1043,28 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     }
 }
 
+/// What the adapter said went wrong, when it said anything.
+///
+/// "agent exited with code 1" is true and useless. The Claude Code CLI puts the
+/// reason in its result envelope — `"Credit balance is too low"` is the one that
+/// stopped the smoke run, and a person reading the drawer had to find it inside
+/// a wall of JSON to learn their account was empty. Errors a human can act on
+/// are worth more than exit codes.
+fn adapter_failure(output: &str) -> Option<String> {
+    let envelope: Value = output
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str(line.trim()).ok())?;
+    if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let said = envelope.get("result").and_then(Value::as_str)?.trim();
+    if said.is_empty() {
+        return None;
+    }
+    Some(crate::ceo::clamp_agent_text(said))
+}
+
 async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerError> {
     struct Final {
         session_status: &'static str,
@@ -981,9 +1086,12 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         },
         Outcome::AgentFailure { output, exit_code } => Final {
             session_status: "failed",
+            last_error: Some(
+                adapter_failure(&output)
+                    .unwrap_or_else(|| format!("agent exited with code {exit_code}")),
+            ),
             output,
             exit_code: Some(exit_code),
-            last_error: Some(format!("agent exited with code {exit_code}")),
             task_to: "blocked",
             release: false,
         },
@@ -1300,16 +1408,65 @@ pub(crate) fn parse_cost(output: &str) -> Option<ParsedCost> {
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));
     let tok = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
     Some(ParsedCost {
-        model: v
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string(),
+        model: billed_model(&v),
         input_tokens: tok("input_tokens"),
         cached_input_tokens: tok("cache_read_input_tokens"),
         output_tokens: tok("output_tokens"),
-        cost_cents: (usd * 100.0).round() as i64,
+        cost_cents: cost_cents(usd),
     })
+}
+
+/// Which model this run should be attributed to.
+///
+/// The real Claude Code envelope has **no top-level `model`** — measured
+/// against the live CLI, not assumed — so the old `unwrap_or("unknown")` meant
+/// every real cost event was filed under "unknown" while the stubs, which do
+/// emit `model`, looked fine. It does carry `modelUsage`, a map of model to
+/// per-model cost, and a single run can touch more than one: the CLI bills a
+/// small model for its own bookkeeping alongside the one doing the work. We
+/// attribute the run to whichever cost the most, which is the one the operator
+/// chose and the one worth seeing in the ledger.
+fn billed_model(v: &Value) -> String {
+    let by_cost = v
+        .get("modelUsage")
+        .and_then(Value::as_object)
+        .and_then(|m| {
+            m.iter()
+                .max_by(|(_, a), (_, b)| {
+                    let cost = |u: &Value| u.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0);
+                    cost(a).total_cmp(&cost(b))
+                })
+                .map(|(name, usage)| {
+                    // The canonical name where the CLI gives one, so a dated
+                    // snapshot and its alias do not read as different models.
+                    usage
+                        .get("canonicalModel")
+                        .and_then(Value::as_str)
+                        .unwrap_or(name)
+                        .to_string()
+                })
+        });
+    by_cost
+        .or_else(|| v.get("model").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Dollars to cents, never losing a run that cost money.
+///
+/// Plain rounding sends anything under half a cent to zero, and a cheap turn
+/// is genuinely that cheap — a small-model chat turn measured at $0.004 would
+/// have recorded as **0**. Spend that records as nothing is spend the cap never
+/// sees, which is the whole failure M18 existed to fix, arriving by a different
+/// door. A run that cost money costs at least a cent.
+///
+/// The bias is upward by design: the budget is a cap, reserved in flat 50-cent
+/// estimates, so sub-cent precision would be false precision — and erring
+/// toward the cap being respected is the safe direction for a limit.
+fn cost_cents(usd: f64) -> i64 {
+    if usd <= 0.0 {
+        return 0;
+    }
+    ((usd * 100.0).round() as i64).max(1)
 }
 
 /// Diff of everything the session changed (committed or not) against the
@@ -1337,6 +1494,39 @@ pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, 
 mod tests {
     use super::{parse_adapter_session_id, parse_cost};
 
+    /// A real result envelope from the Claude Code CLI, captured live during
+    /// M10's smoke run. Stubs emit a tidy `{"total_cost_usd":…,"model":…}`;
+    /// the real thing has no top-level `model` at all, which is how the ledger
+    /// came to file every real run under "unknown" while every test passed.
+    const REAL_ENVELOPE: &str = include_str!("../tests/fixtures/claude-code-result.json");
+
+    #[test]
+    fn the_real_envelope_is_attributed_to_the_model_that_did_the_work() {
+        let cost = parse_cost(REAL_ENVELOPE).expect("the real CLI reports cost");
+        assert_eq!(
+            cost.model, "claude-haiku-4-5",
+            "not `unknown`, and not the bookkeeping model the CLI bills alongside it"
+        );
+        assert!(cost.input_tokens > 0 || cost.cached_input_tokens > 0);
+        assert!(
+            cost.cost_cents >= 1,
+            "the run cost money: {}",
+            cost.cost_cents
+        );
+    }
+
+    #[test]
+    fn a_run_that_cost_money_never_records_as_free() {
+        // Measured shape of a cheap small-model turn. Plain rounding sent this
+        // to zero, and spend that records as nothing is spend no cap can see.
+        assert_eq!(super::cost_cents(0.004), 1);
+        assert_eq!(super::cost_cents(0.0001), 1);
+        // Nothing is still nothing, and ordinary amounts are unchanged.
+        assert_eq!(super::cost_cents(0.0), 0);
+        assert_eq!(super::cost_cents(0.0558), 6);
+        assert_eq!(super::cost_cents(1.20), 120);
+    }
+
     #[test]
     fn parses_cost_from_final_json_line() {
         let output = "doing work...\n{\"model\":\"claude-sonnet\",\"session_id\":\"abc-123\",\"total_cost_usd\":0.0525,\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":10,\"output_tokens\":50}}";
@@ -1354,5 +1544,78 @@ mod tests {
         assert!(parse_cost("plain output, no json").is_none());
         assert!(parse_cost("{\"no_cost\":true}").is_none());
         assert!(parse_adapter_session_id("no json").is_none());
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::adapter_failure;
+
+    /// The envelope that ended the live smoke run, trimmed to the fields that
+    /// matter. Kept verbatim in shape because this is the one thing a stub
+    /// cannot teach us — see `tests/fixtures/`.
+    const CREDIT_EXHAUSTED: &str = r#"{"is_error":true,"subtype":"success","result":"Credit balance is too low","terminal_reason":"api_error","total_cost_usd":0}"#;
+
+    #[test]
+    fn a_failed_run_reports_what_the_adapter_said() {
+        assert_eq!(
+            adapter_failure(CREDIT_EXHAUSTED).as_deref(),
+            Some("Credit balance is too low"),
+            "the reason was in the envelope all along"
+        );
+    }
+
+    #[test]
+    fn a_run_that_failed_without_saying_why_falls_back_to_the_exit_code() {
+        // Non-JSON output, and a well-formed envelope that is not an error:
+        // neither has a message worth showing instead of the exit code.
+        assert_eq!(adapter_failure("Segmentation fault"), None);
+        assert_eq!(
+            adapter_failure(r#"{"is_error":false,"result":"all good"}"#),
+            None
+        );
+        assert_eq!(adapter_failure(r#"{"is_error":true,"result":"  "}"#), None);
+    }
+}
+
+#[cfg(test)]
+mod adapter_command_tests {
+    use super::agent_command;
+    use crate::db::AppState;
+
+    async fn state_with(agent_cmd: Option<String>) -> AppState {
+        let config = crate::Config {
+            agent_cmd,
+            ..crate::Config::default()
+        };
+        crate::init_with("sqlite::memory:", config)
+            .await
+            .expect("init in-memory db")
+    }
+
+    /// The pairing this whole thing turns on. `--dangerously-skip-permissions`
+    /// is only defensible because the cage is what stops the agent; letting it
+    /// escape onto an uncaged run would hand an unconstrained agent the whole
+    /// machine, which is precisely what ADR-0023 exists to prevent.
+    #[tokio::test]
+    async fn the_permission_flag_never_travels_without_the_cage() {
+        let state = state_with(None).await;
+        assert!(
+            agent_command(&state, true).contains("--dangerously-skip-permissions"),
+            "a caged agent that cannot write is a read-only agent"
+        );
+        assert!(
+            !agent_command(&state, false).contains("--dangerously-skip-permissions"),
+            "uncaged, the CLI's own prompt is the only boundary left"
+        );
+    }
+
+    /// Whatever the operator configured is theirs, cage or no cage. The escape
+    /// hatch has to stay literal to be worth anything.
+    #[tokio::test]
+    async fn a_configured_command_is_left_exactly_as_written() {
+        let state = state_with(Some("sh /my/stub.sh".into())).await;
+        assert_eq!(agent_command(&state, true), "sh /my/stub.sh");
+        assert_eq!(agent_command(&state, false), "sh /my/stub.sh");
     }
 }

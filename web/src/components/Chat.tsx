@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
 import type { Agent, Attachment, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
@@ -312,11 +312,28 @@ function MessageRow({
   agent: Agent | null;
   companyId: string;
 }) {
-  const fallbackAgentName = useT()("chat.agent");
+  const t = useT();
+  const fallbackAgentName = t("chat.agent");
   if (message.role === "system") {
     return (
       <div className="flex justify-center">
         <span className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
+          {message.content}
+        </span>
+      </div>
+    );
+  }
+
+  // An escalation is an agent speaking, not Overmind. It used to be written
+  // with the `system` role, which gave agent-authored text the system's voice
+  // — and an agent could use that voice to tell you something the system never
+  // said (M10 slice 4). Labelled, and never styled as a system notice.
+  if (message.role === "escalation") {
+    return (
+      <div className="flex justify-center">
+        <span className="flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 text-xs text-muted-foreground">
+          <ArrowUpRight className="h-3 w-3" />
+          <span className="font-medium">{t("chat.escalation")}</span>
           {message.content}
         </span>
       </div>

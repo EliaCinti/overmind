@@ -815,11 +815,11 @@ async fn agent_conversation_ripples_to_teammates() {
             .as_array()
             .map(|m| {
                 m.iter().any(|x| {
-                    x["role"] == "system"
-                        && x["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .contains("Escalation from Iris")
+                    // Since M10 slice 4 this arrives as `escalation`, not
+                    // `system`: an agent's words must not wear Overmind's own
+                    // voice, in the thread or in the leader's next prompt.
+                    x["role"] == "escalation"
+                        && x["content"].as_str().unwrap_or("").contains("From Iris")
                 })
             })
             .unwrap_or(false)
@@ -833,4 +833,234 @@ async fn agent_conversation_ripples_to_teammates() {
 
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
+}
+
+// A plan with a `code` task and nothing else — the shape the smoke run produced
+// when the CEO was asked to fix a bug in a connected repo.
+const OPENS_CODE_WORK_STUB: &str = r#"#!/bin/sh
+case "$OVERMIND_TASK_PROMPT" in
+  *"You are working on the task"*)
+    echo "fixing it" > fix.txt
+    echo '{"model":"stub-model","total_cost_usd":0.10,"usage":{"input_tokens":10,"output_tokens":10}}' ;;
+  *)
+    echo '{"reply":"I opened it.","tasks":[{"title":"Fix add() in calc.py","description":"It subtracts.","execution_kind":"code"}]}' ;;
+esac
+"#;
+
+/// The seam the live smoke run fell through, and the reason it is worth having
+/// a smoke run at all.
+///
+/// Two families of test already existed and both passed: one watched an agent
+/// open a task and stopped at "the row is there", the other ran a `code` task
+/// that the *test* had created by hand, with a goal. Nothing crossed them — so
+/// `ceo.rs` bound `goal_id` to NULL, every `code` task an agent opened was born
+/// unrunnable, and the first person to find out was a human clicking Start.
+#[tokio::test]
+async fn a_code_task_an_agent_opens_can_actually_be_started() {
+    let env = setup(OPENS_CODE_WORK_STUB).await;
+
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.agent_id
+        ),
+        Some(json!({ "content": "add() is wrong, please fix it" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let mut opened = Value::Null;
+    for _ in 0..100 {
+        let (_, tasks) = send(
+            &env.app,
+            "GET",
+            &format!("/api/companies/{}/tasks", env.company_id),
+            None,
+        )
+        .await;
+        if let Some(t) = tasks["tasks"]
+            .as_array()
+            .and_then(|ts| ts.iter().find(|t| t["title"] == "Fix add() in calc.py"))
+        {
+            opened = t.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!opened.is_null(), "the agent never opened the task");
+    let opened_id = opened["id"].as_str().expect("task id").to_string();
+
+    // Filed where your own task is filed. `setup` created one by hand with a
+    // goal, and the two should be indistinguishable afterwards — an agent's
+    // task is not a second-class row.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let by_hand = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["id"] == json!(env.task_id))
+        .expect("the task setup created");
+    assert_eq!(
+        opened["goal_id"], by_hand["goal_id"],
+        "the agent's task was not filed where yours is: {opened}"
+    );
+
+    // And then the behavioural half: it starts.
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{opened_id}/start"),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "the agent's own task would not start: {started}"
+    );
+    let session =
+        wait_for_session(&env.app, started["session_id"].as_str().expect("session")).await;
+    assert_eq!(session["status"], "completed", "session: {session}");
+}
+
+/// The other half: tasks that are already orphaned. `POST /tasks` has always
+/// accepted a `code` task with no `goal_id`, so these exist in the wild and no
+/// creation-time fix reaches them. When the company has exactly one repository
+/// there is nothing to decide.
+#[tokio::test]
+async fn an_orphaned_code_task_runs_when_there_is_only_one_repository() {
+    let env = setup(HAPPY_STUB).await;
+
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({ "title": "Orphan work", "description": "No goal at all." })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    assert_eq!(
+        task["goal_id"],
+        Value::Null,
+        "meant to be an orphan: {task}"
+    );
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start failed: {started}");
+    let session =
+        wait_for_session(&env.app, started["session_id"].as_str().expect("session")).await;
+    assert_eq!(session["status"], "completed", "session: {session}");
+}
+
+/// …and when there is more than one, guessing would run an agent against the
+/// wrong codebase. That is a decision, so it goes back to the human — at both
+/// ends: the task is not quietly attached when it is opened, and it is refused
+/// rather than coin-flipped when it is started.
+#[tokio::test]
+async fn overmind_will_not_guess_which_repository_an_agent_works_in() {
+    let env = setup(OPENS_CODE_WORK_STUB).await;
+
+    let second = env.root.join("other-repo");
+    std::fs::create_dir_all(&second).expect("create second repo");
+    sh(&second, "git init -q -b main");
+    sh(
+        &second,
+        "echo '# Other' > README.md && git add . && git -c user.email=t@t -c user.name=T commit -qm init",
+    );
+    let (_, project) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/projects", env.company_id),
+        Some(json!({ "title": "Other repo" })),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_string();
+    let (status, ws) = send(
+        &env.app,
+        "POST",
+        &format!("/api/projects/{project_id}/workspaces"),
+        Some(json!({ "name": "main", "cwd": second.to_string_lossy() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "workspace failed: {ws}");
+
+    // Now let the agent open a `code` task, with two repositories in play.
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company_id, env.agent_id
+        ),
+        Some(json!({ "content": "add() is wrong, please fix it" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let mut opened = Value::Null;
+    for _ in 0..100 {
+        let (_, tasks) = send(
+            &env.app,
+            "GET",
+            &format!("/api/companies/{}/tasks", env.company_id),
+            None,
+        )
+        .await;
+        if let Some(t) = tasks["tasks"]
+            .as_array()
+            .and_then(|ts| ts.iter().find(|t| t["title"] == "Fix add() in calc.py"))
+        {
+            opened = t.clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!opened.is_null(), "the agent never opened the task");
+    assert_eq!(
+        opened["goal_id"],
+        Value::Null,
+        "attaching this would have picked a codebase nobody chose: {opened}"
+    );
+
+    let task_id = opened["id"].as_str().expect("task id").to_string();
+    let (status, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "two repositories is not a coin flip: {body}"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("more than one repository"),
+        "and the refusal has to say what to do about it: {body}"
+    );
 }
