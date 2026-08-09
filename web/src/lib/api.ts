@@ -63,6 +63,9 @@ export interface Company {
   /** The language the company works in — UI *and* what the agents write (M16). */
   language: LanguageCode;
   created_at: string;
+  /** Whether this company's brain is switched on (ADR-0024). Off is the
+   *  no-provider path: agents work, they just stop remembering. */
+  brain_enabled: boolean;
 }
 
 export interface Agent {
@@ -475,7 +478,18 @@ export const api = {
       "/audit/verify",
     ),
 
-  memoryStatus: () => req<{ enabled: boolean }>("GET", "/memory/status"),
+  memoryStatus: () => req<{ enabled: boolean; managed: boolean }>("GET", "/memory/status"),
+
+  /** This company's own brain: is there a provider, is it on, where does it
+   *  live (ADR-0024). `brain_dir` is null unless brains are managed. */
+  brainStatus: (companyId: string) =>
+    req<{ provider_configured: boolean; managed: boolean; enabled: boolean; brain_dir: string | null }>(
+      "GET",
+      `/companies/${companyId}/brain`,
+    ),
+
+  setBrainEnabled: (companyId: string, enabled: boolean) =>
+    req<{ id: string; enabled: boolean }>("POST", `/companies/${companyId}/brain`, { enabled }),
 
   // Conversation with an agent — the CEO is the org leader (ADR-0019).
   getConversation: (companyId: string, agentId: string) =>

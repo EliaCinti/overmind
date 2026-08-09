@@ -31,9 +31,14 @@ services:
       # into the image, e.g. Claude Code:
       # OVERMIND_AGENT_CMD: 'claude -p "$OVERMIND_TASK_PROMPT" --output-format json'
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Optional organizational memory (Wadachi or any MCP memory server):
-      # OVERMIND_MEMORY_CMD: 'BRAIN_DIR=/data/brain wadachi'
+      # Optional organizational memory (Wadachi or any MCP memory server).
+      # Leave BRAIN_DIR out of the command: Overmind sets it per company
+      # (ADR-0024), and a shell assignment here would override it and put every
+      # company back in one brain.
+      # OVERMIND_MEMORY_CMD: 'wadachi'
       # OVERMIND_MEMORY_POOL: "4"
+      # Deliberately share one brain instead of one per company:
+      # OVERMIND_MANAGED_BRAIN: "off"
     restart: unless-stopped
 
 volumes:

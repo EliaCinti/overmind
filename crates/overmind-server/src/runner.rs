@@ -878,11 +878,12 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         run_dir: &ctx.worktree_dir,
     };
     let agent_cmd = agent_command(&ctx.state, crate::sandbox::caged(&ctx.state.config, &cage));
-    // Load what the organization remembers about this kind of work, and put
-    // it in front of the agent (and in an env var). A no-op when memory is off.
+    // Load what *this company* remembers about this kind of work, and put it
+    // in front of the agent (and in an env var). A no-op when memory is off.
     let memory_context = ctx
         .state
-        .memory
+        .memory_for(&ctx.company_id)
+        .await
         .get_context(
             &ctx.worktree_dir.to_string_lossy(),
             &format!("{}\n{}", ctx.title, ctx.description),
@@ -1354,7 +1355,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // Record what the organization just learned. Best-effort; never fatal.
     if f.session_status == "completed" {
         ctx.state
-            .memory
+            .memory_for(&ctx.company_id)
+            .await
             .store_memory(
                 &ctx.title,
                 &format!(

@@ -111,7 +111,7 @@ export function TopBar({
             onOpenMeeting={onOpenMeeting}
           />
         )}
-        <MemoryIndicator />
+        <MemoryIndicator companyId={companyId} />
         <AuditIndicator tick={tick} />
         <ConnectionDot connected={connected} />
         {companyId && (
@@ -191,24 +191,44 @@ function ConnectionDot({ connected }: { connected: boolean }) {
   );
 }
 
-/** Shows whether organizational memory (Wadachi/MCP) is connected. */
-function MemoryIndicator() {
+/** Shows whether organizational memory (Wadachi/MCP) is connected — and, with a
+ *  company selected, whether *that company's* brain is on and where it lives
+ *  (ADR-0024). A managed brain is a directory, and naming it is what makes it
+ *  yours to open, inspect or back up. */
+function MemoryIndicator({ companyId }: { companyId: string | null }) {
   const t = useT();
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [dir, setDir] = useState<string | null>(null);
   useEffect(() => {
-    api
-      .memoryStatus()
-      .then((r) => setEnabled(r.enabled))
-      .catch(() => setEnabled(null));
-  }, []);
+    let cancelled = false;
+    const load = companyId
+      ? api.brainStatus(companyId).then((r) => ({
+          on: r.provider_configured && r.enabled,
+          dir: r.enabled ? r.brain_dir : null,
+        }))
+      : api.memoryStatus().then((r) => ({ on: r.enabled, dir: null }));
+    load
+      .then((r) => {
+        if (cancelled) return;
+        setEnabled(r.on);
+        setDir(r.dir);
+      })
+      .catch(() => {
+        if (!cancelled) setEnabled(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId]);
   if (enabled === null) return null;
+  const on = dir ? `${t("nav.memoryOn")} — ${dir}` : t("nav.memoryOn");
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs",
         enabled ? "text-primary" : "text-muted-foreground/50",
       )}
-      title={enabled ? t("nav.memoryOn") : t("nav.memoryOff")}
+      title={enabled ? on : t("nav.memoryOff")}
     >
       <BrainCircuit className="h-3.5 w-3.5" />
       {t("nav.memory")}

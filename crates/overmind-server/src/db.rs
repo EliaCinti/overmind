@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -23,10 +23,84 @@ pub struct AppState {
     pub events: broadcast::Sender<String>,
     /// Organizational memory over MCP (Wadachi reference). A no-op when no
     /// memory server is configured — Overmind is fully functional without it.
+    ///
+    /// This is the *unbound* handle: it speaks to whatever brain the memory
+    /// command defaults to. Work done on a company's behalf must go through
+    /// [`AppState::memory_for`] instead, which binds it to that company's own
+    /// brain (ADR-0024).
     pub memory: crate::mcp::Memory,
+    /// One `Memory` per company, each bound to that company's brain directory.
+    /// Cached because [`crate::mcp::Memory::with_brain_dir`] builds a fresh
+    /// connection pool every time it is called — binding per task would respawn
+    /// memory servers forever instead of reusing warm ones.
+    brains: Arc<Mutex<HashMap<String, crate::mcp::Memory>>>,
 }
 
 impl AppState {
+    /// The brain directory a company's memories live in (ADR-0024). Derived
+    /// from the id rather than stored, so a company and its brain cannot point
+    /// at different places.
+    pub fn brain_dir(&self, company_id: &str) -> PathBuf {
+        self.config
+            .data_dir
+            .join("companies")
+            .join(company_id)
+            .join("brain")
+    }
+
+    /// The memory handle to use for work done on `company_id`'s behalf.
+    ///
+    /// Provisioning is the directory: a memory server pointed at an empty one
+    /// builds whatever layout it needs on first connection, so "give this
+    /// company a brain" is a `create_dir_all` and an env var — no init step,
+    /// and nothing Wadachi-specific in the provider-generic path (ADR-0024).
+    ///
+    /// Returns a disabled (no-op) handle when the company has its brain
+    /// switched off, which is the same path as having no provider configured.
+    /// Falls back to the shared handle when managed brains are off, or when the
+    /// directory cannot be created — losing isolation is bad, losing the
+    /// agent's memory over a filesystem hiccup is worse, and memory is
+    /// best-effort by contract.
+    pub async fn memory_for(&self, company_id: &str) -> crate::mcp::Memory {
+        if !self.config.managed_brain || !self.memory.is_enabled() {
+            return self.memory.clone();
+        }
+        if !self.brain_is_enabled(company_id).await {
+            return crate::mcp::Memory::disabled();
+        }
+        if let Ok(cache) = self.brains.lock()
+            && let Some(m) = cache.get(company_id)
+        {
+            return m.clone();
+        }
+        let dir = self.brain_dir(company_id);
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+            eprintln!("brain dir {} unusable (ignored): {e}", dir.display());
+            return self.memory.clone();
+        }
+        let bound = self.memory.with_brain_dir(&dir.to_string_lossy());
+        // Another task may have raced us here; whoever inserted first wins, so
+        // the company keeps one pool rather than two. A poisoned lock costs a
+        // fresh pool, not a failed call — the same trade the runner makes.
+        match self.brains.lock() {
+            Ok(mut cache) => cache.entry(company_id.to_string()).or_insert(bound).clone(),
+            Err(_) => bound,
+        }
+    }
+
+    /// Whether this company's brain is switched on. A missing company answers
+    /// "on": the caller is already about to fail on the real query, and memory
+    /// must never be the thing that decides an operation's fate.
+    async fn brain_is_enabled(&self, company_id: &str) -> bool {
+        sqlx::query_scalar::<_, i64>("SELECT brain_enabled FROM companies WHERE id = ?1")
+            .bind(company_id)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap_or(None)
+            .map(|v| v != 0)
+            .unwrap_or(true)
+    }
+
     /// Tell connected clients that `company_id`'s board changed. Coarse by
     /// design: the client refetches rather than applying a delta, which keeps
     /// the contract trivial and impossible to desync. A send error just means
@@ -73,6 +147,11 @@ pub struct Config {
     /// The profile cannot know every toolchain; this is how a setup it did not
     /// anticipate gets fixed without turning the cage off.
     pub sandbox_allow: Vec<PathBuf>,
+    /// Give each company its own brain under the data dir (ADR-0024).
+    /// `OVERMIND_MANAGED_BRAIN=off` restores M7's behaviour — one shared brain,
+    /// wherever `memory_cmd` points — for the user who deliberately wants their
+    /// agents writing into a brain they chose.
+    pub managed_brain: bool,
 }
 
 impl Default for Config {
@@ -87,6 +166,7 @@ impl Default for Config {
             web_dir: PathBuf::from("./web/dist"),
             sandbox: true,
             sandbox_allow: Vec::new(),
+            managed_brain: true,
         }
     }
 }
@@ -131,6 +211,12 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or(defaults.sandbox_allow),
+            // Same shape as `sandbox` above, same reason: only an explicit
+            // "off" opts out, so a typo does not silently put two companies
+            // back in one brain.
+            managed_brain: std::env::var("OVERMIND_MANAGED_BRAIN")
+                .map(|v| !v.eq_ignore_ascii_case("off"))
+                .unwrap_or(defaults.managed_brain),
         }
     }
 }
@@ -184,6 +270,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         running: Arc::new(Mutex::new(HashSet::new())),
         events,
         memory,
+        brains: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

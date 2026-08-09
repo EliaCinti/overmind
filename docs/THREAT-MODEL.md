@@ -67,6 +67,13 @@ rely on.
   worktree. We do not verify the binary.
 - **A malicious MCP memory server.** It is a command *you* configured
   (`OVERMIND_MEMORY_CMD`) and it runs outside the cage, like `git`.
+- **A memory server that ignores `BRAIN_DIR`.** Per-company brains are routed by
+  setting that variable on the spawned server ([ADR-0024](adr/0024-managed-per-company-brain.md)).
+  Wadachi honours it; a conforming MCP server that does not would put every
+  company back in one shared brain — silently, because there is no handshake to
+  ask. Separation between companies is an organizational convenience, **not a
+  security boundary**: what actually stops an agent reaching another company's
+  brain is the cage denying it the data dir.
 - **The network.** The cage cannot close it — reaching the API is the job — so
   an agent can talk to any host it can name. What it cannot do is talk to them
   *as you*: see credentials, below.
@@ -92,6 +99,7 @@ rely on.
 | An agent cannot be handed visual material it was not characterized to judge | multimodal gate ([ADR-0021](adr/0021-function-domain-characterization.md)) | `characterization.rs` — `an_agent_is_refused_material_it_was_not_characterized_to_look_at` |
 | An agent cannot flood you with meeting requests | one pending per agent, three per company (M13.5) | `meetings.rs` — `an_agent_may_keep_only_one_request_waiting_on_you` |
 | Editing the audit log is detectable | SHA-256 hash chain ([ADR-0006](adr/0006-audit-log-and-task-lifecycle.md)) | `api.rs` — `tampering_with_an_event_breaks_the_chain` |
+| One company's agents are not handed another company's memories | a brain directory per company, routed by `BRAIN_DIR` ([ADR-0024](adr/0024-managed-per-company-brain.md)) — separation, not a security boundary, see above | `brain.rs` — `one_companys_memories_are_invisible_to_another` |
 | An agent cannot fabricate a turn in its own or another agent's context | delimited transcript blocks, markers stripped from content | `ceo.rs` — `content_cannot_forge_another_turn`, `content_cannot_close_its_own_block` |
 | An agent's words never wear Overmind's own voice | `escalation` is a distinct role from `system` | `injection.rs` — `an_escalation_never_speaks_with_the_systems_voice` |
 | Agent prose is bounded before it reaches a prompt, an inbox or a dialog | `clamp_agent_text` at the parse boundary | `ceo.rs` — `prose_is_bounded` |
