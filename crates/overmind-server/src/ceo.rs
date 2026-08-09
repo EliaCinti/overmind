@@ -670,7 +670,10 @@ async fn run_agent_turn(
         .as_ref()
         .and_then(|v| v.get("reply").and_then(Value::as_str))
         .map(str::to_string)
-        .unwrap_or_else(|| output.trim().to_string());
+        // Degrade to what the agent *said*, never to the adapter's envelope.
+        // Showing a user `permission_denials` and `ttft_ms` is how this defect
+        // announced itself in the smoke run.
+        .unwrap_or_else(|| agent_text(&output).trim().to_string());
     let tasks = plan
         .as_ref()
         .and_then(|v| v.get("tasks").and_then(Value::as_array))
@@ -932,19 +935,57 @@ async fn spawn_adapter(
 /// envelope (cost, usage, session id) after whatever the agent said, so the
 /// last object on stdout is usually the adapter's, not the agent's. We take
 /// the last one that actually looks like a plan.
-fn plan_json(output: &str) -> Option<Value> {
-    for line in output.lines().rev() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(line)
-            && (v.get("reply").is_some() || v.get("tasks").is_some() || v.get("meeting").is_some())
-        {
-            return Some(v);
+/// The agent's own words, unwrapped from the adapter's envelope (M10 smoke run).
+///
+/// The Claude Code CLI with `--output-format json` emits **one line**: its
+/// result envelope. What the agent actually said — and therefore the structured
+/// plan it emits on the last line of its answer — lives inside `.result`, as a
+/// string. Our stubs print the plan as a line of their own, so every test
+/// passed while nothing worked against the real adapter: the plan layer was
+/// inert, chat opened no tasks, no meeting was ever requested, and the raw
+/// envelope was shown to the user as the reply.
+///
+/// So unwrap first, and search the agent's words rather than the adapter's
+/// bookkeeping. Raw output is returned unchanged when there is no envelope,
+/// which keeps every stub and any other adapter working.
+pub(crate) fn agent_text(output: &str) -> String {
+    last_json_object(output)
+        .as_ref()
+        .and_then(|v| v.get("result"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| output.to_string())
+}
+
+/// Find the last JSON object in `text` that satisfies `wanted`.
+///
+/// Scans the agent's words *and* the raw output: a plan can arrive as its own
+/// line (stubs, other adapters) or nested in an envelope (the real CLI).
+pub(crate) fn find_json_object(
+    output: &str,
+    wanted: impl Fn(&Value) -> bool + Copy,
+) -> Option<Value> {
+    let unwrapped = agent_text(output);
+    for haystack in [unwrapped.as_str(), output] {
+        for line in haystack.lines().rev() {
+            let line = line.trim();
+            if !line.starts_with('{') {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(line)
+                && wanted(&v)
+            {
+                return Some(v);
+            }
         }
     }
-    last_json_object(output)
+    None
+}
+
+fn plan_json(output: &str) -> Option<Value> {
+    find_json_object(output, |v| {
+        v.get("reply").is_some() || v.get("tasks").is_some() || v.get("meeting").is_some()
+    })
 }
 
 /// The last line of output that parses as a JSON object.
@@ -963,6 +1004,50 @@ pub(crate) fn last_json_object(output: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real chat envelope from the Claude Code CLI, captured live during the
+    /// M10 smoke run — one line, with the agent's prose *and* its plan nested
+    /// inside `.result` as a string.
+    const REAL_CHAT: &str = include_str!("../tests/fixtures/claude-code-chat-result.json");
+
+    #[test]
+    fn a_plan_is_found_inside_the_real_envelope() {
+        // The defect the smoke run caught: `plan_json` scanned raw lines, the
+        // real CLI emits one line that is its own envelope, so no plan was ever
+        // parsed. Chat opened no tasks, no meeting was ever requested, no team
+        // was ever proposed — and every stub-driven test passed, because a stub
+        // prints the plan as a line of its own.
+        let plan = plan_json(REAL_CHAT).expect("the plan is in there");
+        assert!(plan.get("reply").is_some(), "{plan}");
+        let tasks = plan
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("the CEO planned a task");
+        assert!(!tasks.is_empty(), "{plan}");
+        assert!(
+            tasks[0]["title"].as_str().unwrap_or("").contains("add()"),
+            "the task it actually planned: {}",
+            tasks[0]
+        );
+        // It proposed a hire in the same turn, which was silently dropped too.
+        assert!(plan.get("team").is_some(), "{plan}");
+    }
+
+    #[test]
+    fn the_reply_is_the_agents_words_not_the_adapters_bookkeeping() {
+        let text = agent_text(REAL_CHAT);
+        assert!(!text.contains("permission_denials"), "{text}");
+        assert!(!text.contains("ttft_ms"), "{text}");
+        assert!(text.contains("add()"), "{text}");
+    }
+
+    #[test]
+    fn output_without_an_envelope_is_left_alone() {
+        // Stubs, and any adapter that just prints its plan.
+        let plain = "{\"reply\":\"hi\",\"tasks\":[]}";
+        assert_eq!(agent_text(plain), plain);
+        assert!(plan_json(plain).is_some());
+    }
 
     #[test]
     fn content_cannot_forge_another_turn() {

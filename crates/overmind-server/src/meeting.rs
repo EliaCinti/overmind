@@ -18,7 +18,7 @@
 use serde_json::{Value, json};
 
 use crate::audit;
-use crate::ceo::{CeoError, last_json_object, leader_id, resolve_teammate, run_adapter};
+use crate::ceo::{CeoError, leader_id, resolve_teammate, run_adapter};
 use crate::db::AppState;
 use crate::domain::event_kind;
 use crate::notify;
@@ -802,25 +802,18 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
 /// last object is usually the adapter's, not the agent's. We take the last one
 /// that actually looks like a turn.
 fn turn_json(output: &str) -> Option<Value> {
-    for line in output.lines().rev() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(line)
-            && (v.get("say").is_some() || v.get("decision").is_some())
-        {
-            return Some(v);
-        }
-    }
-    // Nothing turn-shaped: fall back to the last object at all, so a lone
-    // `{"decision": ...}`-less reply still reaches the transcript.
-    last_json_object(output)
+    // Through the envelope, not around it — the real CLI nests the agent's turn
+    // inside `.result` (see `ceo::agent_text`), which is why meetings could
+    // never reach a decision live while every stub-driven test passed.
+    crate::ceo::find_json_object(output, |v| {
+        v.get("say").is_some() || v.get("decision").is_some()
+    })
 }
 
 /// What the agent said this turn, degrading to its raw output if the JSON is
 /// missing or garbled — a malformed turn is still a turn, not a dead meeting.
 fn said_or_raw(turn: Option<&Value>, output: &str) -> String {
+    let output = &crate::ceo::agent_text(output);
     turn.and_then(|v| v.get("say").and_then(Value::as_str))
         .map(str::trim)
         .filter(|s| !s.is_empty())
