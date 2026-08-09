@@ -169,3 +169,47 @@ removing the network, and reading public code is a legitimate part of the job.
 <agent@overmind.local>`, not by you. That is better provenance than the
 alternative, and it is a visible change to anyone who was expecting their own
 name on a worktree commit.
+
+## Addendum — the cage is what earns the permission flag (2026-08-09)
+
+The live smoke run put a real `code` task in front of the real CLI for the
+first time. The agent read the file, diagnosed the bug, wrote the correct patch
+into its prose reply — and changed nothing. `permission_denials` held fifteen
+entries: every `Edit`, every `Write`, every `Bash`, including `python3
+--version`.
+
+**The Claude Code CLI's permission system assumes a person at a terminal.** In
+headless `-p` mode there is nobody to answer the prompt, so every tool that
+needs approval is refused. Overmind's default adapter command asked for
+approval it could never receive, which means **no `code` task had ever produced
+a diff against the real adapter** — M2's central acceptance criterion, green
+since July, held up entirely by stub shell scripts that write freely because
+they are shell scripts.
+
+Verified in isolation, outside Overmind: the same prompt is denied
+(`Please grant permission to write…`, file absent) and succeeds with
+`--dangerously-skip-permissions` (file written). The flag is the difference.
+
+**Why passing it is the right call here, given the name.** This ADR already
+moved enforcement from asking to the operating system. A caged agent can write
+its own run directory and nothing else, holds no credentials, and cannot reach
+`~/.ssh`, the browser profile or Overmind's own database. Against that, the
+CLI's prompt is not a second boundary — it is a question nobody can answer,
+and its only effect is a paralysed agent. Every alternative was worse:
+`--permission-mode acceptEdits` still denies `Bash`, so no agent could run the
+tests it just wrote; an allowlist would be a blocklist by another name, which
+[the main decision](#why-deny-by-default-rather-than-a-list-of-forbidden-places)
+already rejected.
+
+**The flag rides on the cage, and only on the cage.** `sandbox::caged()` is one
+predicate, asked by both the spawn and the command builder, precisely so the
+two cannot drift into the combination that must never occur: an *uncaged* agent
+with permissions skipped. Held by
+`runner.rs` — `the_permission_flag_never_travels_without_the_cage`.
+
+**Consequence, stated plainly:** on a platform without the cage — anything that
+is not macOS, or `OVERMIND_SANDBOX=off` — agents are **read-only**. They will
+analyse, explain and propose patches they cannot apply. That is the honest
+failure direction this ADR chose from the start, and the escape hatch is the
+one that was already there: set `OVERMIND_AGENT_CMD` yourself, deliberately and
+visibly, if you want an uncaged agent that writes.

@@ -904,14 +904,14 @@ async fn spawn_adapter(
 ) -> Result<String, CeoError> {
     // One definition of the adapter invocation, shared with task runs
     // (ADR-0021) — it used to exist here in a second copy that named no model.
-    let agent_cmd = crate::runner::agent_command(state);
     // Caged like a task run (ADR-0023): a conversational turn is agent-driven
-    // work too, and the scratch dir is all it needs.
-    let mut cmd = crate::sandbox::command(
-        &state.config,
-        &crate::sandbox::Cage { run_dir: cwd },
-        &agent_cmd,
-    );
+    // work too, and the scratch dir is all it needs. A turn writes files too —
+    // M17 collects whatever the agent leaves in the scratch dir — so it needs
+    // the same permission answer a task run gets.
+    let cage = crate::sandbox::Cage { run_dir: cwd };
+    let agent_cmd =
+        crate::runner::agent_command(state, crate::sandbox::caged(&state.config, &cage));
+    let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }

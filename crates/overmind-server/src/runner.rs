@@ -618,11 +618,29 @@ pub(crate) fn trait_model(traits_json: &str) -> String {
 /// default drives the Claude Code CLI headless, on the model the agent is
 /// actually characterized for. Until M14 slice 3 this string existed in two
 /// copies and named no model at all, so `AgentTraits.model` was decorative.
-pub(crate) fn agent_command(state: &AppState) -> String {
-    state.config.agent_cmd.clone().unwrap_or_else(|| {
-        "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" --output-format json"
-            .to_string()
-    })
+pub(crate) fn agent_command(state: &AppState, caged: bool) -> String {
+    if let Some(configured) = state.config.agent_cmd.clone() {
+        return configured;
+    }
+    let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
+                   --output-format json"
+        .to_string();
+    // Headless has nobody to ask. The CLI's permission system assumes a person
+    // at a terminal, so in `-p` mode every Edit, Write and Bash is denied and
+    // the agent can only read — which is how the smoke run found that no `code`
+    // task had ever produced a diff against the real adapter. Stubs are shell
+    // scripts and write freely, so every test was green over it.
+    //
+    // The flag is safe *here and only here*: ADR-0023 moved enforcement to the
+    // OS, and a caged agent can write to its run directory and nowhere else,
+    // with no credentials to push anything. Asking a permission question nobody
+    // can answer is not a second boundary, it is a deadlock. Uncaged, we do not
+    // pass it: the CLI's own prompt is then the only thing left, and a
+    // read-only agent beats an unconstrained one.
+    if caged {
+        cmd.push_str(" --dangerously-skip-permissions");
+    }
+    cmd
 }
 
 /// Resume a session that is marked queued/running in the DB but has no live
@@ -856,7 +874,10 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
 }
 
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
-    let agent_cmd = agent_command(&ctx.state);
+    let cage = crate::sandbox::Cage {
+        run_dir: &ctx.worktree_dir,
+    };
+    let agent_cmd = agent_command(&ctx.state, crate::sandbox::caged(&ctx.state.config, &cage));
     // Load what the organization remembers about this kind of work, and put
     // it in front of the agent (and in an env var). A no-op when memory is off.
     let memory_context = ctx
@@ -965,13 +986,7 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     // Caged: the agent may write its own run directory and nothing else
     // (ADR-0023). `~/.ssh`, the browser profile and Overmind's own database
     // are unreachable from in there.
-    let mut cmd = crate::sandbox::command(
-        &ctx.state.config,
-        &crate::sandbox::Cage {
-            run_dir: &ctx.worktree_dir,
-        },
-        &agent_cmd,
-    );
+    let mut cmd = crate::sandbox::command(&ctx.state.config, &cage, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }
@@ -1504,5 +1519,47 @@ mod tests {
         assert!(parse_cost("plain output, no json").is_none());
         assert!(parse_cost("{\"no_cost\":true}").is_none());
         assert!(parse_adapter_session_id("no json").is_none());
+    }
+}
+
+#[cfg(test)]
+mod adapter_command_tests {
+    use super::agent_command;
+    use crate::db::AppState;
+
+    async fn state_with(agent_cmd: Option<String>) -> AppState {
+        let config = crate::Config {
+            agent_cmd,
+            ..crate::Config::default()
+        };
+        crate::init_with("sqlite::memory:", config)
+            .await
+            .expect("init in-memory db")
+    }
+
+    /// The pairing this whole thing turns on. `--dangerously-skip-permissions`
+    /// is only defensible because the cage is what stops the agent; letting it
+    /// escape onto an uncaged run would hand an unconstrained agent the whole
+    /// machine, which is precisely what ADR-0023 exists to prevent.
+    #[tokio::test]
+    async fn the_permission_flag_never_travels_without_the_cage() {
+        let state = state_with(None).await;
+        assert!(
+            agent_command(&state, true).contains("--dangerously-skip-permissions"),
+            "a caged agent that cannot write is a read-only agent"
+        );
+        assert!(
+            !agent_command(&state, false).contains("--dangerously-skip-permissions"),
+            "uncaged, the CLI's own prompt is the only boundary left"
+        );
+    }
+
+    /// Whatever the operator configured is theirs, cage or no cage. The escape
+    /// hatch has to stay literal to be worth anything.
+    #[tokio::test]
+    async fn a_configured_command_is_left_exactly_as_written() {
+        let state = state_with(Some("sh /my/stub.sh".into())).await;
+        assert_eq!(agent_command(&state, true), "sh /my/stub.sh");
+        assert_eq!(agent_command(&state, false), "sh /my/stub.sh");
     }
 }

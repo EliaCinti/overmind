@@ -128,13 +128,25 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     ))
 }
 
+/// Whether this run will *actually* be caged.
+///
+/// The same question [`command`] answers, exposed because how much rope the
+/// adapter gets depends on the answer: inside the cage the agent may work
+/// freely in its run directory, outside it may not. Two predicates that could
+/// drift apart would eventually give an uncaged agent the caged agent's
+/// freedom, which is the one combination that must never happen — so there is
+/// one predicate, and both callers ask it.
+pub fn caged(config: &Config, cage: &Cage<'_>) -> bool {
+    config.sandbox && available() && profile(config, cage).is_some()
+}
+
 /// Build the command that runs `script`, caged when we can cage it.
 ///
 /// Falls back to a bare `sh -c` when sandboxing is off, unavailable, or the
 /// profile cannot be expressed — and those are the only three cases, each of
 /// them a decision rather than an accident.
 pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
-    if !config.sandbox || !available() {
+    if !caged(config, cage) {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
         return cmd;
@@ -145,6 +157,8 @@ pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
             cmd.arg("-p").arg(text).arg("/bin/sh").arg("-c").arg(script);
             cmd
         }
+        // Unreachable while `caged` agrees with us, and harmless if it ever
+        // stops: the fallback is the *safe* direction.
         None => {
             let mut cmd = Command::new("sh");
             cmd.arg("-c").arg(script);
