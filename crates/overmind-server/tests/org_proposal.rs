@@ -226,7 +226,17 @@ async fn the_ceo_proposes_a_team_and_nothing_is_hired_until_you_accept() {
     .await;
     let list = agents["agents"].as_array().expect("agents");
     assert_eq!(list.len(), 3, "CEO + Vera + Bo: {agents}");
-    let by_name = |n: &str| list.iter().find(|a| a["name"] == json!(n)).cloned();
+    // Look among the *hired*, not among everyone: a company's CEO is given a
+    // name from a fixed list, and "Vera" is on it. When the draw collided, this
+    // found the CEO — whose `reports_to` is NULL by definition — and the test
+    // failed claiming Vera did not report to the CEO. Roughly one CI run in
+    // sixteen, and never once locally, because the old name picker could only
+    // produce two of the sixteen on a Mac (see `db::random_ceo_name`).
+    let by_name = |n: &str| {
+        list.iter()
+            .find(|a| a["name"] == json!(n) && a["id"] != json!(_ceo))
+            .cloned()
+    };
     let vera = by_name("Vera").expect("Vera hired");
     let bo = by_name("Bo").expect("Bo hired");
     assert!(
