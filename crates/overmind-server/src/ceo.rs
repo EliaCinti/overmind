@@ -713,6 +713,16 @@ async fn run_agent_turn(
         .collect();
     let produced = collect_reply_files(state, conversation_id, &scratch, &given).await;
 
+    // Where a task an agent opens belongs. The manual path resolves this in the
+    // frontend and passes it; this path bound NULL, so every `code` task the
+    // CEO opened was born unable to run. Resolved before the write transaction,
+    // like the assignees above.
+    let goal_id = if resolved.is_empty() {
+        None
+    } else {
+        crate::runner::default_goal(state, company_id).await
+    };
+
     let mut tx = state.pool.begin().await?;
     let message_id = new_id();
     sqlx::query(
@@ -745,10 +755,11 @@ async fn run_agent_turn(
         let task_id = new_id();
         sqlx::query(
             "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, assignee_agent_id, created_at, updated_at)
-             VALUES (?, ?, NULL, ?, ?, 'todo', 'medium', ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?)",
         )
         .bind(&task_id)
         .bind(company_id)
+        .bind(goal_id.as_deref())
         .bind(title)
         .bind(description)
         .bind(kind)

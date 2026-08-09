@@ -246,6 +246,41 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
 /// launches nothing unless `bypass_approval` (i.e. the approval was granted);
 /// a start that would push the agent past its monthly budget is stopped here,
 /// atomically, and recorded as a budget incident.
+/// The goal a company's `code` tasks attach to, or `None` when that is not
+/// Overmind's to decide.
+///
+/// The frontend has always resolved this (`web/src/lib/repo.ts` creates it,
+/// `CreateTaskDialog` passes it) and the server never did, which is how tasks
+/// opened by an agent came out orphaned — see the addendum to
+/// [ADR-0008](../../../docs/adr/0008-execution-sessions-and-atomic-checkout.md).
+///
+/// One rule, applied here and again at start: **never guess which repository,
+/// filing within one is fine.** So a second repo-backed project makes this
+/// `None` — which codebase an agent works in is a decision with consequences,
+/// and the task is better visibly unattached than quietly attached to the wrong
+/// thing. Choosing among several goals of the *same* project only decides where
+/// the task is filed, so the oldest wins and a human can move it.
+pub(crate) async fn default_goal(state: &AppState, company_id: &str) -> Option<String> {
+    let projects: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT w.project_id FROM project_workspaces w
+         JOIN projects p ON p.id = w.project_id
+         WHERE p.company_id = ? AND w.is_primary = 1",
+    )
+    .bind(company_id)
+    .fetch_all(&state.pool)
+    .await
+    .ok()?;
+    let [project_id] = projects.as_slice() else {
+        return None;
+    };
+    sqlx::query_scalar("SELECT id FROM goals WHERE project_id = ? ORDER BY created_at, id LIMIT 1")
+        .bind(project_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub async fn start_task(
     state: &AppState,
     task_id: &str,
@@ -322,22 +357,45 @@ pub async fn start_task(
     // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
     let workspace: Option<(String, Option<String>)> = match exec_kind {
         ExecutionKind::Code => {
-            let Some(goal_id) = goal_id else {
-                return Err(RunnerError::Invalid(
-                    "task has no goal: attach it to a project with a workspace first".into(),
-                ));
+            let ws: Option<(String, Option<String>)> = match &goal_id {
+                Some(goal_id) => {
+                    sqlx::query_as(
+                        "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                         JOIN goals g ON g.project_id = w.project_id
+                         WHERE g.id = ? AND w.is_primary = 1",
+                    )
+                    .bind(goal_id)
+                    .fetch_optional(&state.pool)
+                    .await?
+                }
+                // An orphan — opened before a repo was connected, or by a build
+                // that did not attach it. When the company has exactly one
+                // repository there is nothing to decide, so decide it; when it
+                // has several, the choice is genuinely the user's and guessing
+                // would run an agent against the wrong codebase.
+                None => {
+                    let repos: Vec<(String, Option<String>)> = sqlx::query_as(
+                        "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                         JOIN projects p ON p.id = w.project_id
+                         WHERE p.company_id = ? AND w.is_primary = 1
+                         ORDER BY w.cwd",
+                    )
+                    .bind(&company_id)
+                    .fetch_all(&state.pool)
+                    .await?;
+                    if repos.len() > 1 {
+                        return Err(RunnerError::Invalid(
+                            "this task is not attached to a project, and the company has more \
+                             than one repository: attach it to a goal first"
+                                .into(),
+                        ));
+                    }
+                    repos.into_iter().next()
+                }
             };
-            let ws: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT w.cwd, w.default_ref FROM project_workspaces w
-                 JOIN goals g ON g.project_id = w.project_id
-                 WHERE g.id = ? AND w.is_primary = 1",
-            )
-            .bind(&goal_id)
-            .fetch_optional(&state.pool)
-            .await?;
             let Some(ws) = ws else {
                 return Err(RunnerError::Invalid(
-                    "the task's project has no primary workspace".into(),
+                    "no repository to work in: connect one to this company first".into(),
                 ));
             };
             Some(ws)
