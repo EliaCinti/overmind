@@ -96,6 +96,7 @@ export function TopBar({
               { value: "board", label: t("nav.board") },
               { value: "meetings", label: t("nav.meetings") },
               { value: "org", label: t("nav.org") },
+              { value: "memory", label: t("nav.memoryView") },
             ]}
           />
         </div>

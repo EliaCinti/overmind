@@ -88,6 +88,45 @@ impl AppState {
         }
     }
 
+    /// Record which task or meeting produced a memory the provider just stored
+    /// (ADR-0025). `memory_ref` is whatever identifier it gave back, so `None`
+    /// — a provider that answers without one, or a call that failed — records
+    /// nothing and is not an error: the memory exists either way, it just has
+    /// no subject in the browser.
+    ///
+    /// The whole thing is best-effort, memory's standing bargain since
+    /// ADR-0003. A link we fail to write must never fail the work that earned
+    /// it.
+    pub async fn link_memory(
+        &self,
+        company_id: &str,
+        kind: &str,
+        memory_ref: Option<&str>,
+        subject_type: &str,
+        subject_id: &str,
+        subject_title: &str,
+    ) {
+        let Some(memory_ref) = memory_ref else { return };
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO memory_links
+               (id, company_id, kind, memory_ref, subject_type, subject_id, subject_title, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(company_id)
+        .bind(kind)
+        .bind(memory_ref)
+        .bind(subject_type)
+        .bind(subject_id)
+        .bind(subject_title)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await;
+        if let Err(e) = result {
+            eprintln!("memory link not recorded (ignored): {e}");
+        }
+    }
+
     /// Whether this company's brain is switched on. A missing company answers
     /// "on": the caller is already about to fail on the real query, and memory
     /// must never be the thing that decides an operation's fate.

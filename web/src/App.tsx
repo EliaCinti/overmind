@@ -22,6 +22,7 @@ import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
 import { Chat } from "./components/Chat";
 import { Meetings } from "./components/Meetings";
+import { Memory } from "./components/Memory";
 import { OrgChart } from "./components/OrgChart";
 import { TaskDetail } from "./components/TaskDetail";
 import { Toaster } from "./components/Toaster";
@@ -243,6 +244,8 @@ export default function App() {
                 selectedId={selectedMeeting}
                 onSelect={setSelectedMeeting}
               />
+            ) : view === "memory" ? (
+              <Memory companyId={companyId} tick={tick} />
             ) : (
               <OrgChart
                 agents={agents}

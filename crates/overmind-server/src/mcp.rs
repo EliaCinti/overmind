@@ -134,6 +134,11 @@ impl Memory {
     }
 
     /// Record a memory about completed work. Best-effort.
+    ///
+    /// Returns the provider's own identifier for what it stored, when it gives
+    /// one — that is what lets Overmind record which task produced it
+    /// (ADR-0025). `None` means the call failed, memory is off, or the provider
+    /// answered without an id; all three are survivable and none is an error.
     pub async fn store_memory(
         &self,
         title: &str,
@@ -141,9 +146,9 @@ impl Memory {
         project: &str,
         tags: &[&str],
         category: &str,
-    ) {
+    ) -> Option<String> {
         if !self.is_enabled() {
-            return;
+            return None;
         }
         let args = json!({
             "title": title,
@@ -152,19 +157,99 @@ impl Memory {
             "tags": tags,
             "category": category,
         });
-        if let Err(e) = self.call("store_memory", args).await {
-            eprintln!("memory store_memory failed (ignored): {e}");
+        match self.call("store_memory", args).await {
+            Ok(v) => stored_ref(&v),
+            Err(e) => {
+                eprintln!("memory store_memory failed (ignored): {e}");
+                None
+            }
         }
     }
 
-    /// Record a decision with its rationale. Best-effort.
-    pub async fn store_decision(&self, decision: &str, rationale: &str, project: &str) {
+    /// Record a decision with its rationale. Best-effort; returns the
+    /// provider's identifier like [`Memory::store_memory`].
+    pub async fn store_decision(
+        &self,
+        decision: &str,
+        rationale: &str,
+        project: &str,
+        tags: &[&str],
+    ) -> Option<String> {
         if !self.is_enabled() {
-            return;
+            return None;
         }
-        let args = json!({ "decision": decision, "rationale": rationale, "project": project });
-        if let Err(e) = self.call("store_decision", args).await {
-            eprintln!("memory store_decision failed (ignored): {e}");
+        let args = json!({
+            "decision": decision,
+            "rationale": rationale,
+            "project": project,
+            "tags": tags,
+        });
+        match self.call("store_decision", args).await {
+            Ok(v) => stored_ref(&v),
+            Err(e) => {
+                eprintln!("memory store_decision failed (ignored): {e}");
+                None
+            }
+        }
+    }
+
+    /// Enumerate what this brain holds, newest-first if the provider says so.
+    /// `None` when memory is off or the answer is not a list we recognize —
+    /// which the UI reports as "this provider cannot be browsed" rather than as
+    /// an empty brain (ADR-0025).
+    pub async fn list_memories(&self, project: Option<&str>) -> Option<Vec<Value>> {
+        let args = match project {
+            Some(p) => json!({ "project": p }),
+            None => json!({}),
+        };
+        self.listing("list_memories", args, "memories").await
+    }
+
+    /// Recent decisions. Separate from memories because the provider keeps them
+    /// apart and flattening the two would lose which is which.
+    pub async fn list_decisions(&self, project: Option<&str>, limit: u32) -> Option<Vec<Value>> {
+        let mut args = json!({ "limit": limit });
+        if let Some(p) = project {
+            args["project"] = json!(p);
+        }
+        self.listing("list_decisions", args, "decisions").await
+    }
+
+    /// Semantic search. Deliberately *not* modelled as a filtered `list`: one
+    /// ranks by meaning and the other enumerates, and calling them the same
+    /// thing would misrepresent both (ADR-0025).
+    pub async fn recall(
+        &self,
+        query: &str,
+        project: Option<&str>,
+        limit: u32,
+    ) -> Option<Vec<Value>> {
+        let mut args = json!({ "query": query, "limit": limit });
+        if let Some(p) = project {
+            args["project"] = json!(p);
+        }
+        self.listing("recall", args, "results").await
+    }
+
+    /// Shared shape of the three read tools: call, take the text out of the MCP
+    /// envelope, and look for an array in it. Defensive on purpose — the
+    /// contract promises tool names, not response shapes.
+    async fn listing(&self, tool: &str, args: Value, key: &str) -> Option<Vec<Value>> {
+        if !self.is_enabled() {
+            return None;
+        }
+        match self.call(tool, args).await {
+            Ok(v) => {
+                let items = extract_array(&extract_text(&v), key);
+                if items.is_none() {
+                    eprintln!("memory {tool} answered nothing browsable (ignored)");
+                }
+                items
+            }
+            Err(e) => {
+                eprintln!("memory {tool} failed (ignored): {e}");
+                None
+            }
         }
     }
 
@@ -321,6 +406,35 @@ where
     Err(McpError::Closed)
 }
 
+/// The provider's identifier for something it just stored, if it gave one.
+///
+/// Tool results are text by protocol, so a server that wants to say "I stored
+/// this as #7" has to say it inside the text. Wadachi answers with a JSON
+/// object carrying `id`; we accept a number or a string there and nothing else,
+/// because guessing harder than that would mean inventing links that are not
+/// real (ADR-0025).
+fn stored_ref(result: &Value) -> Option<String> {
+    let text = extract_text(result);
+    let parsed: Value = serde_json::from_str(text.trim()).ok()?;
+    match parsed.get("id")? {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Pull a list out of a tool's text answer. Accepts either an object with the
+/// expected key (`{"memories": [...]}`, Wadachi's shape) or a bare array, and
+/// gives up otherwise rather than inventing a reading of it.
+fn extract_array(text: &str, key: &str) -> Option<Vec<Value>> {
+    let parsed: Value = serde_json::from_str(text.trim()).ok()?;
+    match parsed {
+        Value::Array(items) => Some(items),
+        Value::Object(ref map) => map.get(key)?.as_array().cloned(),
+        _ => None,
+    }
+}
+
 /// Flatten an MCP tool result's `content` array into a single string.
 fn extract_text(result: &Value) -> String {
     result
@@ -356,13 +470,60 @@ enum McpError {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_text;
+    use super::{extract_array, extract_text, stored_ref};
     use serde_json::json;
+
+    fn text_result(text: &str) -> serde_json::Value {
+        json!({ "content": [ { "type": "text", "text": text } ] })
+    }
 
     #[test]
     fn extracts_joined_text_content() {
         let r = json!({ "content": [ {"type":"text","text":"a"}, {"type":"text","text":"b"} ] });
         assert_eq!(extract_text(&r), "a\nb");
         assert_eq!(extract_text(&json!({})), "");
+    }
+
+    /// The real shapes: Wadachi's `store_memory` and `store_decision` both
+    /// answer with a JSON object carrying `id`.
+    #[test]
+    fn reads_the_providers_id_out_of_a_stored_result() {
+        let r = text_result(r#"{"id": 7, "title": "T", "filepath": "projects/x/t.md"}"#);
+        assert_eq!(stored_ref(&r).as_deref(), Some("7"));
+        assert_eq!(
+            stored_ref(&text_result(r#"{"id": "abc"}"#)).as_deref(),
+            Some("abc")
+        );
+    }
+
+    /// No id means no link, never a guessed one — a wrong provenance is worse
+    /// than none (ADR-0025).
+    #[test]
+    fn invents_no_id_when_the_provider_gives_none() {
+        assert_eq!(stored_ref(&text_result("stored")), None);
+        assert_eq!(stored_ref(&text_result(r#"{"ok": true}"#)), None);
+        assert_eq!(stored_ref(&text_result(r#"{"id": null}"#)), None);
+        assert_eq!(stored_ref(&text_result(r#"{"id": ""}"#)), None);
+        assert_eq!(stored_ref(&json!({})), None);
+    }
+
+    #[test]
+    fn reads_a_listing_from_either_shape() {
+        let keyed = r#"{"memories": [{"id": 1}], "count": 1}"#;
+        assert_eq!(extract_array(keyed, "memories").map(|v| v.len()), Some(1));
+        let bare = r#"[{"id": 1}, {"id": 2}]"#;
+        assert_eq!(extract_array(bare, "memories").map(|v| v.len()), Some(2));
+    }
+
+    /// An answer we cannot read is "not browsable", which the UI distinguishes
+    /// from "empty" — so it must not come back as an empty list.
+    #[test]
+    fn an_unreadable_listing_is_none_not_empty() {
+        assert_eq!(extract_array("I remember three things.", "memories"), None);
+        assert_eq!(extract_array(r#"{"count": 0}"#, "memories"), None);
+        assert_eq!(
+            extract_array(r#"{"memories": []}"#, "memories").map(|v| v.len()),
+            Some(0)
+        );
     }
 }
