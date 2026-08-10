@@ -25,18 +25,20 @@ personal brain. [ADR-0004](0004-wadachi-first-party-managed-brain.md) forbids
 exactly that ("Overmind never reads or writes a user's personal Wadachi
 brain"), and so does rule 6 of `CLAUDE.md`. Today only care enforces it.
 
-### The dependency ADR-0004 declared is satisfied
+### The dependency ADR-0004 declared was worked on — and is not finished
 
 ADR-0004 and `ROADMAP.md` both said M8 waits on Wadachi supporting concurrent
-multi-agent access. That landed in **Wadachi 0.14.0 on 2026-07-20**: SQLite in
-WAL with `busy_timeout` on every connection, `index.md` rewritten via temp file
-+ `os.replace`, memory files created `O_CREAT|O_EXCL` so two concurrent writes
-of the same title get distinct files instead of one silently winning — with
-three concurrency tests, including 24 parallel writers. The commit names
-"più agenti di Overmind in parallelo" as the motivating case.
+multi-agent access. Work for it landed in **Wadachi 0.14.0 on 2026-07-20**:
+SQLite in WAL with `busy_timeout` on every connection, `index.md` rewritten via
+temp file + `os.replace`, memory files created `O_CREAT|O_EXCL` so two
+concurrent writes of the same title get distinct files instead of one silently
+winning — with three concurrency tests, including 24 parallel writers. The
+commit names "più agenti di Overmind in parallelo" as the motivating case.
 
-The roadmap line outlived the fact by three weeks. It is corrected in the same
-change as this ADR.
+The roadmap line outlived *that* by three weeks and is corrected alongside this
+ADR. But the first version of this section said the dependency was **satisfied**,
+on the strength of a changelog entry, and that was wrong: see the addendum
+below, which is the more important half of this ADR.
 
 ## Decision
 
@@ -149,3 +151,78 @@ is the sandbox's doing, not this ADR's.
   makes the next slice — browsing an org's memories, decisions linked to the
   tasks that produced them — a matter of reading one brain rather than
   filtering a shared one.
+
+## Addendum — the concurrency guarantee is real but incomplete (2026-08-09)
+
+This ADR originally called ADR-0004's dependency *satisfied*, citing Wadachi's
+0.14.0 changelog. Elia pushed back — the requirement was several agents writing
+one brain **at the same time**, and had that actually been demonstrated? It had
+not. So it was measured, and the answer is no.
+
+**The test.** Eight separate `wadachi.server` processes, all pointed at one
+`BRAIN_DIR` — which is exactly what Overmind's stdio pool does on the managed
+path — released from a barrier so they collide, five `store_memory` calls each.
+Forty writes expected.
+
+**The result, over five runs: 1, 3, 2, 1 and 0 memories lost.** Each loss is
+`Error executing tool store_memory: database is locked`, returned in ~50ms
+rather than after the 30-second `busy_timeout`. Four runs in five lost at least
+one memory.
+
+Worse than losing it: `store_memory` writes the markdown file *before* the row,
+so a failed write leaves **40 files on disk and 37 rows in the database**. The
+memory exists in the vault and is invisible to `list_memories`. A clean loss
+would have been better.
+
+**The cause is one line, and it is the line whose comment claims safety.**
+`MemoryStore._conn` runs `PRAGMA journal_mode=WAL` on every connection, above
+the comment *"re-applying it per connection is idempotent and cheap"*. It is
+idempotent. It is not lock-free: setting the journal mode needs a brief
+exclusive lock, and SQLite does **not** invoke the busy handler for it — so it
+returns `SQLITE_BUSY` immediately while any other connection is mid-write. The
+timeout that the rest of the design leans on never gets a chance to apply.
+
+Demonstrated rather than reasoned: the same eight-process test against a server
+with that single pragma removed and nothing else changed passes 40/40, twice,
+with the slowest write at 0.07s. The fix is to set the journal mode once, where
+the database is created, not on every connection.
+
+**What this does and does not change here.** Slices 1 and 2 stand: per-company
+routing, provisioning and browsing are unaffected, and memory has been
+best-effort since ADR-0003, so a lost write is logged and swallowed rather than
+failing a task. What it changes is the confidence. Under Overmind's default pool
+of four the collision window is narrower than this test's, but it is not zero,
+and "the brain is concurrency-safe" is not a sentence this project has earned
+yet.
+
+**The fix belongs in the Wadachi repo** (rule 6 of `CLAUDE.md`: changes Wadachi
+needs are developed there, never vendored here), and that is where it was done
+— Wadachi 0.14.1, [PR #2](https://github.com/EliaCinti/wadachi/pull/2). Chasing
+it down found a **second and worse defect** than the one this addendum started
+with: `run_migrations` was not serialized across processes, so several agents
+opening a *freshly provisioned* brain at the same moment made all but one die
+with `UNIQUE constraint failed: schema_version.version`. That loser does not
+lose a memory — it fails to open the brain, on the first task a new company
+ever runs.
+
+0.14.1 serializes migration with a file lock, sets `journal_mode` once instead
+of per connection, opens every write transaction `BEGIN IMMEDIATE`, and deletes
+the markdown file when its insert fails so the vault and the index cannot
+disagree. It also adds the two multi-process tests that were missing — the old
+24-writer test used **threads in one process**, which is not the shape Overmind
+creates and is why a real defect lived under a green suite.
+
+Worth recording honestly: the two defects mask each other, and applying either
+fix alone made the reproduction stop failing, so which one caused which loss was
+never isolated. The migration race is the one with a deterministic
+reproduction.
+
+ADR-0015's agent-facing ceiling — N agents each calling memory tens of times per
+task — would have hit both far harder than the orchestrator's two calls do, so
+this is a prerequisite of M8 slice 3 rather than a tidy-up.
+
+**The habit worth keeping.** A changelog is a claim, not evidence. This ADR
+already knew that where it mattered — the `BRAIN_DIR` behaviour was driven
+against the real server instead of read from the source — and then took the
+concurrency guarantee on trust because it was written down convincingly. The
+rule that catches this is the project's own: run the thing.
