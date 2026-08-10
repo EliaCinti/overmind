@@ -118,7 +118,33 @@ export interface Notification {
 }
 
 /** The main surfaces of the app. */
-export type View = "chat" | "board" | "meetings" | "org";
+export type View = "chat" | "board" | "meetings" | "org" | "memory";
+
+/**
+ * Why a memory page is empty (ADR-0025). Four situations that render
+ * identically if you only check `items.length`, and that ask different things
+ * of the reader: configure a provider, switch the brain back on, do some work,
+ * or accept that this provider cannot be listed.
+ */
+export type MemoryState = "ok" | "no_provider" | "brain_off" | "not_browsable";
+
+/** One row of what the organization remembers. Every field is optional
+ *  because the provider contract is generic — we render what we recognize. */
+export interface MemoryItem {
+  id: string | null;
+  title: string | null;
+  content: string | null;
+  category: string | null;
+  project: string | null;
+  created_at: string | null;
+  /** The task or meeting that produced it, when Overmind recorded one. */
+  subject: { type: "task" | "meeting"; id: string; title: string } | null;
+}
+
+export interface MemoryPage {
+  state: MemoryState;
+  items: MemoryItem[];
+}
 
 export type MeetingStatus = "requested" | "open" | "decided" | "declined" | "failed"
   /** Out of budget mid-deliberation; waiting to be resumed (ADR-0022). */
@@ -490,6 +516,15 @@ export const api = {
 
   setBrainEnabled: (companyId: string, enabled: boolean) =>
     req<{ id: string; enabled: boolean }>("POST", `/companies/${companyId}/brain`, { enabled }),
+
+  /** Browse what the company remembers. A `query` searches by meaning
+   *  (`recall`); without one the brain is enumerated (ADR-0025). */
+  browseMemory: (companyId: string, kind: "memories" | "decisions", query?: string) =>
+    req<MemoryPage>(
+      "GET",
+      `/companies/${companyId}/memory/${kind}` +
+        (query ? `?q=${encodeURIComponent(query)}` : ""),
+    ),
 
   // Conversation with an agent — the CEO is the org leader (ADR-0019).
   getConversation: (companyId: string, agentId: string) =>

@@ -80,6 +80,14 @@ fn api_router() -> Router<AppState> {
             "/companies/{company_id}/brain",
             get(brain_status).post(set_brain_enabled),
         )
+        .route(
+            "/companies/{company_id}/memory/memories",
+            get(browse_memories),
+        )
+        .route(
+            "/companies/{company_id}/memory/decisions",
+            get(browse_decisions),
+        )
         .route("/languages", get(list_languages))
         .route(
             "/companies/{company_id}/agents",
@@ -2171,6 +2179,140 @@ async fn set_brain_enabled(
     tx.commit().await?;
     state.notify(&company_id);
     Ok(Json(json!({ "id": company_id, "enabled": req.enabled })))
+}
+
+// ---------- browsing what the organization remembers (M8, ADR-0025) ----------
+
+/// How many rows a browse returns. The brain can hold thousands; a page that
+/// tries to render all of them is not a browser, it is a download.
+const BROWSE_LIMIT: u32 = 100;
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    /// Present → semantic `recall`; absent → enumerate. Two different
+    /// operations, not one filtered by the other (ADR-0025).
+    q: Option<String>,
+}
+
+/// Why a browse came back with nothing — four situations that a careless
+/// implementation renders identically as an empty page, and that need
+/// different things from the reader (ADR-0025).
+async fn browse_state(
+    state: &AppState,
+    company_id: &str,
+) -> Result<Option<&'static str>, ApiError> {
+    if !state.memory.is_enabled() {
+        return Ok(Some("no_provider"));
+    }
+    let enabled: Option<i64> =
+        sqlx::query_scalar("SELECT brain_enabled FROM companies WHERE id = ?")
+            .bind(company_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    match enabled.ok_or(ApiError::NotFound("company"))? {
+        0 => Ok(Some("brain_off")),
+        _ => Ok(None),
+    }
+}
+
+/// The subject each memory came from, keyed by the provider's identifier.
+/// One query for the page rather than one per row.
+async fn subjects_for(
+    state: &AppState,
+    company_id: &str,
+    kind: &str,
+) -> Result<std::collections::HashMap<String, Value>, ApiError> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT memory_ref, subject_type, subject_id, subject_title
+           FROM memory_links WHERE company_id = ? AND kind = ?",
+    )
+    .bind(company_id)
+    .bind(kind)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(r, stype, sid, title)| (r, json!({ "type": stype, "id": sid, "title": title })))
+        .collect())
+}
+
+/// Take from a provider's row only the fields we recognize, and attach the
+/// subject if we recorded one. Everything else the provider chose to send is
+/// dropped: rendering fields we have not designed for is how a UI starts
+/// depending on one implementation's shape.
+fn normalize(item: &Value, subjects: &std::collections::HashMap<String, Value>) -> Value {
+    let id = match item.get("id") {
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    let text = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_string);
+    json!({
+        "id": id,
+        // `decision` is what the decisions table calls its headline; a memory
+        // calls it `title`. One field to the reader, either way.
+        "title": text("title").or_else(|| text("decision")),
+        // Three names for the body, all seen coming out of the real provider:
+        // a memory has `content`, a decision has `rationale`, and a search hit
+        // has `preview`. Verified against Wadachi rather than guessed — an
+        // enumerated memory carries no body at all, only a `filepath`, so a
+        // listed row showing just its title is correct and not a bug.
+        "content": text("content")
+            .or_else(|| text("rationale"))
+            .or_else(|| text("preview")),
+        "category": text("category"),
+        "project": text("project"),
+        "created_at": text("created_at"),
+        "subject": id.as_ref().and_then(|i| subjects.get(i)).cloned(),
+    })
+}
+
+async fn browse(
+    state: &AppState,
+    company_id: &str,
+    kind: &str,
+    query: Option<String>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(reason) = browse_state(state, company_id).await? {
+        return Ok(Json(json!({ "state": reason, "items": [] })));
+    }
+    let memory = state.memory_for(company_id).await;
+    let scope = Some(company_id);
+    let found = match (kind, query.as_deref()) {
+        // A search asks the whole brain, memories and decisions alike — the
+        // provider ranks by meaning and does not split by kind.
+        (_, Some(q)) if !q.trim().is_empty() => memory.recall(q.trim(), scope, BROWSE_LIMIT).await,
+        ("decision", _) => memory.list_decisions(scope, BROWSE_LIMIT).await,
+        _ => memory.list_memories(scope).await,
+    };
+    let Some(items) = found else {
+        // The provider answered something we cannot read. Saying so beats an
+        // empty list, which would read as "this company knows nothing".
+        return Ok(Json(json!({ "state": "not_browsable", "items": [] })));
+    };
+    let subjects = subjects_for(state, company_id, kind).await?;
+    let items: Vec<Value> = items
+        .iter()
+        .take(BROWSE_LIMIT as usize)
+        .map(|i| normalize(i, &subjects))
+        .collect();
+    Ok(Json(json!({ "state": "ok", "items": items })))
+}
+
+async fn browse_memories(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<Json<Value>, ApiError> {
+    browse(&state, &company_id, "memory", q.q).await
+}
+
+async fn browse_decisions(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<Json<Value>, ApiError> {
+    browse(&state, &company_id, "decision", q.q).await
 }
 
 /// The languages on offer, each named in its own language.

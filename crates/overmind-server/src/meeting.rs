@@ -1107,13 +1107,27 @@ async fn conclude(
 
     // Why the company decided this outlives the meeting (ADR-0013).
     // Best-effort: no memory server configured is a normal, silent no-op.
-    state
+    let meeting_tag = format!("meeting:{meeting_id}");
+    let stored = state
         .memory_for(company_id)
         .await
         .store_decision(
             decision,
             &format!("Decided in a meeting on \"{topic}\"."),
             company_id,
+            &[&meeting_tag],
+        )
+        .await;
+    // Which room decided this, so the browser can send you back to the
+    // transcript rather than to a sentence with no history (ADR-0025).
+    state
+        .link_memory(
+            company_id,
+            "decision",
+            stored.as_deref(),
+            "meeting",
+            meeting_id,
+            topic,
         )
         .await;
     Ok(())

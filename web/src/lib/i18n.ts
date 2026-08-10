@@ -37,6 +37,9 @@ export const en = {
     liveConnected: "Live updates connected",
     reconnecting: "Reconnecting…",
     memory: "memory",
+    /** The view's tab. Separate from the badge above, which is deliberately
+     *  lowercase next to its icon — a tab beside Chat/Board/Org is not. */
+    memoryView: "Memory",
     memoryOn: "Organizational memory connected (Wadachi)",
     memoryOff: "Memory not configured",
     audit: "audit",
@@ -178,6 +181,34 @@ export const en = {
     carried: "Everyone in the room carries this into their work",
     resume: "Resume",
     pausedFallback: "An agent ran out of budget. Raise its cap, then resume.",
+  },
+  memory: {
+    memories: "Memories",
+    decisions: "Decisions",
+    search: "Search what the company knows…",
+    fromTask: "from task",
+    fromMeeting: "from meeting",
+    noSubject: "No recorded source",
+    // The four reasons a page can be empty are four different problems.
+    emptyTitle: "Nothing remembered yet",
+    emptyBody:
+      "A finished task leaves a memory behind, and it shows up here with the work that produced it.",
+    // Said separately, because "nothing remembered yet" on this tab would be
+    // false whenever the company has memories and simply no decisions.
+    emptyDecisionsTitle: "No decisions yet",
+    emptyDecisionsBody:
+      "When a meeting reaches a call, the decision is recorded here with the room that made it.",
+    noResultsTitle: "Nothing matches",
+    noResultsBody: "Try fewer words — this searches by meaning, not by exact text.",
+    noProviderTitle: "Memory is not set up",
+    noProviderBody:
+      "Point OVERMIND_MEMORY_CMD at an MCP memory server and the company starts remembering its work.",
+    brainOffTitle: "This company's brain is off",
+    brainOffBody:
+      "Its agents work exactly as before, they just stop remembering. Switch it back on to resume.",
+    notBrowsableTitle: "This provider can't be browsed",
+    notBrowsableBody:
+      "It stores and returns memory, but does not answer with a list we can read. The memory loop itself is unaffected.",
   },
   sessionStatus: {
     running: "running",
@@ -406,6 +437,7 @@ export const it: Dictionary = {
     liveConnected: "Aggiornamenti in tempo reale attivi",
     reconnecting: "Riconnessione…",
     memory: "memoria",
+    memoryView: "Memoria",
     memoryOn: "Memoria organizzativa collegata (Wadachi)",
     memoryOff: "Memoria non configurata",
     audit: "audit",
@@ -544,6 +576,31 @@ export const it: Dictionary = {
     resume: "Riprendi",
     pausedFallback: "Un agente ha finito il budget. Alza il suo tetto, poi riprendi.",
     carried: "Chi era nella stanza porta questa decisione nel proprio lavoro",
+  },
+  memory: {
+    memories: "Memorie",
+    decisions: "Decisioni",
+    search: "Cerca in ciò che l'azienda sa…",
+    fromTask: "dal task",
+    fromMeeting: "dalla riunione",
+    noSubject: "Origine non registrata",
+    emptyTitle: "Ancora nessuna memoria",
+    emptyBody:
+      "Un task concluso lascia una memoria, e compare qui insieme al lavoro che l'ha prodotta.",
+    emptyDecisionsTitle: "Ancora nessuna decisione",
+    emptyDecisionsBody:
+      "Quando una riunione arriva a una scelta, la decisione viene registrata qui insieme alla stanza che l'ha presa.",
+    noResultsTitle: "Nessuna corrispondenza",
+    noResultsBody: "Prova con meno parole — qui si cerca per significato, non per testo esatto.",
+    noProviderTitle: "La memoria non è configurata",
+    noProviderBody:
+      "Punta OVERMIND_MEMORY_CMD a un server MCP di memoria e l'azienda inizia a ricordare il proprio lavoro.",
+    brainOffTitle: "Il cervello di questa azienda è spento",
+    brainOffBody:
+      "I suoi agenti lavorano esattamente come prima, semplicemente smettono di ricordare. Riaccendilo per riprendere.",
+    notBrowsableTitle: "Questo provider non si può sfogliare",
+    notBrowsableBody:
+      "Salva e restituisce memoria, ma non risponde con una lista che sappiamo leggere. Il ciclo della memoria non ne risente.",
   },
   sessionStatus: {
     running: "in esecuzione",

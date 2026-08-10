@@ -100,6 +100,7 @@ rely on.
 | An agent cannot flood you with meeting requests | one pending per agent, three per company (M13.5) | `meetings.rs` — `an_agent_may_keep_only_one_request_waiting_on_you` |
 | Editing the audit log is detectable | SHA-256 hash chain ([ADR-0006](adr/0006-audit-log-and-task-lifecycle.md)) | `api.rs` — `tampering_with_an_event_breaks_the_chain` |
 | One company's agents are not handed another company's memories | a brain directory per company, routed by `BRAIN_DIR` ([ADR-0024](adr/0024-managed-per-company-brain.md)) — separation, not a security boundary, see above | `brain.rs` — `one_companys_memories_are_invisible_to_another` |
+| A memory's stated source is one Overmind recorded, never one it inferred | the link is keyed on the identifier the provider returned; no identifier, no link ([ADR-0025](adr/0025-memory-provenance-and-browsing.md)) | `brain.rs` — `a_memory_with_no_identifier_is_shown_without_a_subject` |
 | An agent cannot fabricate a turn in its own or another agent's context | delimited transcript blocks, markers stripped from content | `ceo.rs` — `content_cannot_forge_another_turn`, `content_cannot_close_its_own_block` |
 | An agent's words never wear Overmind's own voice | `escalation` is a distinct role from `system` | `injection.rs` — `an_escalation_never_speaks_with_the_systems_voice` |
 | Agent prose is bounded before it reaches a prompt, an inbox or a dialog | `clamp_agent_text` at the parse boundary | `ceo.rs` — `prose_is_bounded` |

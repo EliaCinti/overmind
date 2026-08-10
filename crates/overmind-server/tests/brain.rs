@@ -73,14 +73,38 @@ fn unique_root() -> PathBuf {
     std::env::temp_dir().join(format!("overmind-brain-{nanos}-{}-{n}", std::process::id()))
 }
 
-/// An MCP memory server that actually remembers, per brain. Memories go into
-/// `$BRAIN_DIR/memories.txt`, one title per line, and `get_context` reads that
-/// file back. With no `BRAIN_DIR` it falls back to `$FALLBACK_BRAIN`, which is
-/// what the unmanaged (shared-brain) mode looks like from here.
+/// An MCP memory server that actually remembers, per brain, and answers in the
+/// shapes real Wadachi answers in: `store_memory` returns `{"id": n, …}`,
+/// `list_memories` returns `{"memories": […]}`, `recall` returns
+/// `{"results": […]}`. Rows live in `$BRAIN_DIR/memories.txt`, one JSON object
+/// per line, so a test can read a brain off disk and see whose it is.
+///
+/// With no `BRAIN_DIR` it falls back to `$FALLBACK_BRAIN` — what the unmanaged
+/// (shared-brain) mode looks like from here. `$STUB_UNBROWSABLE` makes the read
+/// tools answer prose instead, standing in for a conforming server that simply
+/// does not expose a list. `$STUB_TOOL_LOG` records which tool was called, so a
+/// test can tell searching apart from listing.
 const BRAIN_MCP: &str = r#"import sys, json, os
 brain = os.environ.get("BRAIN_DIR") or os.environ.get("FALLBACK_BRAIN")
 os.makedirs(brain, exist_ok=True)
 store = os.path.join(brain, "memories.txt")
+unbrowsable = os.environ.get("STUB_UNBROWSABLE")
+tool_log = os.environ.get("STUB_TOOL_LOG")
+
+def rows():
+    if not os.path.exists(store):
+        return []
+    out = []
+    with open(store) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+def reply(mid, text):
+    print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":text}]}}), flush=True)
+
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -98,17 +122,43 @@ for line in sys.stdin:
     elif method == "tools/call":
         name = msg["params"]["name"]
         args = msg["params"].get("arguments", {})
+        if tool_log:
+            with open(tool_log, "a") as f:
+                f.write(name + "\n")
         if name == "get_context":
-            remembered = ""
-            if os.path.exists(store):
-                with open(store) as f:
-                    remembered = " | ".join(x.strip() for x in f if x.strip())
-            text = "BRAIN[%s] KNOWS: %s" % (brain, remembered)
-            print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":text}]}}), flush=True)
+            remembered = " | ".join(r["title"] for r in rows())
+            reply(mid, "BRAIN[%s] KNOWS: %s" % (brain, remembered))
         elif name in ("store_memory", "store_decision"):
+            existing = rows()
+            row = {
+                "id": len(existing) + 1,
+                "kind": "decision" if name == "store_decision" else "memory",
+                "title": args.get("title") or args.get("decision") or "",
+                "content": args.get("content") or args.get("rationale") or "",
+                "project": args.get("project") or "",
+                "tags": args.get("tags") or [],
+                "category": args.get("category") or "",
+                "created_at": "2026-08-09T00:00:00Z",
+            }
             with open(store, "a") as f:
-                f.write(json.dumps(args.get("title") or args.get("decision") or "") + "\n")
-            print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":"stored"}]}}), flush=True)
+                f.write(json.dumps(row) + "\n")
+            if os.environ.get("STUB_NO_IDS"):
+                reply(mid, "stored")
+            else:
+                reply(mid, json.dumps({"id": row["id"], "title": row["title"]}))
+        elif name in ("list_memories", "list_decisions", "recall"):
+            if unbrowsable:
+                reply(mid, "I hold a few things but cannot list them.")
+            else:
+                wanted = "decision" if name == "list_decisions" else "memory"
+                if name == "recall":
+                    q = (args.get("query") or "").lower()
+                    found = [r for r in rows() if q in r["title"].lower()]
+                    reply(mid, json.dumps({"results": found, "count": len(found)}))
+                else:
+                    found = [r for r in rows() if r["kind"] == wanted]
+                    key = "decisions" if wanted == "decision" else "memories"
+                    reply(mid, json.dumps({key: found, "count": len(found)}))
         else:
             print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[]}}), flush=True)
     elif mid is not None:
@@ -151,11 +201,25 @@ impl Env {
     fn fallback_brain(&self) -> PathBuf {
         self.root.join("fallback-brain")
     }
+    fn tool_log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.join("tools.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 /// A server with the remembering stub wired up. `managed` mirrors
 /// `OVERMIND_MANAGED_BRAIN`.
 async fn setup(managed: bool, with_memory: bool) -> Env {
+    setup_with(managed, with_memory, "").await
+}
+
+/// `stub_env` goes in front of the stub's command line — the hook for
+/// `STUB_UNBROWSABLE`, which stands in for a conforming provider that exposes
+/// no browsable list.
+async fn setup_with(managed: bool, with_memory: bool, stub_env: &str) -> Env {
     let root = unique_root();
     std::fs::create_dir_all(&root).expect("mkdir");
     let agent = root.join("agent.sh");
@@ -165,8 +229,9 @@ async fn setup(managed: bool, with_memory: bool) -> Env {
         let stub = root.join("brain_mcp.py");
         std::fs::write(&stub, BRAIN_MCP).expect("write stub");
         format!(
-            "FALLBACK_BRAIN={} {} {}",
+            "FALLBACK_BRAIN={} STUB_TOOL_LOG={} {stub_env} {} {}",
             root.join("fallback-brain").display(),
+            root.join("tools.log").display(),
             python(),
             stub.display()
         )
@@ -483,4 +548,213 @@ async fn no_provider_means_no_managed_brain() {
     // And the org is fully functional, which is the whole contract (ADR-0003).
     let saw = run_task(&env, &company, &goal, "Fine without a brain").await;
     assert!(!saw.contains("BRAIN["));
+}
+
+// ---------- M8 slice 2: provenance and browsing (ADR-0025) ----------
+
+/// The acceptance criterion of the milestone: a memory the organization stored
+/// names the task that produced it. ADR-0015 promised this in words in July;
+/// this is the test that makes the promise checkable.
+#[tokio::test]
+async fn a_memory_names_the_task_that_produced_it() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup(true, true).await;
+    let (company, goal) = found_company(&env, "Provenance").await;
+    run_task(&env, &company, &goal, "Rewrite the deploy script").await;
+
+    let (s, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["state"], json!("ok"), "browse: {body}");
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "expected one memory: {body}");
+
+    let subject = &items[0]["subject"];
+    assert_eq!(subject["type"], json!("task"));
+    assert_eq!(subject["title"], json!("Rewrite the deploy script"));
+    assert!(
+        subject["id"].as_str().is_some_and(|s| !s.is_empty()),
+        "subject has no task id: {subject}"
+    );
+    assert_eq!(items[0]["title"], json!("Rewrite the deploy script"));
+}
+
+/// The provenance also goes into the brain as a tag, so a vault opened outside
+/// Overmind still says where a memory came from (ADR-0025).
+#[tokio::test]
+async fn the_brain_itself_records_which_task_a_memory_came_from() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup(true, true).await;
+    let (company, goal) = found_company(&env, "Tagged").await;
+    run_task(&env, &company, &goal, "Tag me").await;
+
+    let stored =
+        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).expect("store");
+    assert!(
+        stored.contains("task:"),
+        "no task tag written into the brain: {stored}"
+    );
+}
+
+/// Four reasons a browse can be empty, and they must not look alike: a reader
+/// who cannot tell "not set up" from "nothing stored yet" cannot act on either.
+#[tokio::test]
+async fn an_empty_browse_says_why_it_is_empty() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    // 1. No provider at all.
+    let env = setup(true, false).await;
+    let (company, _) = found_company(&env, "Nothing").await;
+    let (_, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], json!("no_provider"));
+
+    // 2. Provider present, nothing stored yet — genuinely empty.
+    let env = setup(true, true).await;
+    let (company, _) = found_company(&env, "Fresh").await;
+    let (_, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], json!("ok"));
+    assert_eq!(body["items"].as_array().map(Vec::len), Some(0));
+
+    // 3. This company's brain switched off.
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{company}/brain"),
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    let (_, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], json!("brain_off"));
+
+    // 4. A conforming provider that exposes no browsable list. The memory loop
+    //    still works — only the browsing does not.
+    let env = setup_with(true, true, "STUB_UNBROWSABLE=1").await;
+    let (company, goal) = found_company(&env, "Opaque").await;
+    let saw = run_task(&env, &company, &goal, "Still remembers").await;
+    assert!(saw.contains("BRAIN["), "the loop should still work: {saw}");
+    let (_, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(body["state"], json!("not_browsable"));
+}
+
+/// Search is `recall`, not a filtered list — two different operations, and
+/// calling one the other would misrepresent both (ADR-0025).
+#[tokio::test]
+async fn searching_recalls_instead_of_filtering_a_list() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup(true, true).await;
+    let (company, goal) = found_company(&env, "Searcher").await;
+    run_task(&env, &company, &goal, "Harden the deploy script").await;
+    run_task(&env, &company, &goal, "Rename a variable").await;
+
+    let (_, listed) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(listed["items"].as_array().map(Vec::len), Some(2));
+
+    let (_, found) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories?q=deploy"),
+        None,
+    )
+    .await;
+    assert_eq!(found["state"], json!("ok"));
+    let items = found["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "search returned: {found}");
+    assert_eq!(items[0]["title"], json!("Harden the deploy script"));
+    // …and the provenance survives the search path too.
+    assert_eq!(items[0]["subject"]["type"], json!("task"));
+
+    let tools = env.tool_log();
+    assert!(
+        tools.contains(&"recall".to_string()),
+        "a query should reach recall: {tools:?}"
+    );
+    assert!(
+        tools.contains(&"list_memories".to_string()),
+        "a bare browse should reach list_memories: {tools:?}"
+    );
+}
+
+/// A provider that stores but returns no identifier leaves the memory without a
+/// subject — degraded, not broken, and never a guessed link (ADR-0025).
+#[tokio::test]
+async fn a_memory_with_no_identifier_is_shown_without_a_subject() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup_with(true, true, "STUB_NO_IDS=1").await;
+    let (company, goal) = found_company(&env, "Anonymous").await;
+    run_task(&env, &company, &goal, "Unattributable work").await;
+
+    let (_, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    // The memory is there — the work was still remembered…
+    assert_eq!(body["state"], json!("ok"));
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(items.len(), 1, "the memory should still be stored: {body}");
+    assert_eq!(items[0]["title"], json!("Unattributable work"));
+    // …and its provenance is honestly absent rather than invented.
+    assert_eq!(items[0]["subject"], Value::Null, "item: {}", items[0]);
+
+    // Nothing was written to the link table either: a link with no ref to key
+    // it on would be a row that can never be matched back.
+    let (_, second) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(second["items"][0]["subject"], Value::Null);
 }

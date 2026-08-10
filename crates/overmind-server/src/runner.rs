@@ -1354,7 +1354,13 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
 
     // Record what the organization just learned. Best-effort; never fatal.
     if f.session_status == "completed" {
-        ctx.state
+        // The task is the memory's provenance (ADR-0015 decision 3, made real
+        // in ADR-0025). The tag rides along so the brain still says where this
+        // came from when read outside Overmind; the link row is what the UI
+        // queries.
+        let task_tag = format!("task:{}", ctx.task_id);
+        let stored = ctx
+            .state
             .memory_for(&ctx.company_id)
             .await
             .store_memory(
@@ -1364,8 +1370,18 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                     ctx.title, ctx.description
                 ),
                 &ctx.company_id,
-                &["task-completed"],
+                &["task-completed", &task_tag],
                 "note",
+            )
+            .await;
+        ctx.state
+            .link_memory(
+                &ctx.company_id,
+                "memory",
+                stored.as_deref(),
+                "task",
+                &ctx.task_id,
+                &ctx.title,
             )
             .await;
     }
