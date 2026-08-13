@@ -5,3 +5,4 @@ dist/
 *.sqlite-*
 .env
 .DS_Store
+/overmind-data
