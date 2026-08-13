@@ -160,6 +160,12 @@ impl AppState {
 /// Server configuration (env-driven; tests inject their own via `init_with`).
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Where this server can be reached by the agents it runs (ADR-0027).
+    /// Derived from the same `OVERMIND_ADDR` the listener uses, so the two
+    /// cannot drift: a URL configured separately would be right until someone
+    /// moved the port.
+    pub self_url: String,
+
     /// Override for the agent adapter command (`OVERMIND_AGENT_CMD`).
     /// `None` uses the default Claude Code CLI invocation.
     pub agent_cmd: Option<String>,
@@ -196,6 +202,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            self_url: "http://127.0.0.1:7070".to_string(),
             agent_cmd: None,
             data_dir: PathBuf::from("./overmind-data"),
             heartbeat_ms: 30_000,
@@ -214,6 +221,10 @@ impl Config {
     pub fn from_env() -> Self {
         let defaults = Config::default();
         Config {
+            self_url: format!(
+                "http://{}",
+                std::env::var("OVERMIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7070".to_string())
+            ),
             agent_cmd: std::env::var("OVERMIND_AGENT_CMD").ok(),
             data_dir: std::env::var("OVERMIND_DATA_DIR")
                 .map(PathBuf::from)

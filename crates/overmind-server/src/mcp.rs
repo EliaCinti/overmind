@@ -133,6 +133,26 @@ impl Memory {
         }
     }
 
+    /// Call a tool by name and hand back its text answer verbatim.
+    ///
+    /// The proxy path for ADR-0027: an agent asks Overmind, Overmind asks the
+    /// provider, and the answer travels back untouched. Deliberately does not
+    /// parse — the agent is the one reading it, and inventing a shape here
+    /// would be Overmind deciding what a provider is allowed to say.
+    ///
+    /// `Err` carries something the agent can read. Unlike the orchestrator's
+    /// own best-effort calls, a failure here must be *reported*: an agent that
+    /// asked a question and got silence would take the silence for an answer.
+    pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
+        if !self.is_enabled() {
+            return Err("no memory provider is configured".to_string());
+        }
+        match self.call(name, args).await {
+            Ok(v) => Ok(extract_text(&v)),
+            Err(e) => Err(format!("memory provider failed: {e}")),
+        }
+    }
+
     /// Where the brain is right now, verbatim, or `None` when there is nothing
     /// to ask (memory off, tool absent, call failed).
     ///

@@ -13,10 +13,17 @@ use crate::domain::{AgentTraits, DomainPatch, TaskStatus, TraitsPatch, event_kin
 /// The full application: JSON API under `/api`, the live-update WebSocket at
 /// `/ws`, and (when built) the SPA served at the root with history fallback.
 pub fn app(state: AppState) -> Router {
-    let mut router = Router::new().nest("/api", api_router()).route(
-        "/ws",
-        get(crate::ws::handler).layer(axum::middleware::from_fn(crate::ws::guard_origin)),
-    );
+    let mut router = Router::new()
+        .nest("/api", api_router())
+        // Overmind's own MCP surface, for the agents it runs (ADR-0027). Not
+        // under /api: it is a protocol endpoint, not part of the JSON API the
+        // UI speaks, and its caller authenticates with a per-run bearer token
+        // rather than being same-origin.
+        .merge(crate::mcp_server::router())
+        .route(
+            "/ws",
+            get(crate::ws::handler).layer(axum::middleware::from_fn(crate::ws::guard_origin)),
+        );
 
     // Serve the built frontend if present; unknown paths fall back to
     // index.html so client-side routing works. Absent in API-only/dev mode

@@ -7,6 +7,7 @@ pub mod files;
 pub mod governance;
 pub mod i18n;
 pub mod mcp;
+pub mod mcp_server;
 pub mod meeting;
 pub mod model;
 pub mod notify;

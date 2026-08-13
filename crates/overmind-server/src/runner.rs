@@ -631,13 +631,27 @@ pub(crate) fn trait_model(traits_json: &str) -> String {
 /// default drives the Claude Code CLI headless, on the model the agent is
 /// actually characterized for. Until M14 slice 3 this string existed in two
 /// copies and named no model at all, so `AgentTraits.model` was decorative.
-pub(crate) fn agent_command(state: &AppState, caged: bool) -> String {
+/// Single-quote a path for the shell the agent command runs through.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+pub(crate) fn agent_command(state: &AppState, caged: bool, mcp_config: Option<&Path>) -> String {
     if let Some(configured) = state.config.agent_cmd.clone() {
         return configured;
     }
     let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
                    --output-format json"
         .to_string();
+    // `--strict-mcp-config` matters as much as the config itself: without it the
+    // CLI merges whatever MCP servers the machine's own configuration happens to
+    // hold, and a caged agent would quietly inherit tools nobody granted it.
+    if let Some(p) = mcp_config {
+        cmd.push_str(&format!(
+            " --mcp-config {} --strict-mcp-config",
+            shell_quote(&p.to_string_lossy())
+        ));
+    }
     // Headless has nobody to ask. The CLI's permission system assumes a person
     // at a terminal, so in `-p` mode every Edit, Write and Bash is denied and
     // the agent can only read — which is how the smoke run found that no `code`
@@ -795,6 +809,18 @@ async fn run_session(ctx: SessionContext, mode: Mode) {
     if let Err(e) = finalize(&ctx, outcome).await {
         eprintln!("session {}: failed to finalize: {e}", ctx.session_id);
     }
+    // Retire the run's token (ADR-0027). The config file is already gone — its
+    // guard dropped when `run_process` returned — but the row outlives the
+    // file, and a token that still resolves is still a key. Invalidating is a
+    // write rather than an expiry because "the run is over" is a fact, and a
+    // clock would be a worse way to learn it.
+    //
+    // Unconditional: it runs for a completed, failed, timed-out or abandoned
+    // run alike, and costs nothing when there was never a token.
+    let _ = sqlx::query("UPDATE agent_task_sessions SET mcp_token = NULL WHERE id = ?")
+        .bind(&ctx.session_id)
+        .execute(&ctx.state.pool)
+        .await;
     deregister(&ctx.state, &ctx.session_id);
 }
 
@@ -886,11 +912,82 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
     Ok(())
 }
 
+/// A per-run MCP config file, and the token it carries, both gone when this
+/// drops (ADR-0027).
+///
+/// The deletion is a `Drop` and not a line at the end of the happy path on
+/// purpose: ADR-0015 called this out as learned the hard way, and a run can end
+/// by completing, failing, timing out, or being torn down when the server
+/// stops. A file holding a live bearer token that outlives its run is a key
+/// left in a door.
+///
+/// It lives in the system temp dir rather than the run directory: for a `code`
+/// task the run directory is a git worktree, and a token file there is one
+/// `git add -A` away from being committed.
+struct AgentMcpConfig {
+    path: PathBuf,
+    token: String,
+}
+
+impl AgentMcpConfig {
+    /// `None` when there is no memory to reach — the agent then gets no MCP
+    /// config at all, which is the same graceful degradation as an empty
+    /// `OVERMIND_MEMORY_CONTEXT` (ADR-0003, rule 6).
+    fn write(state: &AppState, session_id: &str) -> Option<Self> {
+        if !state.memory.is_enabled() {
+            return None;
+        }
+        // v4, not the v7 used for ids elsewhere: v7 encodes its creation time
+        // in the leading bits, and a secret should not tell you when it was
+        // minted. The entropy of v7 would have been sufficient; being
+        // predictable in *any* dimension is not a property to hand a token.
+        let token = uuid::Uuid::new_v4().to_string();
+        let path = std::env::temp_dir().join(format!("overmind-mcp-{session_id}.json"));
+        let body = json!({
+            "mcpServers": {
+                "overmind": {
+                    "type": "http",
+                    "url": format!("{}/mcp", state.config.self_url.trim_end_matches('/')),
+                    "headers": { "Authorization": format!("Bearer {token}") }
+                }
+            }
+        });
+        std::fs::write(&path, body.to_string()).ok()?;
+        // Before anyone can read it: the token is the run's identity.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+        Some(Self { path, token })
+    }
+}
+
+impl Drop for AgentMcpConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let cage = crate::sandbox::Cage {
         run_dir: &ctx.worktree_dir,
     };
-    let agent_cmd = agent_command(&ctx.state, crate::sandbox::caged(&ctx.state.config, &cage));
+    // The agent's own door to memory (ADR-0027). Held for the whole run: when
+    // this binding drops, the file goes and the token stops working.
+    let mcp = AgentMcpConfig::write(&ctx.state, &ctx.session_id);
+    if let Some(m) = &mcp {
+        let _ = sqlx::query("UPDATE agent_task_sessions SET mcp_token = ? WHERE id = ?")
+            .bind(&m.token)
+            .bind(&ctx.session_id)
+            .execute(&ctx.state.pool)
+            .await;
+    }
+    let agent_cmd = agent_command(
+        &ctx.state,
+        crate::sandbox::caged(&ctx.state.config, &cage),
+        mcp.as_ref().map(|m| m.path.as_path()),
+    );
     // Load what *this company* remembers about this kind of work, and put it
     // in front of the agent (and in an env var). A no-op when memory is off.
     let memory_context = ctx
@@ -1690,11 +1787,11 @@ mod adapter_command_tests {
     async fn the_permission_flag_never_travels_without_the_cage() {
         let state = state_with(None).await;
         assert!(
-            agent_command(&state, true).contains("--dangerously-skip-permissions"),
+            agent_command(&state, true, None).contains("--dangerously-skip-permissions"),
             "a caged agent that cannot write is a read-only agent"
         );
         assert!(
-            !agent_command(&state, false).contains("--dangerously-skip-permissions"),
+            !agent_command(&state, false, None).contains("--dangerously-skip-permissions"),
             "uncaged, the CLI's own prompt is the only boundary left"
         );
     }
@@ -1704,7 +1801,7 @@ mod adapter_command_tests {
     #[tokio::test]
     async fn a_configured_command_is_left_exactly_as_written() {
         let state = state_with(Some("sh /my/stub.sh".into())).await;
-        assert_eq!(agent_command(&state, true), "sh /my/stub.sh");
-        assert_eq!(agent_command(&state, false), "sh /my/stub.sh");
+        assert_eq!(agent_command(&state, true, None), "sh /my/stub.sh");
+        assert_eq!(agent_command(&state, false, None), "sh /my/stub.sh");
     }
 }
