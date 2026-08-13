@@ -237,6 +237,37 @@ impl Env {
     fn fallback_brain(&self) -> PathBuf {
         self.root.join("fallback-brain")
     }
+    /// The per-run MCP config file the runner writes (ADR-0027).
+    fn mcp_config_path(session: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("overmind-mcp-{session}.json"))
+    }
+
+    /// The token the agent would use, read from that file — which is the real
+    /// artifact under test: if it is not written, or written without a token,
+    /// the agent has no way to reach memory at all.
+    /// Async, and the `tokio::time::sleep` matters: a `std::thread::sleep`
+    /// here blocks the current-thread runtime the test runs on, so the spawned
+    /// runner never gets scheduled and the file it would write never appears.
+    /// The symptom is a timeout that looks exactly like a bug in the code
+    /// under test.
+    async fn session_token(&self, session: &str) -> String {
+        let path = Self::mcp_config_path(session);
+        for _ in 0..60 {
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(v) = serde_json::from_str::<Value>(&text)
+                && let Some(t) = v["mcpServers"]["overmind"]["headers"]["Authorization"]
+                    .as_str()
+                    .unwrap_or("")
+                    .strip_prefix("Bearer ")
+                && !t.is_empty()
+            {
+                return t.to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("no MCP config was written for session {session} at {path:?}");
+    }
+
     fn tool_log(&self) -> Vec<String> {
         std::fs::read_to_string(self.root.join("tools.log"))
             .unwrap_or_default()
@@ -935,5 +966,148 @@ async fn a_provider_without_watermarks_changes_nothing() {
     assert!(
         !ns.iter().any(|n| n["kind"] == "memory.collision"),
         "no watermark means no window, so nothing to report: {ns:?}"
+    );
+}
+
+// ── M8 slice 3 / M9 foundation: agents reach memory through Overmind ────────
+//
+// ADR-0027. The direct route — a Wadachi over stdio inside the agent's cage —
+// cannot work: ADR-0023's profile reaches neither the brain directory nor
+// anything outside the run dir. So the agent talks to Overmind. These hold the
+// three boundaries that decision rests on.
+
+async fn mcp(env: &Env, token: Option<&str>, body: Value) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("content-type", "application/json");
+    if let Some(t) = token {
+        builder = builder.header("authorization", format!("Bearer {t}"));
+    }
+    let response = env
+        .app
+        .clone()
+        .oneshot(builder.body(Body::from(body.to_string())).expect("build"))
+        .await
+        .expect("router responds");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+/// A caller Overmind cannot identify gets nothing — and gets the same nothing
+/// whether the token is absent, malformed or retired.
+#[tokio::test]
+async fn the_mcp_endpoint_refuses_a_caller_it_cannot_identify() {
+    let env = setup(true, true).await;
+    let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+
+    for token in [None, Some(""), Some("not-a-token")] {
+        let (status, _) = mcp(&env, token, call.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "token {token:?} was let through"
+        );
+    }
+}
+
+/// Agents read; Overmind writes. The write tools are not on the list, and
+/// asking for one says so rather than failing vaguely.
+#[tokio::test]
+async fn agents_are_offered_reads_and_refused_writes() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    // A slow agent: the config file exists only while the run does, and the
+    // stub finishes in milliseconds — too fast to observe what we are testing.
+    let env = setup_full(true, true, "", SLOW_MEMORY_AGENT).await;
+    let (acme, goal) = found_company(&env, "Acme").await;
+    let session = start_task(&env, &acme, &goal, "A task with a live token").await;
+    let token = env.session_token(&session).await;
+
+    let (status, v) = mcp(
+        &env,
+        Some(&token),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<String> = v["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        names.contains(&"recall".to_string()),
+        "no recall: {names:?}"
+    );
+    assert!(names.contains(&"why".to_string()), "no why: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.starts_with("store_")),
+        "a write tool is on offer: {names:?}"
+    );
+
+    // And asking anyway is answered, not swallowed.
+    let (_, v) = mcp(
+        &env,
+        Some(&token),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "store_memory", "arguments": {} } }),
+    )
+    .await;
+    assert_eq!(v["result"]["isError"], json!(true));
+    let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("provenance"),
+        "the refusal should say why: {text}"
+    );
+
+    await_session(&env, &session).await;
+}
+
+/// The token is the identity: a request names no company, and once the run is
+/// over the token stops working. A key left in a door is the failure ADR-0015
+/// flagged and ADR-0027 had to answer.
+#[tokio::test]
+async fn a_token_dies_with_its_run() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    // A slow agent: the config file exists only while the run does, and the
+    // stub finishes in milliseconds — too fast to observe what we are testing.
+    let env = setup_full(true, true, "", SLOW_MEMORY_AGENT).await;
+    let (acme, goal) = found_company(&env, "Acme").await;
+    let session = start_task(&env, &acme, &goal, "A task that will finish").await;
+    let token = env.session_token(&session).await;
+
+    let live = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (status, _) = mcp(&env, Some(&token), live.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the token should work during the run"
+    );
+
+    await_session(&env, &session).await;
+
+    let (status, _) = mcp(&env, Some(&token), live).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the token outlived its run"
+    );
+    assert!(
+        !Env::mcp_config_path(&session).exists(),
+        "the config file outlived its run — a token left on disk"
     );
 }

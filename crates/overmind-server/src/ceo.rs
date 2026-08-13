@@ -911,7 +911,7 @@ async fn spawn_adapter(
     // the same permission answer a task run gets.
     let cage = crate::sandbox::Cage { run_dir: cwd };
     let agent_cmd =
-        crate::runner::agent_command(state, crate::sandbox::caged(&state.config, &cage));
+        crate::runner::agent_command(state, crate::sandbox::caged(&state.config, &cage), None);
     let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
