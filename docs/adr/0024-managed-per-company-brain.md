@@ -113,12 +113,21 @@ is the sandbox's doing, not this ADR's.
   Wadachi-specific command in the one code path that most needs to stay generic,
   and everything it would buy us here, the server does for itself on first use.
 - **One long-lived server process per company, supervised by Overmind** — the
-  fuller reading of ADR-0004's "launch and supervise", and now practical since
-  Wadachi 0.14 ships `wadachi serve-http`. Rejected for this slice, not
-  forever: the stdio pool from M7 already gets connection reuse and per-call
+  fuller reading of ADR-0004's "launch and supervise". Rejected for this slice,
+  not forever: the stdio pool from M7 already gets connection reuse and per-call
   isolation for free, while a supervised daemon adds lifecycle, ports, tokens
   and a new class of failure (the process died; the port is taken) before
   anything asks for it. Revisit if pool churn shows up as latency.
+
+  > **Correction, 2026-08-12.** This paragraph originally justified the option
+  > with *"now practical since Wadachi 0.14 ships `wadachi serve-http`"*. **That
+  > command does not exist and never did** — `grep -rn "serve-http"` over the
+  > Wadachi repository returns nothing, the CLI offers only `init`, `doctor`,
+  > `sleep`, `obsidian`, `export`, `restore`, and the MCP server is stdio only.
+  > The claim is withdrawn by [ADR-0026](0026-change-awareness-across-concurrent-agents.md),
+  > which also measures the stdio path holding under real multi-process
+  > concurrency, so the rejection above stands on stronger ground than when it
+  > was written.
 - **A brain per project rather than per company.** Finer-grained, and it maps to
   Wadachi's own `project` notion. Rejected: organizational memory that does not
   cross projects is most of the value gone — the CEO's context and a builder's

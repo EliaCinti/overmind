@@ -458,6 +458,18 @@ pub async fn start_task(
     let budget = trait_budget_cents(&agent_traits);
     let estimate = state.config.start_estimate_cents;
 
+    // Where the brain stands before this run touches anything (ADR-0026).
+    // Taken OUTSIDE the transaction on purpose: it is an MCP round-trip to
+    // another process, and holding a write lock across one would let a slow or
+    // hung memory provider stall every checkout on the server. `None` is
+    // ordinary — memory off, tool absent, call failed — and simply means this
+    // run gets no collision window.
+    let brain_watermark = state
+        .memory_for(&company_id)
+        .await
+        .watermark(&company_id)
+        .await;
+
     let session_id = uuid::Uuid::now_v7().to_string();
     // `code`: a git branch + worktree dir. `knowledge`: no branch, a scratch dir.
     // Branch uniqueness rides on the full session id (globally unique); the task
@@ -501,8 +513,8 @@ pub async fn start_task(
         return Err(RunnerError::Conflict);
     }
     sqlx::query(
-        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, created_at)
-         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?)",
+        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, brain_watermark, created_at)
+         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?, ?)",
     )
     .bind(&session_id)
     .bind(task_id)
@@ -510,6 +522,7 @@ pub async fn start_task(
     .bind(&branch)
     .bind(&work_dir_str)
     .bind(estimate)
+    .bind(brain_watermark.as_deref())
     .bind(now())
     .execute(&mut *tx)
     .await?;
@@ -1359,6 +1372,17 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         // came from when read outside Overmind; the link row is what the UI
         // queries.
         let task_tag = format!("task:{}", ctx.task_id);
+        // Hand back the position taken at checkout (ADR-0026): the provider
+        // compares what we are storing against what appeared while this run was
+        // working. A run that never got one simply sends nothing.
+        let watermark: Option<String> =
+            sqlx::query_scalar("SELECT brain_watermark FROM agent_task_sessions WHERE id = ?")
+                .bind(&ctx.session_id)
+                .fetch_optional(&ctx.state.pool)
+                .await
+                .ok()
+                .flatten();
+
         let stored = ctx
             .state
             .memory_for(&ctx.company_id)
@@ -1372,21 +1396,68 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                 &ctx.company_id,
                 &["task-completed", &task_tag],
                 "note",
+                watermark.as_deref(),
             )
             .await;
         ctx.state
             .link_memory(
                 &ctx.company_id,
                 "memory",
-                stored.as_deref(),
+                stored.memory_ref.as_deref(),
                 "task",
                 &ctx.task_id,
                 &ctx.title,
             )
             .await;
+
+        if !stored.collisions.is_empty() {
+            report_collisions(ctx, &stored.collisions).await;
+        }
     }
 
     Ok(())
+}
+
+/// Tell the human that two agents wrote about the same thing without seeing
+/// each other (ADR-0026).
+///
+/// A notification, not an approval, and the difference is the design. An
+/// approval gates an action that has not happened yet; here both writes are
+/// already in the brain and the task is finished, so there is nothing left to
+/// authorize. An approval whose only outcome is "seen" is a to-do list wearing
+/// governance's clothes, and it would train people to click through the gate
+/// that matters. This says what happened and names both sides; judging whether
+/// they actually contradict is a human's job, because similarity cannot tell
+/// agreement from disagreement.
+async fn report_collisions(ctx: &SessionContext, collisions: &[crate::mcp::Collision]) {
+    let top = &collisions[0];
+    let others = collisions.len().saturating_sub(1);
+    let also = if others > 0 {
+        format!(" (and {others} more)")
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "While \"{}\" was running, something close to what it just recorded was written too:\n\n\u{2022} {}{also}\n\nBoth are stored. They may agree — this only says nobody saw the other.",
+        ctx.title, top.title
+    );
+    let n = crate::notify::New {
+        kind: crate::notify::kind::MEMORY_COLLISION,
+        title: "Two agents wrote about the same thing",
+        body: &body,
+        params: json!({
+            "task": ctx.title,
+            "collisions": collisions,
+        }),
+        agent_id: None, // the system noticed, not an agent
+        subject: Some(("task", &ctx.task_id)),
+        approval_id: None, // nothing to authorize — see above
+    };
+    if let Err(e) = crate::notify::send(&ctx.state, &ctx.company_id, n).await {
+        // Never fatal: the work is done and the memory is stored. A missing
+        // notification is worth a line in the log, not a failed run.
+        eprintln!("collision notification failed (ignored): {e}");
+    }
 }
 
 pub(crate) struct ParsedCost {
