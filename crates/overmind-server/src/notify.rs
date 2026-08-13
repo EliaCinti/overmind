@@ -33,6 +33,10 @@ pub mod kind {
     /// A room stopped mid-deliberation for the same reason, and is waiting to
     /// be resumed rather than being closed (ADR-0022).
     pub const MEETING_PAUSED: &str = "meeting.paused";
+    /// Two agents wrote about the same thing without seeing each other
+    /// (ADR-0026). Informational by design: the writes already happened and
+    /// there is nothing to authorize, so it carries no `approval_id`.
+    pub const MEMORY_COLLISION: &str = "memory.collision";
 }
 
 /// A notification to record. `approval_id` is what makes it *actionable*: the

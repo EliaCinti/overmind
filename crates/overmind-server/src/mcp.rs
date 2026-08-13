@@ -133,6 +133,34 @@ impl Memory {
         }
     }
 
+    /// Where the brain is right now, verbatim, or `None` when there is nothing
+    /// to ask (memory off, tool absent, call failed).
+    ///
+    /// Taken at checkout and handed back at completion (ADR-0026). The value is
+    /// opaque here on purpose: Overmind moves it between two tools of the same
+    /// provider and never reads inside it, because ADR-0003 promises tool names
+    /// and free-form results — not a shape.
+    pub async fn watermark(&self, project: &str) -> Option<String> {
+        if !self.is_enabled() {
+            return None;
+        }
+        match self
+            .call("brain_watermark", json!({ "project": project }))
+            .await
+        {
+            Ok(v) => {
+                let text = extract_text(&v);
+                // A provider that does not implement the tool may still answer
+                // something; only take it if it parses as an object.
+                serde_json::from_str::<Value>(text.trim())
+                    .ok()
+                    .filter(|v| v.is_object())
+                    .map(|v| v.to_string())
+            }
+            Err(_) => None, // Not an error: the tool is optional (ADR-0003).
+        }
+    }
+
     /// Record a memory about completed work. Best-effort.
     ///
     /// Returns the provider's own identifier for what it stored, when it gives
@@ -146,22 +174,31 @@ impl Memory {
         project: &str,
         tags: &[&str],
         category: &str,
-    ) -> Option<String> {
+        since_watermark: Option<&str>,
+    ) -> Stored {
         if !self.is_enabled() {
-            return None;
+            return Stored::default();
         }
-        let args = json!({
+        let mut args = json!({
             "title": title,
             "content": content,
             "project": project,
             "tags": tags,
             "category": category,
         });
+        // Only sent when we have one. A provider that does not know the
+        // argument would otherwise receive a null it never asked for.
+        if let Some(Ok(v)) = since_watermark.map(serde_json::from_str::<Value>) {
+            args["since_watermark"] = v;
+        }
         match self.call("store_memory", args).await {
-            Ok(v) => stored_ref(&v),
+            Ok(v) => Stored {
+                memory_ref: stored_ref(&v),
+                collisions: collisions(&v),
+            },
             Err(e) => {
                 eprintln!("memory store_memory failed (ignored): {e}");
-                None
+                Stored::default()
             }
         }
     }
@@ -413,6 +450,63 @@ where
 /// object carrying `id`; we accept a number or a string there and nothing else,
 /// because guessing harder than that would mean inventing links that are not
 /// real (ADR-0025).
+/// What a write to the brain gave back: the provider's identifier for the thing
+/// it stored, and anything close that appeared while this run was working.
+///
+/// Both are optional and both being empty is the ordinary case. `collisions` is
+/// advisory — the write already succeeded, and a provider that does not
+/// implement the check simply never mentions it.
+#[derive(Debug, Default, Clone)]
+pub struct Stored {
+    pub memory_ref: Option<String>,
+    pub collisions: Vec<Collision>,
+}
+
+/// One item the provider judged close to what we just wrote. `similarity` is
+/// the provider's own number on its own scale: Overmind reports it, ranks by
+/// it, and does not interpret it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Collision {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+    pub similarity: f64,
+}
+
+fn collisions(result: &Value) -> Vec<Collision> {
+    let text = extract_text(result);
+    let Ok(parsed) = serde_json::from_str::<Value>(text.trim()) else {
+        return Vec::new();
+    };
+    let Some(items) = parsed.get("collisions").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|c| {
+            let id = match c.get("id")? {
+                Value::Number(n) => n.to_string(),
+                Value::String(s) => s.clone(),
+                _ => return None,
+            };
+            Some(Collision {
+                kind: c
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("memory")
+                    .to_string(),
+                id,
+                title: c
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                similarity: c.get("similarity").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            })
+        })
+        .collect()
+}
+
 fn stored_ref(result: &Value) -> Option<String> {
     let text = extract_text(result);
     let parsed: Value = serde_json::from_str(text.trim()).ok()?;

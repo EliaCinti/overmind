@@ -1,0 +1,26 @@
+-- M8 slice 4 (ADR-0026): where the brain was when this run started.
+--
+-- With several agents on one brain, each reads at the start and writes at the
+-- end, and nothing tells anybody what moved in between. Two agents can reach
+-- opposite conclusions, store both, and leave the organization holding a
+-- contradiction no one noticed. A position taken at checkout is what turns
+-- "has anything changed?" into a question with an answer.
+--
+-- On the SESSION, not the task. A task can be run more than once — a retry, a
+-- reassignment, a recovered run — and each run starts from a different place in
+-- the brain. Hanging this on `tasks` would make the second run inherit the
+-- first one's position and compare against a window that has already been
+-- consumed.
+--
+-- TEXT, holding the provider's answer verbatim. The MCP contract (ADR-0003)
+-- promises tool names and free-form results, not a schema: Wadachi answers
+-- `{"memories": N, "decisions": N, "project": "..."}`, and the next provider
+-- may answer with something else entirely. Overmind never reads inside this —
+-- it takes it from one tool and hands it back to another. Parsing it here would
+-- be inventing a contract that ADR-0003 deliberately does not make.
+--
+-- NULL is the ordinary case, not a defect: memory may be off (ADR-0003 keeps it
+-- optional), the provider may not implement `brain_watermark`, or the call may
+-- have failed. All three mean no window, so no collision candidates, and the
+-- run proceeds exactly as it does today.
+ALTER TABLE agent_task_sessions ADD COLUMN brain_watermark TEXT;

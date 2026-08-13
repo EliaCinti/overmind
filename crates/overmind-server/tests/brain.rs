@@ -125,7 +125,17 @@ for line in sys.stdin:
         if tool_log:
             with open(tool_log, "a") as f:
                 f.write(name + "\n")
-        if name == "get_context":
+        if name == "brain_watermark":
+            if os.environ.get("STUB_NO_WATERMARK"):
+                reply(mid, "I do not know that tool.")
+            else:
+                rs = rows()
+                reply(mid, json.dumps({
+                    "memories": max([r["id"] for r in rs if r["kind"] == "memory"] or [0]),
+                    "decisions": max([r["id"] for r in rs if r["kind"] == "decision"] or [0]),
+                    "project": args.get("project") or "",
+                }))
+        elif name == "get_context":
             remembered = " | ".join(r["title"] for r in rows())
             reply(mid, "BRAIN[%s] KNOWS: %s" % (brain, remembered))
         elif name in ("store_memory", "store_decision"):
@@ -142,10 +152,26 @@ for line in sys.stdin:
             }
             with open(store, "a") as f:
                 f.write(json.dumps(row) + "\n")
+            # ADR-0026: anything written after the caller's position that shares
+            # a word with what it just wrote. Crude on purpose — this stub
+            # stands in for a provider, and the real scoring lives in Wadachi.
+            collisions = []
+            wm = args.get("since_watermark") or {}
+            if wm:
+                floor = wm.get("memories") or 0
+                mine = {w for w in row["title"].lower().split() if len(w) > 3}
+                for r in existing:
+                    if r["kind"] != "memory" or r["id"] <= floor:
+                        continue
+                    theirs = {w for w in r["title"].lower().split() if len(w) > 3}
+                    if mine & theirs:
+                        collisions.append({"kind": "memory", "id": r["id"],
+                                           "title": r["title"], "similarity": 0.9})
             if os.environ.get("STUB_NO_IDS"):
                 reply(mid, "stored")
             else:
-                reply(mid, json.dumps({"id": row["id"], "title": row["title"]}))
+                reply(mid, json.dumps({"id": row["id"], "title": row["title"],
+                                       "collisions": collisions}))
         elif name in ("list_memories", "list_decisions", "recall"):
             if unbrowsable:
                 reply(mid, "I hold a few things but cannot list them.")
@@ -163,6 +189,16 @@ for line in sys.stdin:
             print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[]}}), flush=True)
     elif mid is not None:
         print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{}}), flush=True)
+"#;
+
+/// Same as [`MEMORY_AGENT`] but dawdles, so two runs started back to back are
+/// both still open when either writes. Overlap is the whole point of ADR-0026,
+/// and without it a collision test would be asserting a race it did not create.
+const SLOW_MEMORY_AGENT: &str = r#"#!/bin/sh
+sleep 2
+echo "agent saw memory: $OVERMIND_MEMORY_CONTEXT"
+echo done > out.txt
+echo '{"total_cost_usd":0.01,"session_id":"s"}'
 "#;
 
 /// Echoes the injected memory context so a test can read what the agent saw.
@@ -220,10 +256,14 @@ async fn setup(managed: bool, with_memory: bool) -> Env {
 /// `STUB_UNBROWSABLE`, which stands in for a conforming provider that exposes
 /// no browsable list.
 async fn setup_with(managed: bool, with_memory: bool, stub_env: &str) -> Env {
+    setup_full(managed, with_memory, stub_env, MEMORY_AGENT).await
+}
+
+async fn setup_full(managed: bool, with_memory: bool, stub_env: &str, agent_body: &str) -> Env {
     let root = unique_root();
     std::fs::create_dir_all(&root).expect("mkdir");
     let agent = root.join("agent.sh");
-    std::fs::write(&agent, MEMORY_AGENT).expect("write agent");
+    std::fs::write(&agent, agent_body).expect("write agent");
 
     let memory_cmd = with_memory.then(|| {
         let stub = root.join("brain_mcp.py");
@@ -300,7 +340,9 @@ async fn found_company(env: &Env, name: &str) -> (String, String) {
 
 /// Run one task to completion and return what the agent printed — which
 /// includes the memory context it was given.
-async fn run_task(env: &Env, company: &str, goal: &str, title: &str) -> String {
+/// Create an agent, a task, and start it. Returns the session id without
+/// waiting, so a caller can hold two runs open at once.
+async fn start_task(env: &Env, company: &str, goal: &str, title: &str) -> String {
     let (_, agent) = send(
         &env.app,
         "POST",
@@ -332,8 +374,12 @@ async fn run_task(env: &Env, company: &str, goal: &str, title: &str) -> String {
     )
     .await;
     assert_eq!(s, StatusCode::ACCEPTED, "start: {started}");
-    let session = started["session_id"].as_str().expect("session").to_string();
-    for _ in 0..100 {
+    started["session_id"].as_str().expect("session").to_string()
+}
+
+/// Wait for a session to finish, and hand back what the agent printed.
+async fn await_session(env: &Env, session: &str) -> String {
+    for _ in 0..150 {
         let (_, sv) = send(&env.app, "GET", &format!("/api/sessions/{session}"), None).await;
         match sv["status"].as_str().unwrap_or("") {
             "completed" => return sv["output"].as_str().unwrap_or("").to_string(),
@@ -343,6 +389,12 @@ async fn run_task(env: &Env, company: &str, goal: &str, title: &str) -> String {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("session never finished");
+}
+
+/// Start a task and wait for it — the ordinary case.
+async fn run_task(env: &Env, company: &str, goal: &str, title: &str) -> String {
+    let session = start_task(env, company, goal, title).await;
+    await_session(env, &session).await
 }
 
 /// The heart of the milestone: what one company remembers, another cannot read.
@@ -757,4 +809,131 @@ async fn a_memory_with_no_identifier_is_shown_without_a_subject() {
     )
     .await;
     assert_eq!(second["items"][0]["subject"], Value::Null);
+}
+
+// ── M8 slice 4: change awareness across concurrent agents (ADR-0026) ────────
+//
+// Visibility was never the problem — Wadachi 0.15.0 measures eight processes
+// writing one brain and four readers seeing all of it. What was missing is a
+// reason to look. These hold the Overmind half: a position taken at checkout,
+// handed back at completion, and a human told when two agents wrote about the
+// same thing without seeing each other.
+
+async fn notifications(env: &Env, company: &str) -> Vec<Value> {
+    let (_, v) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/notifications"),
+        None,
+    )
+    .await;
+    v.as_array()
+        .cloned()
+        .or_else(|| v["notifications"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// The position is taken before the run and kept with the session, so the
+/// completion write has something to compare against.
+#[tokio::test]
+async fn a_run_records_where_the_brain_was_when_it_started() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup(true, true).await;
+    let (acme, goal) = found_company(&env, "Acme").await;
+
+    run_task(&env, &acme, &goal, "First thing").await;
+
+    // The stub answers `brain_watermark`, so the tool log proves it was asked
+    // at checkout — not inferred, not defaulted.
+    let log = env.tool_log();
+    assert!(
+        log.iter().any(|t| t == "brain_watermark"),
+        "checkout never took a watermark: {log:?}"
+    );
+}
+
+/// Sequential runs must NOT collide. The second one checks out after the first
+/// has already written, so the first is below its watermark — outside the
+/// window by construction. A system that reported this would be reporting every
+/// pair of related memories ever written, which is the noise that makes people
+/// stop reading.
+#[tokio::test]
+async fn work_that_did_not_overlap_is_not_a_collision() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup(true, true).await;
+    let (acme, goal) = found_company(&env, "Acme").await;
+
+    run_task(&env, &acme, &goal, "deprecate the legacy cart").await;
+    run_task(&env, &acme, &goal, "extend the legacy cart").await;
+
+    let ns = notifications(&env, &acme).await;
+    assert!(
+        !ns.iter().any(|n| n["kind"] == "memory.collision"),
+        "sequential runs cannot have missed each other: {ns:?}"
+    );
+}
+
+/// The case the milestone exists for: two runs genuinely open at the same time,
+/// writing about the same subject. Whichever commits second finds the other in
+/// its window, and a human is told.
+#[tokio::test]
+async fn two_overlapping_runs_writing_the_same_thing_are_reported() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup_full(true, true, "", SLOW_MEMORY_AGENT).await;
+    let (acme, goal) = found_company(&env, "Acme").await;
+
+    // Both start before either can finish: the agent dawdles for two seconds,
+    // so both watermarks are taken while the brain still holds neither write.
+    let a = start_task(&env, &acme, &goal, "deprecate the legacy cart").await;
+    let b = start_task(&env, &acme, &goal, "extend the legacy cart").await;
+    await_session(&env, &a).await;
+    await_session(&env, &b).await;
+
+    let ns = notifications(&env, &acme).await;
+    let collision = ns.iter().find(|n| n["kind"] == "memory.collision");
+    let Some(c) = collision else {
+        panic!("two overlapping runs on the same subject went unreported: {ns:?}");
+    };
+    let params = &c["params"];
+    assert!(
+        params["collisions"]
+            .as_array()
+            .is_some_and(|xs| !xs.is_empty()),
+        "the notification must name the other side: {c}"
+    );
+    assert!(
+        c["approval_id"].is_null(),
+        "a collision is informational — both writes already happened: {c}"
+    );
+}
+
+/// A company whose provider does not implement the tool keeps working, with no
+/// window and no candidates. ADR-0003 keeps memory optional; this keeps the
+/// *awareness* optional too.
+#[tokio::test]
+async fn a_provider_without_watermarks_changes_nothing() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup_with(true, true, "STUB_NO_WATERMARK=1").await;
+    let (acme, goal) = found_company(&env, "Acme").await;
+
+    let saw = run_task(&env, &acme, &goal, "Works without watermarks").await;
+    assert!(!saw.is_empty(), "the run must complete exactly as before");
+
+    let ns = notifications(&env, &acme).await;
+    assert!(
+        !ns.iter().any(|n| n["kind"] == "memory.collision"),
+        "no watermark means no window, so nothing to report: {ns:?}"
+    );
 }
