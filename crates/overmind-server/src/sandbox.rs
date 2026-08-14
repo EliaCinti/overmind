@@ -80,19 +80,46 @@ fn adapter_paths() -> Vec<PathBuf> {
     ]
 }
 
+/// A path as the sandbox will match it: absolute, with symlinks and `..`
+/// resolved.
+///
+/// A profile matches the **real** path of a file, and matches it literally.
+/// That makes a relative path the worst kind of mistake here: it is a perfectly
+/// good string, so the rule is accepted and grants nothing at all. The failure
+/// then lands a long way from its cause — the agent is denied its own working
+/// directory, the shell's `getcwd` cannot walk up out of it, and the CLI dies
+/// with `EPERM` before it has read a word of the prompt.
+///
+/// This is not hypothetical: `data_dir` defaults to `./overmind-data`, so every
+/// caged run under the default configuration was denied its own run directory,
+/// and only ever worked because every test and every earlier live run happened
+/// to pass an absolute `OVERMIND_DATA_DIR`. Symlinked ancestors do the same
+/// thing more quietly — on macOS `$TMPDIR` lives under `/var`, which is a
+/// symlink to `/private/var`, and that one line of canonicalisation is why the
+/// tests passed over the defect for a month.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    let abs = std::path::absolute(path).ok()?;
+    // Canonicalising needs the path to exist. Anything granted ahead of time —
+    // a `sandbox_allow` entry, `~/.claude.json` on a fresh install — keeps its
+    // absolute form, which is wrong only if a symlink is in its way.
+    Some(abs.canonicalize().unwrap_or(abs))
+}
+
 /// The profile text for one run.
 fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
-    let mut writable: Vec<PathBuf> = vec![cage.run_dir.to_path_buf()];
+    // No real path for the run directory means no profile, and therefore no
+    // cage and no `--dangerously-skip-permissions` — the same safe direction
+    // an unquotable path takes below.
+    let mut writable: Vec<PathBuf> = vec![real_path(cage.run_dir)?];
     // Temp: compilers, package managers and the test stubs all expect it.
     // This session's TMPDIR specifically, resolved through the /var -> /private
     // symlink because sandbox rules match the real path — granting all of
     // `/private/var/folders` would hand over every per-user cache on the
     // machine to buy the same thing.
     writable.push(PathBuf::from("/private/tmp"));
-    let tmp = std::env::temp_dir();
-    writable.push(tmp.canonicalize().unwrap_or(tmp));
-    writable.extend(adapter_paths());
-    writable.extend(config.sandbox_allow.iter().cloned());
+    writable.extend(real_path(&std::env::temp_dir()));
+    writable.extend(adapter_paths().iter().filter_map(|p| real_path(p)));
+    writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
 
     let mut allow_write = String::new();
     for p in &writable {

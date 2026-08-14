@@ -1111,6 +1111,9 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             "OVERMIND_MEMORY_CONTEXT",
             memory_context.as_deref().unwrap_or(""),
         )
+        // Nothing is piped in, and the server's own stdin is not the agent's to
+        // inherit — under a daemon it never reaches EOF and the CLI waits on it.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

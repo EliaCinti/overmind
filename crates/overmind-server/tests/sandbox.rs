@@ -68,13 +68,22 @@ async fn probe(sandbox: bool) -> std::collections::HashMap<String, String> {
 
 async fn probe_with(sandbox: bool, stub: &str) -> std::collections::HashMap<String, String> {
     let root = std::env::temp_dir().join(format!("overmind-sb-{}", uuid::Uuid::now_v7().simple()));
+    probe_at(sandbox, stub, root.join("data")).await
+}
+
+async fn probe_at(
+    sandbox: bool,
+    stub: &str,
+    data_dir: std::path::PathBuf,
+) -> std::collections::HashMap<String, String> {
+    let root = std::env::temp_dir().join(format!("overmind-sb-{}", uuid::Uuid::now_v7().simple()));
     std::fs::create_dir_all(&root).expect("create test root");
     let script = root.join("stub.sh");
     std::fs::write(&script, stub).expect("write stub");
 
     let config = overmind_server::Config {
         agent_cmd: Some(format!("sh {}", script.display())),
-        data_dir: root.join("data"),
+        data_dir,
         sandbox,
         ..overmind_server::Config::default()
     };
@@ -179,6 +188,47 @@ async fn a_caged_agent_cannot_reach_the_machine_it_runs_on() {
         caged.get("mine.txt").map(String::as_str),
         Some("inside"),
         "its own run directory stays writable: {caged:?}"
+    );
+}
+
+/// The cage must grant the run directory *wherever it was configured*, not only
+/// where the tests happen to put it.
+///
+/// A sandbox profile matches real paths, literally, so a relative one — and
+/// `data_dir` defaults to `./overmind-data` — is a string that matches nothing:
+/// the rule is accepted, the agent is denied its own working directory, and the
+/// CLI dies with `EPERM` on `getcwd` before reading the prompt. Every test above
+/// missed it by writing under `$TMPDIR`, which the profile grants outright, so
+/// the run directory's own (dead) rule never had to work. Found live on
+/// 2026-08-13, when the server was first started with its defaults.
+///
+/// So the data dir here is relative *and* outside temp: the run directory is
+/// then the only rule that can let the stub write, which is the whole point.
+#[tokio::test]
+async fn a_relative_data_dir_is_still_a_real_cage() {
+    if !overmind_server::sandbox::available() {
+        eprintln!("no sandbox on this platform — skipping");
+        return;
+    }
+    // Integration tests run with the package root as their cwd, so this is
+    // relative in exactly the way the default is, without moving anyone's cwd.
+    let relative = std::path::PathBuf::from(format!(
+        "target/overmind-rel-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let out = probe_at(true, PROBING_STUB, relative.clone()).await;
+    let _ = std::fs::remove_dir_all(&relative);
+
+    assert_eq!(
+        out.get("mine.txt").map(String::as_str),
+        Some("inside"),
+        "a caged agent must be able to write its own run directory however the \
+         data dir was spelled: {out:?}"
+    );
+    assert_eq!(
+        out.get("home.txt").map(String::as_str),
+        Some("DENIED"),
+        "and the cage must still be a cage: {out:?}"
     );
 }
 

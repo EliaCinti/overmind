@@ -89,6 +89,7 @@ rely on.
 | A non-browser client (curl, tests, MCP) still works | absent `Origin` is not a browser | `browser_boundary.rs` — `a_non_browser_client_still_works` |
 | An agent cannot read your home, other volumes, or Overmind's own source and database | `sandbox-exec`, deny-by-default ([ADR-0023](adr/0023-os-level-sandboxing.md)) | `sandbox.rs` — `a_caged_agent_cannot_reach_the_machine_it_runs_on`, paired with `the_same_agent_uncaged_reaches_everything` |
 | An agent cannot write outside its own run directory | same | same |
+| …and the cage it is held by is the one we meant, wherever the data dir was configured | the profile is built from **real paths** — absolute, symlinks resolved; a run directory we cannot resolve removes the cage rather than emptying it | `sandbox.rs` — `a_relative_data_dir_is_still_a_real_cage` |
 | An agent that skips the adapter's permission prompts is always one the OS is already holding | one predicate, `sandbox::caged`, asked by both the spawn and the command builder ([ADR-0023](adr/0023-os-level-sandboxing.md) addendum) | `runner.rs` — `the_permission_flag_never_travels_without_the_cage` |
 | An agent has no credentials to push with, even if its repository configures a helper | `GIT_CONFIG_*` at command-line precedence; no ssh, no prompt, no askpass | `sandbox.rs` — `git_still_works_and_has_no_credentials_to_push_with` |
 | …while git itself still works locally | `GIT_CONFIG_GLOBAL=/dev/null` rather than denying `~/.gitconfig` | same |

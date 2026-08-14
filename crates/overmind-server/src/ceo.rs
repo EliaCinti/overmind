@@ -921,6 +921,12 @@ async fn spawn_adapter(
         .env("OVERMIND_AGENT_TRAITS", traits)
         .env("OVERMIND_AGENT_MODEL", crate::runner::trait_model(traits))
         .env("OVERMIND_MEMORY_CONTEXT", memory_context.unwrap_or(""))
+        // Nothing is ever piped in, so say so. The child otherwise inherits the
+        // server's stdin, and a server run as a daemon holds one that never
+        // reaches EOF — the Claude CLI then waits on it ("no stdin data received
+        // in 3s") before doing anything. Closing it is what a spawned tool
+        // should get anyway: this process is nobody's terminal.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -933,11 +939,42 @@ async fn spawn_adapter(
     )
     .await;
     match waited {
-        Ok(Ok(out)) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+        Ok(Ok(out)) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            if out.status.success() && !stdout.trim().is_empty() {
+                return Ok(stdout);
+            }
+            Err(CeoError::Invalid(turn_failure(
+                out.status.code(),
+                &String::from_utf8_lossy(&out.stderr),
+            )))
+        }
         Ok(Err(e)) => Err(CeoError::Invalid(format!(
             "failed to read agent output: {e}"
         ))),
         Err(_) => Err(CeoError::Invalid("agent turn timed out".into())),
+    }
+}
+
+/// Why a conversational turn produced nothing, in words a person can act on.
+///
+/// A turn used to be `Ok(stdout)` whatever happened, so an adapter that died —
+/// or one that hung until it was killed and wrote its reason to stderr — became
+/// an **empty `[ceo]` bubble**: no error, no log, nothing in the database. That
+/// is how the sandbox regression of 2026-08-13 stayed invisible for ten minutes.
+/// The task runner has kept stderr since M2 (`run_session`); this is the same
+/// courtesy for the path a human is actually watching.
+fn turn_failure(code: Option<i32>, stderr: &str) -> String {
+    let said = clamp_agent_text(stderr);
+    let how = match code {
+        Some(0) => "the agent produced no output".to_string(),
+        Some(c) => format!("the agent exited with code {c}"),
+        None => "the agent was killed by a signal".to_string(),
+    };
+    if said.is_empty() {
+        format!("{how} and said nothing on stderr")
+    } else {
+        format!("{how}: {said}")
     }
 }
 
