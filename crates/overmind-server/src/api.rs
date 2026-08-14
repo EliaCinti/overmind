@@ -315,6 +315,16 @@ async fn health() -> Json<Value> {
 #[derive(Deserialize)]
 struct CreateCompany {
     name: String,
+    /// The language this company works in (M16). Optional, and validated the
+    /// same way `set_language` validates it.
+    ///
+    /// It belongs here and not only on the settings endpoint because the very
+    /// next thing that happens is a CEO speaking (M15): a company founded
+    /// without a language has already answered its first question in the wrong
+    /// one by the time you find the setting. Until this existed the field was
+    /// simply *dropped* — a request saying `"language": "it"` was accepted,
+    /// stored as English, and nothing said otherwise.
+    language: Option<String>,
 }
 
 async fn create_company(
@@ -324,11 +334,18 @@ async fn create_company(
     if req.name.trim().is_empty() {
         return Err(ApiError::Invalid("company name must not be empty".into()));
     }
+    let language = req.language.as_deref().unwrap_or(crate::i18n::DEFAULT);
+    if !crate::i18n::is_supported(language) {
+        return Err(ApiError::Invalid(format!(
+            "unsupported language `{language}`"
+        )));
+    }
     let (id, created_at) = (new_id(), now());
     let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO companies (id, name, created_at) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO companies (id, name, language, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(req.name.trim())
+        .bind(language)
         .bind(&created_at)
         .execute(&mut *tx)
         .await?;
@@ -337,7 +354,7 @@ async fn create_company(
         Some(&id),
         None,
         event_kind::COMPANY_CREATED,
-        &json!({ "name": req.name.trim() }),
+        &json!({ "name": req.name.trim(), "language": language }),
     )
     .await?;
 
@@ -387,7 +404,7 @@ async fn create_company(
         Json(json!({
             "id": id,
             "name": req.name.trim(),
-            "language": crate::i18n::DEFAULT,
+            "language": language,
             "created_at": created_at,
             "brain_enabled": true,
             "ceo": ceo,

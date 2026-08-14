@@ -182,8 +182,10 @@ export default function App() {
   const hasRepo = runnableGoalId !== null;
 
   const afterCompanyCreated = async (id: string) => {
-    // A new company keeps speaking whatever the setup screens spoke.
-    await api.setCompanyLanguage(id, browserLanguage()).catch(() => {});
+    // The language was chosen on the first screen and set when the company was
+    // created. This used to patch it afterwards with `browserLanguage()`, in a
+    // second request whose failure was swallowed — so the founding CEO could
+    // answer in a language nobody picked, and did.
     const cs = await api.listCompanies();
     setCompanies(cs);
     setCompanyId(id);
@@ -223,7 +225,7 @@ export default function App() {
         />
 
         {!companyId ? (
-          <Onboarding onDone={afterCompanyCreated} />
+          <Onboarding defaultLanguage={language} onDone={afterCompanyCreated} />
         ) : (
           <main className="flex flex-1 flex-col overflow-hidden pt-4">
             {view === "chat" ? (

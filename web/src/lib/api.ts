@@ -374,7 +374,8 @@ export interface HireAgentBody {
 
 export const api = {
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
-  createCompany: (name: string) => req<Company>("POST", "/companies", { name }),
+  createCompany: (name: string, language: LanguageCode) =>
+    req<Company>("POST", "/companies", { name, language }),
   setCompanyLanguage: (companyId: string, language: LanguageCode) =>
     req<{ id: string; language: LanguageCode }>("POST", `/companies/${companyId}/language`, {
       language,

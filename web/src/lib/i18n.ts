@@ -402,6 +402,8 @@ export const en = {
     nameSubtitle: "An organization of AI agents that work for you.",
     companyName: "Company name",
     companyPlaceholder: "e.g. Acme Labs",
+    language: "Working language",
+    languageHint: "What your agents write in — replies, documents, decisions. Changeable later.",
     continue: "Continue",
     creating: "Creating…",
     repoTitle: "Connect a git repo",
@@ -794,6 +796,8 @@ export const it: Dictionary = {
     nameSubtitle: "Un'organizzazione di agenti AI che lavorano per te.",
     companyName: "Nome dell'azienda",
     companyPlaceholder: "es. Acme Labs",
+    language: "Lingua di lavoro",
+    languageHint: "Quella in cui scrivono i tuoi agenti — risposte, documenti, decisioni. Si cambia anche dopo.",
     continue: "Continua",
     creating: "Creazione…",
     repoTitle: "Collega un repo git",
@@ -813,6 +817,20 @@ export type Translate = (key: TranslationKey, vars?: Record<string, string | num
 export type TranslationKey = {
   [S in keyof typeof en]: `${S & string}.${keyof (typeof en)[S] & string}`;
 }[keyof typeof en];
+
+/**
+ * The languages on offer, each named **in its own language** — a speaker finds
+ * "Italiano" faster than "Italian", and a list of endonyms needs no translation
+ * of its own. Mirrors `i18n::SUPPORTED` on the server.
+ *
+ * Deliberately no flags: a flag is a country, and languages are not countries.
+ * English is not the United Kingdom, and picking one flag for it would be
+ * taking a side in someone's argument.
+ */
+export const LANGUAGES: { code: LanguageCode; name: string }[] = [
+  { code: "en", name: "English" },
+  { code: "it", name: "Italiano" },
+];
 
 /**
  * The best supported match for what the browser says the reader prefers.

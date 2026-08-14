@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { Building2, FolderGit2, ArrowRight } from "lucide-react";
-import type { Company } from "../lib/api";
+import type { Company, LanguageCode } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Field, Input } from "./ui/primitives";
 import { connectRepo } from "../lib/repo";
-import { useT } from "../lib/i18n";
+import { LANGUAGES, useT } from "../lib/i18n";
+import { cn } from "../lib/utils";
 
 /**
  * First run. Name a company — that is the only required step; the company is
@@ -15,7 +16,13 @@ import { useT } from "../lib/i18n";
  * research, documents or decisions (ADR-0016/0017) never needs one. Skipping
  * costs nothing — the repo can be connected later, from where you reach for it.
  */
-export function Onboarding({ onDone }: { onDone: (companyId: string) => void }) {
+export function Onboarding({
+  defaultLanguage,
+  onDone,
+}: {
+  defaultLanguage: LanguageCode;
+  onDone: (companyId: string) => void;
+}) {
   const [created, setCreated] = useState<Company | null>(null);
 
   return (
@@ -28,7 +35,7 @@ export function Onboarding({ onDone }: { onDone: (companyId: string) => void }) 
         className="w-full max-w-md"
       >
         {!created ? (
-          <CompanyStep onCreated={setCreated} />
+          <CompanyStep defaultLanguage={defaultLanguage} onCreated={setCreated} />
         ) : (
           <RepoStep company={created} onDone={() => onDone(created.id)} />
         )}
@@ -67,9 +74,16 @@ function StepShell({
   );
 }
 
-function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
+function CompanyStep({
+  defaultLanguage,
+  onCreated,
+}: {
+  defaultLanguage: LanguageCode;
+  onCreated: (c: Company) => void;
+}) {
   const t = useT();
   const [name, setName] = useState("");
+  const [language, setLanguage] = useState<LanguageCode>(defaultLanguage);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,7 +92,7 @@ function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
     setBusy(true);
     setError(null);
     try {
-      onCreated(await api.createCompany(name.trim()));
+      onCreated(await api.createCompany(name.trim(), language));
     } catch (e) {
       setError(e instanceof Error ? e.message : t("common.failed"));
       setBusy(false);
@@ -101,6 +115,35 @@ function CompanyStep({ onCreated }: { onCreated: (c: Company) => void }) {
             placeholder={t("onboard.companyPlaceholder")}
             onKeyDown={(e) => e.key === "Enter" && submit()}
           />
+        </Field>
+        {/* Asked here rather than left to the settings menu, because the next
+            screen after this one is a CEO writing to you (M15). A company whose
+            language is set afterwards has already been answered in the wrong
+            one. Two endonyms, click-first — nobody has to know a code. */}
+        <Field label={t("onboard.language")} hint={t("onboard.languageHint")}>
+          <div className="flex gap-2">
+            {LANGUAGES.map((l) => {
+              const active = l.code === language;
+              return (
+                <button
+                  key={l.code}
+                  type="button"
+                  lang={l.code}
+                  aria-pressed={active}
+                  onClick={() => setLanguage(l.code)}
+                  className={cn(
+                    "flex-1 rounded-md border px-3 py-2 text-sm transition",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    active
+                      ? "border-primary bg-primary/10 font-medium text-foreground"
+                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {l.name}
+                </button>
+              );
+            })}
+          </div>
         </Field>
         {error && <p className="text-sm text-destructive">{error}</p>}
         <Button variant="primary" onClick={submit} disabled={busy || !name.trim()}>
