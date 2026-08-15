@@ -325,6 +325,11 @@ pub mod event_kind {
     /// A company's brain was switched on or off (ADR-0024). Auditable because
     /// turning memory off changes what every later agent knew when it acted.
     pub const BRAIN_TOGGLED: &str = "company.brain_toggled";
+    /// An integration credential was issued or withdrawn (ADR-0028). Both are
+    /// auditable for the same reason: they change who can file work into this
+    /// company without anyone being at the keyboard.
+    pub const TOKEN_ISSUED: &str = "company.token_issued";
+    pub const TOKEN_REVOKED: &str = "company.token_revoked";
 }
 
 #[cfg(test)]

@@ -97,6 +97,11 @@ fn api_router() -> Router<AppState> {
         )
         .route("/languages", get(list_languages))
         .route(
+            "/companies/{company_id}/tokens",
+            post(create_company_token).get(list_company_tokens),
+        )
+        .route("/tokens/{token_id}/revoke", post(revoke_company_token))
+        .route(
             "/companies/{company_id}/agents",
             post(hire_agent).get(list_agents),
         )
@@ -985,14 +990,14 @@ async fn create_goal(
 // ---------- tasks ----------
 
 #[derive(Deserialize)]
-struct CreateTask {
-    title: String,
+pub(crate) struct CreateTask {
+    pub(crate) title: String,
     #[serde(default)]
-    description: String,
-    goal_id: Option<String>,
-    priority: Option<String>,
+    pub(crate) description: String,
+    pub(crate) goal_id: Option<String>,
+    pub(crate) priority: Option<String>,
     /// `code` (default) or `knowledge` (ADR-0017).
-    execution_kind: Option<String>,
+    pub(crate) execution_kind: Option<String>,
 }
 
 async fn create_task(
@@ -1000,6 +1005,25 @@ async fn create_task(
     Path(company_id): Path<String>,
     Json(req): Json<CreateTask>,
 ) -> Result<impl IntoResponse, ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(open_task(&state, &company_id, &req).await?),
+    ))
+}
+
+/// File a task in a company's backlog, and say what was filed.
+///
+/// One definition of what a valid new task is, because there are now two doors
+/// into it: this one and the MCP tool an outside caller uses (ADR-0028). Split
+/// out rather than copied — parallel copies of a rule is a mistake this project
+/// has already paid for once, in `agent_command` (ADR-0021), where the second
+/// copy named no model and nobody noticed for a milestone.
+pub(crate) async fn open_task(
+    state: &AppState,
+    company_id: &str,
+    req: &CreateTask,
+) -> Result<Value, ApiError> {
+    let company_id = company_id.to_string();
     if req.title.trim().is_empty() {
         return Err(ApiError::Invalid("task title must not be empty".into()));
     }
@@ -1059,19 +1083,16 @@ async fn create_task(
     .await?;
     tx.commit().await?;
     state.notify(&company_id);
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "id": id,
-            "company_id": company_id,
-            "goal_id": req.goal_id,
-            "title": req.title.trim(),
-            "status": "backlog",
-            "priority": priority,
-            "execution_kind": execution_kind,
-            "created_at": created_at,
-        })),
-    ))
+    Ok(json!({
+        "id": id,
+        "company_id": company_id,
+        "goal_id": req.goal_id,
+        "title": req.title.trim(),
+        "status": "backlog",
+        "priority": priority,
+        "execution_kind": execution_kind,
+        "created_at": created_at,
+    }))
 }
 
 /// (id, goal_id, title, status, priority, assignee_agent_id, execution_kind, updated_at)
@@ -2139,6 +2160,142 @@ async fn set_language(
     }
     state.notify(&company_id);
     Ok(Json(json!({ "id": company_id, "language": req.language })))
+}
+
+// ---------- integration tokens (M9, ADR-0028) ----------
+
+#[derive(Deserialize)]
+struct CreateToken {
+    label: String,
+}
+
+/// Issue a credential for a caller outside Overmind — a Claude Code session, a
+/// script — so it can file work and read the board over MCP (ADR-0028).
+///
+/// The secret is in this response and nowhere else afterwards. Not because the
+/// store is untrusted (it is plaintext in `overmind.sqlite`, and the threat
+/// model says the machine is the boundary) but because a credential you can
+/// re-read is one nobody bothers to keep track of, and the label is what makes
+/// revoking it later a decision rather than a guess.
+async fn create_company_token(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<CreateToken>,
+) -> Result<impl IntoResponse, ApiError> {
+    let label = req.label.trim();
+    if label.is_empty() {
+        return Err(ApiError::Invalid("a token needs a label".into()));
+    }
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
+        .bind(&company_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound("company"));
+    }
+    // v4, not the v7 used for ids: a v7 encodes the time it was minted, and a
+    // secret should not be predictable in any dimension (ADR-0027).
+    let token = uuid::Uuid::new_v4().to_string();
+    let (id, created_at) = (new_id(), now());
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO company_tokens (id, company_id, label, token, created_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&company_id)
+    .bind(label)
+    .bind(&token)
+    .bind(&created_at)
+    .execute(&mut *tx)
+    .await?;
+    // The label, never the token: an audit log is read by people, and a log
+    // that quotes secrets is a place secrets leak from.
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::TOKEN_ISSUED,
+        &json!({ "token_id": id, "label": label }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "label": label,
+            "token": token,
+            "created_at": created_at,
+        })),
+    ))
+}
+
+/// (id, label, created_at, last_used_at, revoked_at)
+type TokenRow = (String, String, String, Option<String>, Option<String>);
+
+/// The credentials this company has issued — what they are for, whether they
+/// have ever been used, and whether they still work. Never the secrets.
+async fn list_company_tokens(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<TokenRow> = sqlx::query_as(
+        "SELECT id, label, created_at, last_used_at, revoked_at
+           FROM company_tokens WHERE company_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "tokens": rows
+            .into_iter()
+            .map(|(id, label, created_at, last_used_at, revoked_at)| json!({
+                "id": id,
+                "label": label,
+                "created_at": created_at,
+                "last_used_at": last_used_at,
+                "revoked_at": revoked_at,
+            }))
+            .collect::<Vec<_>>()
+    })))
+}
+
+/// Withdraw a credential. A timestamp, not a delete: the audit log names the
+/// token that filed a task, and a row that vanished would leave that name
+/// pointing at nothing.
+async fn revoke_company_token(
+    State(state): State<AppState>,
+    Path(token_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT company_id, label, revoked_at FROM company_tokens WHERE id = ?")
+            .bind(&token_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let (company_id, label, revoked_at) = row.ok_or(ApiError::NotFound("token"))?;
+    if let Some(at) = revoked_at {
+        // Already gone, and saying so beats appending a second revocation event
+        // for a credential that stopped working the first time.
+        return Ok(Json(json!({ "id": token_id, "revoked_at": at })));
+    }
+    let at = now();
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("UPDATE company_tokens SET revoked_at = ? WHERE id = ?")
+        .bind(&at)
+        .bind(&token_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::TOKEN_REVOKED,
+        &json!({ "token_id": token_id, "label": label }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "id": token_id, "revoked_at": at })))
 }
 
 // ---------- the company's brain (M8, ADR-0024) ----------

@@ -57,6 +57,31 @@ export interface Model {
 
 export type LanguageCode = "en" | "it";
 
+/**
+ * A credential this company issued to something outside Overmind — an editor
+ * session, a script (ADR-0028). Never carries the secret: that is shown once,
+ * when it is created, and never again.
+ */
+export interface CompanyToken {
+  id: string;
+  label: string;
+  created_at: string;
+  /** `null` until something uses it — which is how you tell a live connection
+   *  from one you set up and forgot. */
+  last_used_at: string | null;
+  /** Withdrawn. The row stays so the audit events naming it still point at
+   *  something. */
+  revoked_at: string | null;
+}
+
+/** The one response that carries the secret. */
+export interface IssuedToken {
+  id: string;
+  label: string;
+  token: string;
+  created_at: string;
+}
+
 export interface Company {
   id: string;
   name: string;
@@ -376,6 +401,13 @@ export const api = {
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
   createCompany: (name: string, language: LanguageCode) =>
     req<Company>("POST", "/companies", { name, language }),
+  listTokens: (companyId: string) =>
+    req<{ tokens: CompanyToken[] }>("GET", `/companies/${companyId}/tokens`).then((r) => r.tokens),
+  createToken: (companyId: string, label: string) =>
+    req<IssuedToken>("POST", `/companies/${companyId}/tokens`, { label }),
+  revokeToken: (tokenId: string) =>
+    req<{ id: string; revoked_at: string }>("POST", `/tokens/${tokenId}/revoke`),
+
   setCompanyLanguage: (companyId: string, language: LanguageCode) =>
     req<{ id: string; language: LanguageCode }>("POST", `/companies/${companyId}/language`, {
       language,

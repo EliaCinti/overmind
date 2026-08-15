@@ -210,6 +210,30 @@ Agents then load org context before working and record what they learned. Unset 
 
 > **Do not set `BRAIN_DIR` inside the command.** `OVERMIND_MEMORY_CMD="BRAIN_DIR=/my/brain wadachi"` runs through a shell, so that assignment wins over the one Overmind sets — every company would silently share `/my/brain`. If sharing one brain is what you want, say so with `OVERMIND_MANAGED_BRAIN=off`, which is visible and does not depend on shell precedence.
 
+### Connect your editor (optional)
+
+Overmind speaks MCP, so a Claude Code session — or anything else that does — can file work into a company and read its board ([ADR-0028](docs/adr/0028-overmind-as-an-mcp-server-for-outside-callers.md)).
+
+Open **Connections** in the top bar, name what is connecting, and paste the configuration it gives you:
+
+```json
+{
+  "mcpServers": {
+    "overmind": {
+      "type": "http",
+      "url": "http://127.0.0.1:7070/mcp",
+      "headers": { "Authorization": "Bearer <the token>" }
+    }
+  }
+}
+```
+
+```sh
+claude --mcp-config overmind.json --strict-mcp-config
+```
+
+You get `create_task`, `list_tasks`, `get_task`, `verify_audit` and `list_events`. **Filing work is not starting it:** a task arrives in the backlog, unassigned, and a person decides who picks it up — which is what keeps the budget and approval gates worth having. Withdraw a connection from the same panel and it stops working immediately.
+
 ### Configuration
 
 | Env var | What |
@@ -230,7 +254,7 @@ Agents then load org context before working and record what they learned. Unset 
 
 ## Status
 
-Pre-alpha, built in the open. The core is done and tested: company & org chart, tasks & board, agent execution in worktrees, heartbeats & recovery, budgets & governance, hash-chained audit, and organizational memory over MCP. Next on the [roadmap](docs/ROADMAP.md): managed per-company brains + memory UI, Overmind as an MCP server, and container-based agent sandboxing.
+Pre-alpha, built in the open. The core is done and tested: company & org chart, tasks & board, agent execution in worktrees, heartbeats & recovery, budgets & governance, hash-chained audit, and organizational memory over MCP. Next on the [roadmap](docs/ROADMAP.md): Linux sandboxing to match the macOS cage, and inline diff review.
 
 The design is documented before the code: see [VISION](docs/VISION.md), [ARCHITECTURE](docs/ARCHITECTURE.md), the [UX principles](docs/UX.md), and the [Architecture Decision Records](docs/adr/).
 
