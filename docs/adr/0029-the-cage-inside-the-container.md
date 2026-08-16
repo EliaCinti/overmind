@@ -305,7 +305,34 @@ exactly like the boundary working and is nothing of the kind. Anything mounted
 for an agent now has to be reachable by a uid that did not create it — a general
 consequence of this ADR, and the first of what will be several.
 
-### The Landlock layer is written but not yet witnessed
+### Landlock, witnessed by failing (2026-08-16)
+
+The first CI run on a kernel that has Landlock did what the development machine
+could not: it disagreed. The caged container run **failed and produced nothing**
+while the identical uncaged run completed — which is the pair working, in the
+direction nobody hopes for and everybody needs. The ruleset was enforcing; it
+was also wrong in two ways, and only enforcement could have said so.
+
+**Mounted repositories were denied**, and that is a defect in the product rather
+than in the test. A `code` run commits, and a worktree keeps its git metadata in
+`<repo>/.git/worktrees/<name>` — inside the repository, not inside the run
+directory. Granting the run directory alone hands an agent a checkout it can
+edit and never commit. `repos_dir` joins the writable set.
+
+**A stub adapter bind-mounted at the root was denied**, and that is the design
+working. Deny-by-default means an adapter somewhere the cage never heard of does
+not run, and `OVERMIND_SANDBOX_ALLOW` is the hatch ADR-0023 shipped for exactly
+this. The real adapter needs nothing, because it lives in `/usr`; a custom
+`OVERMIND_AGENT_CMD` pointing anywhere else needs to say so. CI now exercises
+that hatch, which nothing did before.
+
+Worth naming the shape of it: on macOS this was never noticed because the
+sandbox tests write their stubs into `$TMPDIR`, which the profile grants
+outright. The same latent sharp edge, hidden by where the tests happened to put
+a file — the third time in this milestone that a test's convenience concealed
+the thing it was meant to check.
+
+### The Landlock layer, before CI ever ran it
 
 Stated plainly because this ADR's whole argument is that measurement beat
 intuition twice already. The Landlock code compiles on Linux and its
@@ -316,16 +343,19 @@ is the behavioural pair — `a_landlocked_agent_cannot_leave_its_run_directory`,
 which asserts a run cannot write beside its own directory while the identical
 uncaged run can.
 
-It cannot run on this machine: Docker Desktop's kernel has no Landlock, which is
-the finding this ADR opens with. The test skips itself there, honestly and
-loudly, the way the `sandbox-exec` tests skip off macOS. CI's ubuntu job is
-where it runs, and that job exists because M19's first slice put it there for
-precisely this class of code.
+It could not run on the development machine: Docker Desktop's kernel has no
+Landlock, which is the finding this ADR opens with. The test skips itself there,
+honestly and loudly, the way the `sandbox-exec` tests skip off macOS. CI's
+ubuntu job is where it runs, and that job exists because M19's first slice put
+it there for precisely this class of code — see the section above for what
+happened the first time it did.
 
-**Until that pair is green, one consequence deserves care.** On bare-metal Linux
-with a Landlock kernel and no agent uid, Landlock is the *only* mechanism, so it
-alone makes `caged()` true and therefore grants
-`--dangerously-skip-permissions`. If the ruleset were subtly wrong — a
-mis-declared structure, a rule silently not added — that would be the one
-combination ADR-0023 forbids: an uncaged agent with permissions skipped. In the
-image this does not arise, because the uid is holding the run regardless.
+**One consequence deserves care regardless.** On bare-metal Linux with a
+Landlock kernel and no agent uid, Landlock is the *only* mechanism, so it alone
+makes `caged()` true and therefore grants `--dangerously-skip-permissions`. If
+the ruleset were subtly wrong — a mis-declared structure, a rule silently not
+added — that would be the one combination ADR-0023 forbids: an uncaged agent
+with permissions skipped. In the image this does not arise, because the uid is
+holding the run regardless. The container pair failing loudly rather than
+passing quietly is the first evidence that the ruleset is not silently empty,
+which is the specific way this could have been wrong.

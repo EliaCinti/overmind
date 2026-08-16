@@ -120,6 +120,11 @@ fn writable_paths(config: &Config, cage: &Cage<'_>) -> Vec<PathBuf> {
     // agent's own home; on a machine it is the user's, and the run would fail
     // without it long before it failed usefully.
     writable.extend(config.agent_home.iter().filter_map(|p| real_path(p)));
+    // Mounted repositories. Writable, not readable: a `code` run commits, and a
+    // worktree keeps its git metadata in `<repo>/.git/worktrees/<name>` — inside
+    // the repository, not inside the run directory. Granting the run directory
+    // alone would give an agent a checkout it could edit and never commit.
+    writable.extend(config.repos_dir.iter().filter_map(|p| real_path(p)));
     writable.extend(adapter_paths().iter().filter_map(|p| real_path(p)));
     writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
     writable

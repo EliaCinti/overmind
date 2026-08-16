@@ -109,10 +109,19 @@ scenario() { # label [extra docker -e args…]
     local label="$1"; shift
     NAME="overmind-smoke-$$-${label}"
 
+    # `OVERMIND_SANDBOX_ALLOW=/stub` is not scaffolding — it is the escape hatch
+    # ADR-0023 shipped for exactly this, and the first thing in CI to exercise
+    # it. Deny-by-default means an adapter somewhere the cage never heard of is
+    # denied, and on a Landlock kernel that is enforced rather than assumed: the
+    # first run of this script on a runner with Landlock failed here, with the
+    # shell unable to read its own script. The *real* adapter needs nothing,
+    # because it lives in /usr; a stub bind-mounted at the root does, and so
+    # would anyone's custom `OVERMIND_AGENT_CMD`.
     docker run -d --name "$NAME" \
         -p "127.0.0.1:${PORT}:7070" \
         -v "$WORK/stub:/stub:ro" \
         -e OVERMIND_AGENT_CMD='sh /stub/agent.sh' \
+        -e OVERMIND_SANDBOX_ALLOW=/stub \
         "$@" \
         "$IMAGE" >/dev/null
 
