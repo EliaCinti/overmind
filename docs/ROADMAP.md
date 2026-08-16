@@ -238,6 +238,26 @@ The new status proved M16's own guarantee: adding `paused` to the server-shaped 
 
 **Not closed:** a turn is still not priced before it runs — the estimate is flat, as it is for tasks, so an agent can overrun by the difference between the estimate and one turn's true cost. And **subscription exhaustion** (the underlying Claude plan running out, as opposed to our cap) is a different failure that arrives as an adapter error; the pause path is where it belongs once we can recognise it reliably, and until then it surfaces like any other adapter failure.
 
+## M19 — The container actually works `in-progress`
+Overmind has only ever been *run* on macOS. The container is how everyone else is meant to have it — and how Windows is supported at all, since a native port would mean porting the shell, the paths and git credential isolation to buy something Docker Desktop already gives.
+
+**`docker compose up` has never produced a working agent run.** Three defects stack, each sufficient on its own, and they were invisible because the only place that checked — CI on `ubuntu-latest` — never ran an agent, and the sandbox tests *skip themselves* off macOS (`available()` answers false), so a green Linux run proved the cage compiled and never that it held.
+
+| | what happens today |
+|---|---|
+| the image ships **no agent CLI** | it installs `git`, `gh`, `ripgrep`, `python3`, `nodejs` — the server's default command is `claude -p …`, so a task dies at the spawn with `command not found` |
+| **no cage off macOS** | so no `--dangerously-skip-permissions` ([ADR-0023](adr/0023-os-level-sandboxing.md), D34/D35 — the flag is only safe because the OS is already holding the process), and the CLI denies every write in headless mode |
+| **the failure is silent** | measured 2026-08-15 with the cage off: session `completed`, exit 0, task moved to `in_review`, scratch directory empty, and the only "artifact" is the fallback `Run output` — the adapter's JSON envelope, `ttft_ms` and all, handed to a person where a document belongs |
+
+- ✅ **CI stops being one Linux box.** ubuntu and macos run the suite (`fail-fast: false`, so a break reports *which* platform); formatting is asked once, clippy everywhere because `cfg`-gated code is only linted where it compiles. Windows is deliberately absent: it is supported *through the image*, and a `cargo test` on a Windows runner would prove a native port we are not doing.
+- ☐ **A job that builds the image and proves it works** — not "does it build", but: start the container, create a company, run a knowledge task, and require a **real file** to come out. That is the check that would have caught all three defects at once, and nothing weaker would have caught any of them.
+- ☐ **The cage on Linux.** The critical path, not a security nicety: without it the container cannot write, so it cannot work. `sandbox-exec` has no counterpart — the candidates are `bubblewrap` (an external helper, the same shape as today) and Landlock (in the kernel since 5.13, no helper, applied to the child before `exec`). A decision, and its own ADR.
+- ☐ **A task that produced nothing is not `in_review`.** Independent of any platform, and older than this milestone: `Run output` is a *fallback*, and a fallback that arrives alone means the run delivered nothing. It should fail, loudly, naming what the adapter said — the same lesson the conversational path learned on 2026-08-14.
+- ☐ **An image someone can actually run.** An agent CLI in it (or a first-class way to say which), credentials that survive a rebuild, and repository mounts whose in-container path does not have to be discovered by reading a comment in `docker-compose.yml`.
+- **Accept:** `docker compose up`, then a knowledge task through the UI, produces a document — verified by CI on every change, not by hand once. A caged agent on Linux is proven caged by the same paired probes M10 used on macOS.
+
+**Docker is not a substitute for the cage, and the distinction is the whole point.** A container isolates itself from the *host*; the cage isolates the *agent* from Overmind. Inside the image an agent sits next to `overmind.sqlite` and its audit chain, every company's brain, and the per-run MCP token files. The threat model's actual adversary — an agent that misread its task, or a prompt injection inside a document someone handed it — is already inside.
+
 ## Known gaps — carried deliberately, not forgotten
 
 - **No authentication of any kind.** For a single user on their own machine this is the right trade — the boundary is the machine, and anyone who has it can run the CLI directly. It stops being fine the moment the port is reachable by anyone else: the API spawns processes. Compose binds loopback only; the browser boundary (CORS + WebSocket origin) is held by `tests/browser_boundary.rs`. Real auth is M10, and it is what a shared or hosted Overmind needs first.

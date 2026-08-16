@@ -457,6 +457,117 @@ async fn knowledge_task_produces_document_artifact() {
     assert_eq!(report["valid"], json!(true));
 }
 
+/// Exits cleanly, costs money, and writes nothing — the exact shape a real
+/// agent takes when it is not permitted to write. Measured in the container on
+/// 2026-08-15, where the cage does not reach and the CLI therefore denies every
+/// Write in headless mode.
+const MUTE_KNOWLEDGE_STUB: &str = r#"#!/bin/sh
+echo "thinking about it"
+echo '{"model":"stub-model","total_cost_usd":0.10,"usage":{"input_tokens":100,"output_tokens":50}}'
+"#;
+
+/// A knowledge run that wrote no file delivered nothing, and must not say
+/// otherwise.
+///
+/// This shipped as a success: session `completed`, task `in_review`, and the
+/// `Run output` fallback — the adapter's own transcript — offered to a person
+/// as the thing to review. `ttft_ms` and `permission_denials` where a document
+/// belongs. The fallback is still written, because an empty panel says less
+/// than a transcript does; what it may no longer do is stand in for a
+/// deliverable.
+#[tokio::test]
+async fn a_knowledge_run_that_wrote_nothing_is_not_ready_for_review() {
+    let env = setup(MUTE_KNOWLEDGE_STUB).await;
+
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({
+            "title": "Write something down",
+            "description": "Anything, in a file.",
+            "execution_kind": "knowledge"
+        })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start failed: {started}");
+
+    let session = wait_for_session(
+        &env.app,
+        started["session_id"].as_str().expect("session id"),
+    )
+    .await;
+    assert_eq!(
+        session["status"], "failed",
+        "a run that delivered nothing did not succeed: {session}"
+    );
+    assert!(
+        session["last_error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no file"),
+        "and it must say what went wrong: {session}"
+    );
+    // The exit code stays truthful: the adapter did exit 0. What failed is the
+    // run, not the process.
+    assert_eq!(session["exit_code"], json!(0), "{session}");
+
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let ours = tasks["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|t| t["id"] == task_id.as_str())
+        .expect("our task");
+    assert_eq!(
+        ours["status"], "blocked",
+        "nothing was produced, so there is nothing in review: {ours}"
+    );
+
+    // The transcript is still in the drawer — it is the only account of what
+    // happened, and a person looking for the reason should find it there.
+    let (_, artifacts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{task_id}/artifacts"),
+        None,
+    )
+    .await;
+    let items = artifacts["artifacts"].as_array().expect("artifacts");
+    assert!(
+        items.iter().any(|a| a["title"] == "Run output"),
+        "the fallback survives: {artifacts}"
+    );
+    assert!(
+        items.iter().all(|a| a["relative_path"].is_null()),
+        "and it is not dressed up as a file the agent wrote: {artifacts}"
+    );
+
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
 // M12 / ADR-0018: talking to the CEO opens a task. The stub CEO returns a plan.
 const CEO_STUB: &str = r#"#!/bin/sh
 echo "thinking..."

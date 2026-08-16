@@ -1228,73 +1228,6 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     };
 
     let mut tx = ctx.state.pool.begin().await?;
-    // Releasing the reservation (→ 0): once the run is over, its actual cost
-    // is a cost_event and counts as spent; the in-flight reservation is gone.
-    sqlx::query(
-        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
-    )
-    .bind(f.session_status)
-    .bind(&f.output)
-    .bind(f.exit_code)
-    .bind(&f.last_error)
-    .bind(now())
-    .bind(&ctx.session_id)
-    .execute(&mut *tx)
-    .await?;
-
-    if let Some(adapter_sid) = parse_adapter_session_id(&f.output) {
-        sqlx::query("UPDATE agent_task_sessions SET adapter_session_id = ? WHERE id = ?")
-            .bind(&adapter_sid)
-            .bind(&ctx.session_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    if f.release {
-        sqlx::query(
-            "UPDATE tasks SET status = 'todo', assignee_agent_id = NULL, updated_at = ? WHERE id = ?",
-        )
-        .bind(now())
-        .bind(&ctx.task_id)
-        .execute(&mut *tx)
-        .await?;
-        audit::append(
-            &mut tx,
-            Some(&ctx.company_id),
-            Some(&ctx.task_id),
-            event_kind::TASK_RELEASED,
-            &json!({ "from": "in_progress", "to": "todo", "reason": f.last_error }),
-        )
-        .await?;
-    } else {
-        sqlx::query("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(f.task_to)
-            .bind(now())
-            .bind(&ctx.task_id)
-            .execute(&mut *tx)
-            .await?;
-        audit::append(
-            &mut tx,
-            Some(&ctx.company_id),
-            Some(&ctx.task_id),
-            event_kind::TASK_TRANSITIONED,
-            &json!({ "from": "in_progress", "to": f.task_to }),
-        )
-        .await?;
-    }
-    audit::append(
-        &mut tx,
-        Some(&ctx.company_id),
-        Some(&ctx.task_id),
-        event_kind::SESSION_FINISHED,
-        &json!({
-            "session_id": ctx.session_id,
-            "status": f.session_status,
-            "exit_code": f.exit_code,
-            "error": f.last_error,
-        }),
-    )
-    .await?;
 
     // What the run produced, besides (or instead of) a diff — M17.
     //
@@ -1305,7 +1238,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     //
     // Best-effort throughout: the session is already recorded, and a file that
     // cannot be read must not undo that.
-    if f.session_status == "completed" {
+    let delivered: usize = if f.session_status == "completed" {
         let (root, inline_root) = match ctx.exec_kind {
             ExecutionKind::Knowledge => (ctx.worktree_dir.clone(), true),
             ExecutionKind::Code => (ctx.worktree_dir.join(DELIVERABLES_DIR), false),
@@ -1398,7 +1331,114 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             )
             .await?;
         }
+        n
+    } else {
+        0
+    };
+
+    // A knowledge run's deliverable **is** what it wrote, so one that wrote
+    // nothing delivered nothing — however cleanly the adapter exited. Until now
+    // that was filed `in_review`, with the adapter's own transcript standing in
+    // for a document.
+    //
+    // Measured in the container on 2026-08-15, which is where it matters most
+    // because the cage does not reach there yet: session `completed`, exit 0,
+    // scratch directory empty, and the only thing in the drawer the `Run
+    // output` fallback — a person invited to review `ttft_ms` and
+    // `permission_denials`. The fallback stays, because an empty panel tells
+    // you less than a transcript does; what stops is a run that delivered only
+    // its own transcript calling itself a success.
+    //
+    // Code runs are excluded on purpose: their deliverable is the diff, and one
+    // that deliberately changed nothing is a legitimate answer.
+    let empty_handed = f.session_status == "completed"
+        && ctx.exec_kind == ExecutionKind::Knowledge
+        && delivered == 0;
+    let session_status = if empty_handed {
+        "failed"
+    } else {
+        f.session_status
+    };
+    let task_to = if empty_handed { "blocked" } else { f.task_to };
+    let last_error = if empty_handed {
+        // What the adapter said, when it said anything: "Credit balance is too
+        // low" is a better answer than any sentence written here.
+        Some(adapter_failure(&f.output).unwrap_or_else(|| {
+            "the run wrote no file, so there is nothing to review — only the \
+             adapter's own output"
+                .to_string()
+        }))
+    } else {
+        f.last_error.clone()
+    };
+
+    // Releasing the reservation (→ 0): once the run is over, its actual cost
+    // is a cost_event and counts as spent; the in-flight reservation is gone.
+    sqlx::query(
+        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
+    )
+    .bind(session_status)
+    .bind(&f.output)
+    .bind(f.exit_code)
+    .bind(&last_error)
+    .bind(now())
+    .bind(&ctx.session_id)
+    .execute(&mut *tx)
+    .await?;
+
+    if let Some(adapter_sid) = parse_adapter_session_id(&f.output) {
+        sqlx::query("UPDATE agent_task_sessions SET adapter_session_id = ? WHERE id = ?")
+            .bind(&adapter_sid)
+            .bind(&ctx.session_id)
+            .execute(&mut *tx)
+            .await?;
     }
+
+    if f.release {
+        sqlx::query(
+            "UPDATE tasks SET status = 'todo', assignee_agent_id = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(now())
+        .bind(&ctx.task_id)
+        .execute(&mut *tx)
+        .await?;
+        audit::append(
+            &mut tx,
+            Some(&ctx.company_id),
+            Some(&ctx.task_id),
+            event_kind::TASK_RELEASED,
+            &json!({ "from": "in_progress", "to": "todo", "reason": last_error }),
+        )
+        .await?;
+    } else {
+        sqlx::query("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?")
+            .bind(task_to)
+            .bind(now())
+            .bind(&ctx.task_id)
+            .execute(&mut *tx)
+            .await?;
+        audit::append(
+            &mut tx,
+            Some(&ctx.company_id),
+            Some(&ctx.task_id),
+            event_kind::TASK_TRANSITIONED,
+            &json!({ "from": "in_progress", "to": task_to }),
+        )
+        .await?;
+    }
+    audit::append(
+        &mut tx,
+        Some(&ctx.company_id),
+        Some(&ctx.task_id),
+        event_kind::SESSION_FINISHED,
+        &json!({
+            "session_id": ctx.session_id,
+            "status": session_status,
+            "exit_code": f.exit_code,
+            "error": last_error,
+        }),
+    )
+    .await?;
 
     // Cost capture: the Claude Code CLI (and our stubs) print a final JSON
     // object with total_cost_usd and usage. Missing/unparseable cost is not

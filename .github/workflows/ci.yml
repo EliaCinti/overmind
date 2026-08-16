@@ -10,16 +10,65 @@ env:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    # Until now this ran on Linux alone, which made "works everywhere" a claim
+    # nothing checked — and worse, the sandbox tests *skip themselves* off
+    # macOS, so a green Linux run proved the cage compiled, never that it held.
+    #
+    # Windows is deliberately absent. It is supported through the image
+    # (ADR-0014), so `cargo test` on a Windows runner would prove a native port
+    # we are not doing — and prove nothing about what a Windows user runs.
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the other: when something breaks,
+      # the useful information is which of the two broke, not the first.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+
+      # Formatting is the same answer on every platform, so it is asked once.
       - name: Format
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
+
+      # Clippy, however, runs everywhere on purpose: the sandbox is
+      # `cfg`-gated per platform, and code that only compiles on one is only
+      # linted there.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Test
         run: cargo test --workspace
+
+  container:
+    # The image is how everyone who is not on macOS has Overmind, and nothing
+    # has ever checked that an agent can do a day's work inside it. "Does it
+    # build" would not have caught any of the three defects M19 opens with;
+    # requiring a real file out of a real task catches all three at once.
+    name: the image works
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: overmind:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A stub adapter, not the real CLI: this must not need an API key or spend
+      # money. It proves Overmind's plumbing inside the image and is honest in
+      # the script about the half it cannot prove — a shell script writes freely,
+      # so it says nothing about whether the real CLI is permitted to.
+      - name: Run a task in the container, and require a real file out of it
+        run: bash .github/scripts/container-smoke.sh
