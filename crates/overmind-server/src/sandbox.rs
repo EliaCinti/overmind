@@ -808,12 +808,22 @@ mod tests {
         };
         assert!(announce(&off).contains("read-only"), "{}", announce(&off));
 
-        let on = Config::default();
-        let said = announce(&on);
+        // Either the line names a mechanism or it says plainly that nothing is
+        // holding the agent — never both, never neither. Asserted as that
+        // invariant rather than by re-deriving which mechanism this machine
+        // happens to have, which would only restate the function back to
+        // itself. The first version of this test did re-derive it, assumed
+        // "not macOS" meant "nothing", and failed the moment it met a Linux
+        // kernel with Landlock — which is the answer it should have welcomed.
+        let said = announce(&Config::default());
+        let names_a_mechanism = said.contains("sandbox-exec") || said.contains("Landlock");
+        assert_ne!(
+            names_a_mechanism,
+            said.contains("read-only"),
+            "the startup line must name the boundary or say there is none: {said}"
+        );
         if profile_available() {
             assert!(said.contains("sandbox-exec"), "{said}");
-        } else {
-            assert!(said.contains("read-only"), "{said}");
         }
     }
 

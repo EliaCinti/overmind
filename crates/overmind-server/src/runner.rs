@@ -806,14 +806,21 @@ enum Outcome {
 
 async fn run_session(ctx: SessionContext, mode: Mode) {
     let outcome = execute(&ctx, mode).await;
-    if let Err(e) = finalize(&ctx, outcome).await {
-        eprintln!("session {}: failed to finalize: {e}", ctx.session_id);
-    }
-    // Retire the run's token (ADR-0027). The config file is already gone — its
-    // guard dropped when `run_process` returned — but the row outlives the
-    // file, and a token that still resolves is still a key. Invalidating is a
-    // write rather than an expiry because "the run is over" is a fact, and a
-    // clock would be a worse way to learn it.
+    // Retire the run's token (ADR-0027) **before** the run is published as
+    // over. The config file is already gone — its guard dropped when
+    // `run_process` returned — but the row outlives the file, and a token that
+    // still resolves is still a key. Invalidating is a write rather than an
+    // expiry because "the run is over" is a fact, and a clock would be a worse
+    // way to learn it.
+    //
+    // The order is the fix, not decoration. `finalize` is what writes the
+    // terminal status, so retiring afterwards left a window in which the
+    // session read as finished to everyone watching while its token still
+    // authenticated. Nothing in `finalize` needs the token — the agent process
+    // died when `run_process` returned — so the door is shut first and the
+    // announcement made second. Found by CI on macOS the first time that
+    // platform ever ran the suite; the window was always there and the loser of
+    // the race was simply never observed.
     //
     // Unconditional: it runs for a completed, failed, timed-out or abandoned
     // run alike, and costs nothing when there was never a token.
@@ -821,6 +828,9 @@ async fn run_session(ctx: SessionContext, mode: Mode) {
         .bind(&ctx.session_id)
         .execute(&ctx.state.pool)
         .await;
+    if let Err(e) = finalize(&ctx, outcome).await {
+        eprintln!("session {}: failed to finalize: {e}", ctx.session_id);
+    }
     deregister(&ctx.state, &ctx.session_id);
 }
 
