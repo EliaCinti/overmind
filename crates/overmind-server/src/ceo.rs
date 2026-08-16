@@ -910,6 +910,11 @@ async fn spawn_adapter(
     // M17 collects whatever the agent leaves in the scratch dir — so it needs
     // the same permission answer a task run gets.
     let cage = crate::sandbox::Cage { run_dir: cwd };
+    // The scratch dir is the server's until it is the agent's (ADR-0029). A
+    // turn writes files too, so this is not only a task-run concern.
+    crate::sandbox::hand_over(&state.config, cwd)
+        .await
+        .map_err(|e| CeoError::Invalid(format!("cannot hand the scratch dir to the agent: {e}")))?;
     let agent_cmd =
         crate::runner::agent_command(state, crate::sandbox::caged(&state.config, &cage), None);
     let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);

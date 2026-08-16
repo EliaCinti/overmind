@@ -40,6 +40,24 @@ RUN apt-get update \
 COPY --from=server /app/target/release/overmind-server /usr/local/bin/overmind-server
 COPY --from=web /web/dist /app/web/dist
 
+# The agent is not the server, and neither of them is you (ADR-0029).
+#
+# Two reasons, and either alone would be enough. The boundary: an agent that
+# misreads its task, or a prompt injection inside a document someone handed it,
+# sits next to `overmind.sqlite` and its audit chain, every company's brain and
+# the per-run MCP tokens — all of which stay the server's, unreadable to this
+# uid. And the plain mechanics: the adapter CLI refuses
+# `--dangerously-skip-permissions` as root, so an image whose agents are root is
+# an image whose agents cannot write a file, however good its cage is.
+#
+# The server therefore stays root and drops to this uid per spawn. Overriding
+# `user:` in compose takes that ability away: the server then says so at startup
+# and its agents are read-only, rather than failing at the first write.
+RUN useradd --create-home --uid 10001 --shell /bin/sh agent
+ENV OVERMIND_AGENT_UID=10001 \
+    OVERMIND_AGENT_GID=10001 \
+    OVERMIND_AGENT_HOME=/home/agent
+
 # Sensible container defaults; override any via the environment.
 ENV OVERMIND_WEB_DIR=/app/web/dist \
     OVERMIND_DB=sqlite:///data/overmind.sqlite \
@@ -47,6 +65,9 @@ ENV OVERMIND_WEB_DIR=/app/web/dist \
     OVERMIND_ADDR=0.0.0.0:7070
 
 WORKDIR /app
+# Modes are the server's to set at startup — it knows which of these hold runs
+# and which hold its own shelves, and it has to do it on every boot anyway for
+# a volume that predates this layout.
 RUN mkdir -p /data
 VOLUME /data
 EXPOSE 7070

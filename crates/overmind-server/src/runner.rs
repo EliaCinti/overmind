@@ -983,6 +983,28 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             .execute(&ctx.state.pool)
             .await;
     }
+    // Where the agent runs as its own uid (ADR-0029), everything the server
+    // just built for this run belongs to the server until it is handed over:
+    // the run directory with its inputs, and the token file — that one by
+    // itself, never the directory holding every run's token.
+    //
+    // Loudly, because a run that cannot write its own directory produces
+    // nothing, and "produced nothing" arriving as success is the defect this
+    // milestone exists to end.
+    if let Err(e) = crate::sandbox::hand_over(&ctx.state.config, &ctx.worktree_dir).await {
+        return Outcome::Infra {
+            error: format!("cannot hand the run directory to the agent: {e}"),
+            release: false,
+        };
+    }
+    if let Some(m) = &mcp
+        && let Err(e) = crate::sandbox::hand_over(&ctx.state.config, &m.path).await
+    {
+        return Outcome::Infra {
+            error: format!("cannot hand the agent its memory credentials: {e}"),
+            release: false,
+        };
+    }
     let agent_cmd = agent_command(
         &ctx.state,
         crate::sandbox::caged(&ctx.state.config, &cage),

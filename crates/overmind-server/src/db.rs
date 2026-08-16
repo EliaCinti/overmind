@@ -192,6 +192,21 @@ pub struct Config {
     /// The profile cannot know every toolchain; this is how a setup it did not
     /// anticipate gets fixed without turning the cage off.
     pub sandbox_allow: Vec<PathBuf>,
+    /// The unprivileged user agent work runs as (`OVERMIND_AGENT_UID`,
+    /// `OVERMIND_AGENT_GID`, `OVERMIND_AGENT_HOME` — ADR-0029).
+    ///
+    /// Set by our image and unset everywhere else, deliberately: on a user's own
+    /// machine Overmind runs as that user, and inventing a second uid on
+    /// somebody's laptop is not ours to do. `None` here is not a failure, it is
+    /// the answer "this mechanism does not apply to how I am running".
+    pub agent_uid: Option<u32>,
+    /// The group that goes with `agent_uid`; defaults to the uid's own value,
+    /// which is what `useradd` produces.
+    pub agent_gid: Option<u32>,
+    /// The agent's own `HOME`. It needs one it can write: the adapter CLI keeps
+    /// credentials and session state there, and the server's home is not the
+    /// agent's to use even when it could reach it.
+    pub agent_home: Option<PathBuf>,
     /// Give each company its own brain under the data dir (ADR-0024).
     /// `OVERMIND_MANAGED_BRAIN=off` restores M7's behaviour — one shared brain,
     /// wherever `memory_cmd` points — for the user who deliberately wants their
@@ -212,6 +227,9 @@ impl Default for Config {
             web_dir: PathBuf::from("./web/dist"),
             sandbox: true,
             sandbox_allow: Vec::new(),
+            agent_uid: None,
+            agent_gid: None,
+            agent_home: None,
             managed_brain: true,
         }
     }
@@ -261,6 +279,20 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or(defaults.sandbox_allow),
+            // A uid we cannot parse is a uid we do not use: the cage is then
+            // absent and says so, which is the direction ADR-0023 chose. The
+            // alternative — falling back to some default uid — would mean
+            // guessing at a security boundary.
+            agent_uid: std::env::var("OVERMIND_AGENT_UID")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            agent_gid: std::env::var("OVERMIND_AGENT_GID")
+                .ok()
+                .and_then(|s| s.parse().ok()),
+            agent_home: std::env::var("OVERMIND_AGENT_HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
             // Same shape as `sandbox` above, same reason: only an explicit
             // "off" opts out, so a typo does not silently put two companies
             // back in one brain.
@@ -281,6 +313,28 @@ pub enum InitError {
     Seed(#[from] serde_json::Error),
     #[error("invalid database url: {0}")]
     Url(String),
+}
+
+/// The database file and the two SQLite keeps beside it in WAL mode.
+///
+/// Parsed rather than configured, because the URL is where the path already
+/// lives and a second setting naming the same file is a second thing to get
+/// wrong. Anything that is not a plain `sqlite://path` yields nothing, and the
+/// caller's restriction is then simply not applied — the honest answer for a
+/// URL shape we do not understand.
+fn sqlite_files(database_url: &str) -> Vec<PathBuf> {
+    let Some(rest) = database_url.strip_prefix("sqlite://") else {
+        return Vec::new();
+    };
+    let path = rest.split('?').next().unwrap_or(rest);
+    if path.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        PathBuf::from(path),
+        PathBuf::from(format!("{path}-wal")),
+        PathBuf::from(format!("{path}-shm")),
+    ]
 }
 
 /// Open (creating if missing), migrate and seed the database, with
@@ -312,6 +366,25 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
     sqlx::migrate!("./migrations").run(&pool).await?;
     seed_archetypes(&pool).await?;
     seed_domains(&pool).await?;
+
+    // Where agent work runs as another uid (ADR-0029), the boundary is only as
+    // real as the filesystem under it. Both calls are no-ops without an agent
+    // uid, which is every install but the image.
+    if let Err(e) = crate::sandbox::lay_out_data_dir(&config).await {
+        eprintln!("data dir layout failed (agents may be able to read it): {e}");
+    }
+    // SQLite makes these 0644, and they hold the audit chain and every
+    // company's data. An agent has no business reading any of it. The WAL and
+    // shared-memory files carry the same rows before a checkpoint, so leaving
+    // them open would make the main file's mode decorative.
+    if !is_memory {
+        for path in sqlite_files(database_url) {
+            if let Err(e) = crate::sandbox::keep_to_server(&config, &path) {
+                eprintln!("cannot restrict {} (ignored): {e}", path.display());
+            }
+        }
+    }
+
     let (events, _) = broadcast::channel(256);
     let memory = crate::mcp::Memory::from_config(config.memory_cmd.clone());
     Ok(AppState {

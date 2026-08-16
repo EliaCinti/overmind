@@ -163,7 +163,7 @@ async fn probe_at(
 /// The M10 criterion, for the half a sandbox can carry.
 #[tokio::test]
 async fn a_caged_agent_cannot_reach_the_machine_it_runs_on() {
-    if !overmind_server::sandbox::available() {
+    if !overmind_server::sandbox::profile_available() {
         eprintln!("no sandbox on this platform — skipping");
         return;
     }
@@ -206,7 +206,7 @@ async fn a_caged_agent_cannot_reach_the_machine_it_runs_on() {
 /// then the only rule that can let the stub write, which is the whole point.
 #[tokio::test]
 async fn a_relative_data_dir_is_still_a_real_cage() {
-    if !overmind_server::sandbox::available() {
+    if !overmind_server::sandbox::profile_available() {
         eprintln!("no sandbox on this platform — skipping");
         return;
     }

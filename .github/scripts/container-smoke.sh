@@ -1,60 +1,66 @@
 #!/usr/bin/env bash
 #
-# Does a day's work happen inside the image?
+# Does a day's work happen inside the image, and is the agent held while it does?
 #
 # Not "does the image build" — that has always been true, and it was true on
-# every one of the three defects M19 opens with: no agent CLI in the image, no
-# cage off macOS, and a run that produces nothing reporting success anyway.
-# The weakest check that catches them is this one: start the container, open a
-# task, and require a real file to come out of it.
+# every one of the four defects M19 opens with: no agent CLI in the image, no
+# cage off macOS, a run that produces nothing reporting success anyway, and a
+# container whose agents run as root. The weakest check that catches the first
+# three is this one: start the container, open a task, and require a real file
+# to come out of it.
+#
+# The fourth needs a pair. Since ADR-0029 the cage in the image is an
+# unprivileged uid, and a denial only proves something if the identical run
+# succeeds without it — otherwise a typo in the probe reads as security. So the
+# same task runs twice, caged and with `OVERMIND_SANDBOX=off`, and the assertion
+# is the *difference* between them.
 #
 # **What this deliberately does not prove.** The adapter here is a shell script,
 # and a shell script writes freely — it has no permission system to be denied
 # by. So this proves Overmind's plumbing (a task reaches an adapter, the
-# adapter's files come back as artifacts, the run directory is writable) and
-# says nothing about whether the *real* CLI can write, which depends on the
-# cage. That is the trap this project already fell into once: "stubs are shell
+# adapter's files come back as artifacts, the run directory is writable) and the
+# uid boundary around it, and says nothing about whether the *real* CLI can
+# write. That is the trap this project already fell into once: "stubs are shell
 # scripts and write freely, so every test was green over it" (M2 smoke run).
-# The cage on Linux is what closes that half, and it is checked by its own
-# paired probes, not here.
 
 set -euo pipefail
 
 IMAGE="${IMAGE:-overmind:ci}"
-NAME="overmind-smoke-$$"
 PORT="${PORT:-7070}"
 API="http://127.0.0.1:${PORT}/api"
 WORK="$(mktemp -d)"
+NAME=""
 
 cleanup() {
-    echo "--- container logs ---"
-    docker logs "$NAME" 2>&1 | tail -40 || true
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    if [ -n "$NAME" ]; then
+        echo "--- container logs ($NAME) ---"
+        docker logs "$NAME" 2>&1 | tail -40 || true
+        docker rm -f "$NAME" >/dev/null 2>&1 || true
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-# An adapter that does the one thing a knowledge task is for: leave a file
-# behind, and report what it cost.
+# An adapter that does the one thing a knowledge task is for — leave a file
+# behind — and, while it is in there, reports what it can reach. `id -u` and two
+# probes at Overmind's own data: the database with its audit chain, and the
+# directory holding every company's brain.
 mkdir -p "$WORK/stub"
 cat > "$WORK/stub/agent.sh" <<'STUB'
 #!/bin/sh
 printf 'The container can do a day of work.\n' > ARTIFACT.md
+{
+    echo "uid=$(id -u)"
+    if [ -r /data/overmind.sqlite ]; then echo "db=READABLE"; else echo "db=DENIED"; fi
+    if ls /data/companies >/dev/null 2>&1; then echo "brains=READABLE"; else echo "brains=DENIED"; fi
+} > PROBE.txt
 echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
 STUB
-
-docker run -d --name "$NAME" \
-    -p "127.0.0.1:${PORT}:7070" \
-    -v "$WORK/stub:/stub:ro" \
-    -e OVERMIND_AGENT_CMD='sh /stub/agent.sh' \
-    "$IMAGE" >/dev/null
-
-echo "waiting for the server…"
-for _ in $(seq 1 60); do
-    if curl -fsS "${API}/health" >/dev/null 2>&1; then break; fi
-    sleep 1
-done
-curl -fsS "${API}/health" >/dev/null || { echo "the server never answered"; exit 1; }
+# The mount has to be reachable by a uid that is not the one that made it:
+# `mktemp -d` gives 0700, which an unprivileged agent cannot traverse. Without
+# this the caged run fails to *start* its adapter, which would look exactly like
+# the boundary working and would be nothing of the kind.
+chmod 755 "$WORK/stub" "$WORK/stub/agent.sh"
 
 api() { # method path [body]
     if [ $# -ge 3 ]; then
@@ -64,58 +70,127 @@ api() { # method path [body]
     fi
 }
 
-echo "founding a company…"
-COMPANY=$(api POST /companies '{"name":"CI"}')
-COMPANY_ID=$(echo "$COMPANY" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-AGENT_ID=$(echo "$COMPANY" | python3 -c 'import sys,json;print(json.load(sys.stdin)["ceo"]["id"])')
+json() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
 
-echo "opening a task…"
-TASK=$(api POST "/companies/${COMPANY_ID}/tasks" \
-    '{"title":"Leave something behind","description":"Write ARTIFACT.md.","execution_kind":"knowledge"}')
-TASK_ID=$(echo "$TASK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-api POST "/tasks/${TASK_ID}/transition" '{"to":"todo"}' >/dev/null
-STARTED=$(api POST "/tasks/${TASK_ID}/start" "{\"agent_id\":\"${AGENT_ID}\"}")
-SESSION_ID=$(echo "$STARTED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
+# One full scenario: boot the image, found a company, run a knowledge task, and
+# leave the artifacts in $WORK/<label>.json.
+scenario() { # label [extra docker -e args…]
+    local label="$1"; shift
+    NAME="overmind-smoke-$$-${label}"
 
-echo "waiting for the run…"
-for _ in $(seq 1 60); do
-    STATUS=$(api GET "/sessions/${SESSION_ID}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("status",""))')
-    case "$STATUS" in completed|failed) break ;; esac
-    sleep 1
-done
-echo "session: ${STATUS}"
+    docker run -d --name "$NAME" \
+        -p "127.0.0.1:${PORT}:7070" \
+        -v "$WORK/stub:/stub:ro" \
+        -e OVERMIND_AGENT_CMD='sh /stub/agent.sh' \
+        "$@" \
+        "$IMAGE" >/dev/null
 
-# The assertion that matters, and the one nothing weaker would make: a file the
-# agent wrote, not the `Run output` fallback. That fallback has no
-# `relative_path` — it is Overmind's own transcript, and a run that delivers
-# only it delivered nothing.
-api GET "/tasks/${TASK_ID}/artifacts" > "$WORK/artifacts.json"
-python3 - "$WORK/artifacts.json" <<'CHECK'
+    echo "[$label] waiting for the server…"
+    for _ in $(seq 1 60); do
+        if curl -fsS "${API}/health" >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    curl -fsS "${API}/health" >/dev/null || { echo "the server never answered"; exit 1; }
+
+    # The line the server prints about what is holding its agents. Worth showing:
+    # when this pair disagrees with expectation, this is the first thing to read.
+    docker logs "$NAME" 2>&1 | grep -i "agent confinement" || true
+
+    echo "[$label] founding a company…"
+    local company company_id agent_id task task_id started session_id status
+    company=$(api POST /companies '{"name":"CI"}')
+    company_id=$(echo "$company" | json '["id"]')
+    agent_id=$(echo "$company" | json '["ceo"]["id"]')
+
+    echo "[$label] opening a task…"
+    task=$(api POST "/companies/${company_id}/tasks" \
+        '{"title":"Leave something behind","description":"Write ARTIFACT.md.","execution_kind":"knowledge"}')
+    task_id=$(echo "$task" | json '["id"]')
+    api POST "/tasks/${task_id}/transition" '{"to":"todo"}' >/dev/null
+    started=$(api POST "/tasks/${task_id}/start" "{\"agent_id\":\"${agent_id}\"}")
+    session_id=$(echo "$started" | json '["session_id"]')
+
+    echo "[$label] waiting for the run…"
+    for _ in $(seq 1 60); do
+        status=$(api GET "/sessions/${session_id}" | json '.get("status","")')
+        case "$status" in completed|failed) break ;; esac
+        sleep 1
+    done
+    echo "[$label] session: ${status}"
+
+    api GET "/tasks/${task_id}/artifacts" > "$WORK/${label}.json"
+
+    echo "[$label] verifying the audit chain…"
+    # Via a file, not a pipe: the heredoc below *is* this python's stdin.
+    api GET /audit/verify > "$WORK/audit-${label}.json"
+    python3 - "$WORK/audit-${label}.json" <<'CHECK'
 import json, sys
-
-artifacts = json.load(open(sys.argv[1]))["artifacts"]
-files = [a for a in artifacts if a.get("relative_path")]
-if not files:
-    print("FAIL: the run left no file behind.")
-    print("      artifacts:", [a.get("title") for a in artifacts] or "none")
-    print("      A `Run output` on its own is the adapter's transcript, not a deliverable.")
-    sys.exit(1)
-for a in files:
-    print(f"  {a['relative_path']}  ({a['size_bytes']} bytes)")
-    if "day of work" not in (a.get("content") or ""):
-        print("FAIL: the file came back, but not with what was written into it.")
-        sys.exit(1)
-print("the container did a day's work.")
-CHECK
-
-echo "verifying the audit chain…"
-api GET /audit/verify > "$WORK/audit.json"
-python3 - "$WORK/audit.json" <<'CHECK'
-import json, sys
-
 report = json.load(open(sys.argv[1]))
 if not report.get("valid"):
     print("FAIL: the audit chain does not verify:", report)
     sys.exit(1)
 print("  chain verifies over", report["events_checked"], "events.")
+CHECK
+
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+    NAME=""
+}
+
+scenario caged
+scenario uncaged -e OVERMIND_SANDBOX=off
+
+# The assertions. Two of them, and neither is worth much without the other.
+python3 - "$WORK/caged.json" "$WORK/uncaged.json" <<'CHECK'
+import json, sys
+
+def probe(path):
+    artifacts = json.load(open(path))["artifacts"]
+    files = {a["relative_path"]: (a.get("content") or "")
+             for a in artifacts if a.get("relative_path")}
+    if not files:
+        print(f"FAIL: the run left no file behind ({path}).")
+        print("      artifacts:", [a.get("title") for a in artifacts] or "none")
+        print("      A `Run output` on its own is the adapter's transcript, not a deliverable.")
+        sys.exit(1)
+    if "day of work" not in files.get("ARTIFACT.md", ""):
+        print(f"FAIL: the deliverable came back without what was written into it ({path}).")
+        sys.exit(1)
+    got = dict(line.split("=", 1) for line in files.get("PROBE.txt", "").split() if "=" in line)
+    if not got:
+        print(f"FAIL: the probe wrote nothing ({path}).")
+        sys.exit(1)
+    return got
+
+caged, uncaged = probe(sys.argv[1]), probe(sys.argv[2])
+print("  caged:  ", caged)
+print("  uncaged:", uncaged)
+
+fails = []
+
+# The deliverable arrived in both — so the run works, and the boundary is not
+# "the agent could not do anything".
+# Caged: another uid than the server's, and Overmind's own data out of reach.
+if caged["uid"] == "0":
+    fails.append("the caged agent ran as root; ADR-0029's boundary is not in place "
+                 "(and the real CLI refuses --dangerously-skip-permissions as root)")
+if caged.get("db") != "DENIED":
+    fails.append("the caged agent could read overmind.sqlite — the audit chain and "
+                 "every company's data")
+if caged.get("brains") != "DENIED":
+    fails.append("the caged agent could read /data/companies — every company's brain")
+
+# Uncaged: the same probes must *succeed*, or the denials above prove nothing —
+# a typo in the probe would read as security.
+if uncaged["uid"] != "0":
+    fails.append("the uncaged agent was not root, so the pair does not isolate the cage")
+if uncaged.get("db") != "READABLE" or uncaged.get("brains") != "READABLE":
+    fails.append("the uncaged agent could not read Overmind's data either, so the caged "
+                 "denials say nothing about the cage")
+
+if fails:
+    for f in fails:
+        print("FAIL:", f)
+    sys.exit(1)
+
+print("the container did a day's work, and the agent was held while it did.")
 CHECK

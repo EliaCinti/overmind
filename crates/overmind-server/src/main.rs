@@ -12,6 +12,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("overmind-server listening on http://{addr} (db: {db_url})");
+    // Say what is holding agent runs, at the one moment someone is looking.
+    // A cage nobody can see the absence of is how "no run had ever changed a
+    // file" went unnoticed for a month.
+    println!(
+        "agent confinement: {}",
+        overmind_server::sandbox::announce(&state.config)
+    );
     axum::serve(listener, overmind_server::app(state)).await?;
     Ok(())
 }

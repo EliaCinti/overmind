@@ -77,6 +77,16 @@ rely on.
 - **The network.** The cage cannot close it — reaching the API is the job — so
   an agent can talk to any host it can name. What it cannot do is talk to them
   *as you*: see credentials, below.
+- **One run reading another run's directory, in the container.** The cage in the
+  image is an unprivileged uid ([ADR-0029](adr/0029-the-cage-inside-the-container.md)),
+  and every run shares it — so a run can reach a sibling run's worktree, though
+  not enumerate one, since the directories that hold runs are traversable and
+  not listable. macOS does not have this gap: `sandbox-exec` confines each run
+  to its own directory. Closing it on Linux is Landlock's half of ADR-0029;
+  **Docker Desktop cannot close it at all**, because its kernel ships without
+  Landlock. Stated as a difference rather than smoothed over: what both
+  platforms *do* hold is the boundary above — an agent stays out of Overmind's
+  own data.
 - **Someone who edits the database directly.** The audit chain is
   **tamper-evident**, not tamper-proof: `GET /api/audit/verify` detects a
   modified event, it does not prevent one.
@@ -87,10 +97,14 @@ rely on.
 |---|---|---|
 | A web page you visit cannot drive the API | CORS only in dev; explicit `Origin` guard on `/ws` | `browser_boundary.rs` — `a_hostile_page_cannot_reach_the_api`, `the_live_socket_refuses_a_foreign_origin` |
 | A non-browser client (curl, tests, MCP) still works | absent `Origin` is not a browser | `browser_boundary.rs` — `a_non_browser_client_still_works` |
-| An agent cannot read your home, other volumes, or Overmind's own source and database | `sandbox-exec`, deny-by-default ([ADR-0023](adr/0023-os-level-sandboxing.md)) | `sandbox.rs` — `a_caged_agent_cannot_reach_the_machine_it_runs_on`, paired with `the_same_agent_uncaged_reaches_everything` |
+| An agent cannot read your home, other volumes, or Overmind's own source and database | **on macOS:** `sandbox-exec`, deny-by-default ([ADR-0023](adr/0023-os-level-sandboxing.md)) | `sandbox.rs` — `a_caged_agent_cannot_reach_the_machine_it_runs_on`, paired with `the_same_agent_uncaged_reaches_everything` |
 | An agent cannot write outside its own run directory | same | same |
 | …and the cage it is held by is the one we meant, wherever the data dir was configured | the profile is built from **real paths** — absolute, symlinks resolved; a run directory we cannot resolve removes the cage rather than emptying it | `sandbox.rs` — `a_relative_data_dir_is_still_a_real_cage` |
-| An agent that skips the adapter's permission prompts is always one the OS is already holding | one predicate, `sandbox::caged`, asked by both the spawn and the command builder ([ADR-0023](adr/0023-os-level-sandboxing.md) addendum) | `runner.rs` — `the_permission_flag_never_travels_without_the_cage` |
+| An agent in the image cannot read `overmind.sqlite`, its audit chain, or any company's brain | **in the container:** agent work runs as an unprivileged uid below the server, and Overmind's own shelves are `0700` to the server ([ADR-0029](adr/0029-the-cage-inside-the-container.md)) | `.github/scripts/container-smoke.sh` — the caged and uncaged runs of the same probe, asserted against each other |
+| An agent is never root, so the adapter's own refusal to skip permissions as root is never what stops a run | `uid == 0` is not an agent uid, whoever asks | `sandbox.rs` — `root_is_never_the_agent_uid` |
+| A server that cannot drop privilege says so instead of claiming a cage | the uid is a boundary only where we can actually drop to it; otherwise agents are read-only and the startup line names the reason | `sandbox.rs` — `an_agent_uid_only_counts_when_we_can_drop_to_it` |
+| Turning the cage off turns off *every* mechanism, not the one whoever wrote the check had in mind | `OVERMIND_SANDBOX=off` empties the whole set | `sandbox.rs` — `turning_the_cage_off_leaves_no_mechanism_at_all` |
+| An agent that skips the adapter's permission prompts is always one the OS is already holding | one predicate, `sandbox::caged`, asked by both the spawn and the command builder — and now asked of the whole set of mechanisms rather than of any one ([ADR-0023](adr/0023-os-level-sandboxing.md) addendum, [ADR-0029](adr/0029-the-cage-inside-the-container.md)) | `runner.rs` — `the_permission_flag_never_travels_without_the_cage` |
 | An agent has no credentials to push with, even if its repository configures a helper | `GIT_CONFIG_*` at command-line precedence; no ssh, no prompt, no askpass | `sandbox.rs` — `git_still_works_and_has_no_credentials_to_push_with` |
 | …while git itself still works locally | `GIT_CONFIG_GLOBAL=/dev/null` rather than denying `~/.gitconfig` | same |
 | An agent cannot exceed its monthly cap, in tasks *or* conversation | atomic checkout gate; per-turn gate ([ADR-0012](adr/0012-budgets-and-governance.md), [ADR-0022](adr/0022-conversational-spend-under-budget.md)) | `governance.rs` — `start_is_stopped_when_over_budget`; `turn_budget.rs` — `an_agent_out_of_budget_is_refused_before_it_spends` |

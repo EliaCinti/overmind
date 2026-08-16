@@ -28,6 +28,12 @@ tokio = { version = "1", features = [
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 
+# One call: `geteuid`, to ask whether we are privileged enough to drop privilege
+# (ADR-0029). The standard library has no way to ask, and guessing at it would
+# mean guessing at whether a security boundary exists.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
