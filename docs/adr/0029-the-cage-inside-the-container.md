@@ -154,10 +154,25 @@ stylistic — `pre_exec` runs after `fork` in a multithreaded process, where
 anything that allocates can deadlock on a lock another thread held at fork time,
 and every ergonomic Landlock wrapper allocates.
 
-**Best-effort is refused.** If the kernel advertises Landlock and the ruleset
-cannot be applied, that is a failure, not a quiet downgrade to less protection
-than we claimed. The failure mode ADR-0023 chose — the agent does not start,
-loudly — is the one that applies.
+**Best-effort is refused**, which is why this is written against the raw ABI
+rather than through a wrapper crate. The ergonomic ones default to enforcing
+less than you asked for when the kernel is older than your policy — a default
+that turns "the cage is on" into a sentence with no fixed meaning. Here the
+policy is computed from the ABI the kernel *reports*, every right that ABI knows
+is handled (a right nobody handles is a right granted everywhere), and a rule
+that fails to be added fails the whole ruleset rather than shrinking it.
+
+Two details are load-bearing enough to name. `landlock_path_beneath_attr` is
+declared **packed** — twelve bytes, not sixteen — so a natural `#[repr(C)]`
+would put the file descriptor four bytes late and grant rules nobody wrote,
+silently. And `LANDLOCK_ACCESS_FS_IOCTL_DEV` (ABI 5) is deliberately *not*
+handled: it governs ioctls on device files rather than reach into the
+filesystem, and handling it would deny ordinary tools the terminal-shaped ioctls
+they make on their own stdio.
+
+The writable set is shared with the macOS profile rather than written twice,
+because two lists would eventually disagree and the disagreement would be a cage
+that grants different things depending on which kernel you are on.
 
 ### 3. `available()` stops being a boolean
 
@@ -289,3 +304,28 @@ no longer root cannot traverse it. The adapter failed to *start*, which looks
 exactly like the boundary working and is nothing of the kind. Anything mounted
 for an agent now has to be reachable by a uid that did not create it — a general
 consequence of this ADR, and the first of what will be several.
+
+### The Landlock layer is written but not yet witnessed
+
+Stated plainly because this ADR's whole argument is that measurement beat
+intuition twice already. The Landlock code compiles on Linux and its
+decidable invariants are held by tests that run everywhere: the packed
+structure's size, the policy growing with the reported ABI and never past it,
+and read-only meaning read-only at every ABI. What has **not** run anywhere yet
+is the behavioural pair — `a_landlocked_agent_cannot_leave_its_run_directory`,
+which asserts a run cannot write beside its own directory while the identical
+uncaged run can.
+
+It cannot run on this machine: Docker Desktop's kernel has no Landlock, which is
+the finding this ADR opens with. The test skips itself there, honestly and
+loudly, the way the `sandbox-exec` tests skip off macOS. CI's ubuntu job is
+where it runs, and that job exists because M19's first slice put it there for
+precisely this class of code.
+
+**Until that pair is green, one consequence deserves care.** On bare-metal Linux
+with a Landlock kernel and no agent uid, Landlock is the *only* mechanism, so it
+alone makes `caged()` true and therefore grants
+`--dangerously-skip-permissions`. If the ruleset were subtly wrong — a
+mis-declared structure, a rule silently not added — that would be the one
+combination ADR-0023 forbids: an uncaged agent with permissions skipped. In the
+image this does not arise, because the uid is holding the run regardless.

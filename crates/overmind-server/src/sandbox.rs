@@ -69,12 +69,22 @@ pub struct AgentUser {
 /// macOS profile is part of choosing it — a profile that cannot be expressed is
 /// a mechanism that is not available — so it is carried here rather than built
 /// twice.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Confinement {
     /// macOS: the deny-by-default `sandbox-exec` profile (ADR-0023).
     pub profile: Option<String>,
     /// The image: agent work runs below the server, as its own uid (ADR-0029).
     pub agent_user: Option<AgentUser>,
+    /// Linux with a kernel that has it: confinement to the run's own directory,
+    /// which the uid alone does not give (ADR-0029).
+    ///
+    /// Built here rather than at the spawn for the same reason the macOS
+    /// profile is: building it *is* how we learn whether it can be had, and a
+    /// mechanism promised by one function and found impossible by the next is
+    /// how an agent ends up holding the permission flag without a cage. Shared
+    /// rather than cloned — a ruleset is a file descriptor, not a value.
+    #[cfg(target_os = "linux")]
+    pub landlock: Option<std::sync::Arc<crate::landlock::Ruleset>>,
 }
 
 impl Confinement {
@@ -85,8 +95,34 @@ impl Confinement {
     /// that asked about one named mechanism would answer "no cage" on a
     /// platform that has a different one.
     pub fn is_real(&self) -> bool {
-        self.profile.is_some() || self.agent_user.is_some()
+        if self.profile.is_some() || self.agent_user.is_some() {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return self.landlock.is_some();
+        }
+        #[allow(unreachable_code)]
+        false
     }
+}
+
+/// What a run may write, beyond the system paths every process needs.
+///
+/// Shared by both mechanisms that need the answer, because two lists would
+/// eventually disagree and the disagreement would be a cage that grants
+/// different things depending on which kernel you are on.
+fn writable_paths(config: &Config, cage: &Cage<'_>) -> Vec<PathBuf> {
+    let mut writable: Vec<PathBuf> = Vec::new();
+    writable.extend(real_path(cage.run_dir));
+    writable.extend(real_path(&std::env::temp_dir()));
+    // Where the adapter keeps credentials and state. In the image this is the
+    // agent's own home; on a machine it is the user's, and the run would fail
+    // without it long before it failed usefully.
+    writable.extend(config.agent_home.iter().filter_map(|p| real_path(p)));
+    writable.extend(adapter_paths().iter().filter_map(|p| real_path(p)));
+    writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
+    writable
 }
 
 /// What agent runs will get, for the line the server prints at startup.
@@ -107,6 +143,10 @@ pub fn announce(config: &Config) -> String {
     }
     if let Some(u) = agent_user(config) {
         held.push(format!("unprivileged uid {}", u.uid));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(abi) = crate::landlock::abi() {
+        held.push(format!("Landlock (ABI {abi})"));
     }
     if held.is_empty() {
         // Naming the likeliest cause: the image sets the uid, so seeing this
@@ -177,6 +217,43 @@ pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
             None
         },
         agent_user: agent_user(config),
+        #[cfg(target_os = "linux")]
+        landlock: build_landlock(config, cage),
+    }
+}
+
+/// The Landlock ruleset for this run, if this kernel has Landlock at all.
+///
+/// A failure is this layer being unavailable, never this layer being smaller
+/// than advertised — so it is reported and dropped rather than narrowed. The
+/// run is not left uncaged by that: in the image the uid is still holding it,
+/// and where nothing is, [`Confinement::is_real`] answers false and the agent
+/// is read-only.
+#[cfg(target_os = "linux")]
+fn build_landlock(
+    config: &Config,
+    cage: &Cage<'_>,
+) -> Option<std::sync::Arc<crate::landlock::Ruleset>> {
+    crate::landlock::abi()?;
+    // Enough of the system to exist: the loader, the shells, the toolchain —
+    // the same shape as the macOS profile's read grants, spelled for Linux.
+    // `/dev` is in the writable set because `/dev/null` is, and a run that
+    // cannot open it fails in ways nobody enjoys reading.
+    let readable: Vec<&Path> = [
+        "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/run",
+    ]
+    .iter()
+    .map(Path::new)
+    .collect();
+    let mut writable = writable_paths(config, cage);
+    writable.push(PathBuf::from("/dev"));
+
+    match crate::landlock::build(&writable, &readable) {
+        Ok(rules) => Some(std::sync::Arc::new(rules)),
+        Err(e) => {
+            eprintln!("landlock unavailable for this run (ignored): {e}");
+            None
+        }
     }
 }
 
@@ -243,16 +320,18 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
     // cage and no `--dangerously-skip-permissions` — the same safe direction
     // an unquotable path takes below.
-    let mut writable: Vec<PathBuf> = vec![real_path(cage.run_dir)?];
-    // Temp: compilers, package managers and the test stubs all expect it.
-    // This session's TMPDIR specifically, resolved through the /var -> /private
-    // symlink because sandbox rules match the real path — granting all of
-    // `/private/var/folders` would hand over every per-user cache on the
-    // machine to buy the same thing.
+    real_path(cage.run_dir)?;
+    // One list, shared with Landlock: two would eventually disagree, and the
+    // disagreement would be a cage that grants different things depending on
+    // which kernel you happen to be on.
+    let mut writable = writable_paths(config, cage);
+    // Temp: compilers, package managers and the test stubs all expect it. This
+    // session's TMPDIR is already in the shared list, resolved through the
+    // /var -> /private symlink because sandbox rules match the real path —
+    // granting all of `/private/var/folders` would hand over every per-user
+    // cache on the machine to buy the same thing. `/private/tmp` is the macOS
+    // spelling of the other one, and belongs only here.
     writable.push(PathBuf::from("/private/tmp"));
-    writable.extend(real_path(&std::env::temp_dir()));
-    writable.extend(adapter_paths().iter().filter_map(|p| real_path(p)));
-    writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
 
     let mut allow_write = String::new();
     for p in &writable {
@@ -321,6 +400,20 @@ pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
     };
     if let Some(user) = held.agent_user {
         drop_to(&mut cmd, config, user);
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(rules) = held.landlock {
+        // The child restricts *itself*, which is what Landlock is: no helper
+        // process, no wrapper binary, nothing to install. `pre_exec` runs after
+        // the uid change and before `exec`, which is exactly right — the
+        // restriction needs no privilege, and applying it before `exec` is what
+        // makes it cover the adapter and everything the adapter starts.
+        //
+        // The closure owns a share of the ruleset, so the descriptor outlives
+        // the builder and closes when the command is done with it.
+        unsafe {
+            cmd.pre_exec(move || crate::landlock::restrict(rules.as_raw_fd()));
+        }
     }
     cmd
 }
@@ -680,7 +773,14 @@ mod tests {
                 run_dir: Path::new("/tmp/x"),
             },
         );
-        assert_eq!(held, Confinement::default());
+        assert!(held.profile.is_none());
+        assert!(held.agent_user.is_none());
+        #[cfg(target_os = "linux")]
+        assert!(
+            held.landlock.is_none(),
+            "the escape hatch must reach the kernel layer too, not only the \
+             two a reader happens to remember"
+        );
         assert!(!held.is_real());
     }
 

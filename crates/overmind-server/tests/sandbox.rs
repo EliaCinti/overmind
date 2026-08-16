@@ -291,3 +291,70 @@ async fn git_still_works_and_has_no_credentials_to_push_with() {
         "no credentials reach the agent, whatever the repo asked for: {out:?}"
     );
 }
+
+/// Landlock's half of ADR-0029: a run cannot leave its own directory.
+///
+/// This is the property the unprivileged uid does *not* give. Every run shares
+/// that uid, so one run can reach a sibling's worktree; macOS has never allowed
+/// that, and on a kernel with Landlock neither does Linux.
+///
+/// The data directory is deliberately **outside temp**. Temp is granted
+/// outright — compilers and package managers expect it — so a run directory
+/// under it would be writable through that grant and the run directory's own
+/// rule would never have to work. That is precisely how the empty cage of
+/// 2026-08-13 went unnoticed for a month.
+///
+/// Paired, like every probe in this file: uncaged, the same script escapes.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_landlocked_agent_cannot_leave_its_run_directory() {
+    if overmind_server::landlock::abi().is_none() {
+        eprintln!("no Landlock in this kernel — skipping");
+        return;
+    }
+    const ESCAPE_STUB: &str = r#"#!/bin/sh
+echo inside > mine.txt
+( echo out > ../escaped.txt 2>/dev/null && echo REACHABLE || echo DENIED ) > sibling.txt
+( ls /etc >/dev/null 2>&1 && echo REACHABLE || echo DENIED ) > etc.txt
+echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+
+    let caged_dir = std::path::PathBuf::from(format!(
+        "target/overmind-ll-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let caged = probe_at(true, ESCAPE_STUB, caged_dir.clone()).await;
+    let _ = std::fs::remove_dir_all(&caged_dir);
+
+    let open_dir = std::path::PathBuf::from(format!(
+        "target/overmind-ll-open-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let uncaged = probe_at(false, ESCAPE_STUB, open_dir.clone()).await;
+    let _ = std::fs::remove_dir_all(&open_dir);
+
+    // The run still works: the cage is a boundary, not a wall around everything.
+    assert_eq!(
+        caged.get("mine.txt").map(String::as_str),
+        Some("inside"),
+        "a landlocked agent must still write its own run directory: {caged:?}"
+    );
+    assert_eq!(
+        caged.get("etc.txt").map(String::as_str),
+        Some("REACHABLE"),
+        "the system it needs to exist stays readable: {caged:?}"
+    );
+    // The property this layer exists for.
+    assert_eq!(
+        caged.get("sibling.txt").map(String::as_str),
+        Some("DENIED"),
+        "a landlocked agent must not write beside its own run directory: {caged:?}"
+    );
+    // Without which the denial above proves nothing.
+    assert_eq!(
+        uncaged.get("sibling.txt").map(String::as_str),
+        Some("REACHABLE"),
+        "uncaged, the identical script must escape — otherwise the caged \
+         denial is a broken probe, not a boundary: {uncaged:?}"
+    );
+}
