@@ -207,6 +207,15 @@ pub struct Config {
     /// credentials and session state there, and the server's home is not the
     /// agent's to use even when it could reach it.
     pub agent_home: Option<PathBuf>,
+    /// Where host repositories are mounted (`OVERMIND_REPOS_DIR`, `/repos` in
+    /// the image).
+    ///
+    /// Set so the server can *say* it. A workspace's `cwd` has to be the
+    /// in-container path, and the way you learned that was a comment in
+    /// `docker-compose.yml` — so the failure mode was typing your own path,
+    /// being told it "is not a directory", and having no idea why. Knowing the
+    /// mount point turns that into a sentence that names it.
+    pub repos_dir: Option<PathBuf>,
     /// Give each company its own brain under the data dir (ADR-0024).
     /// `OVERMIND_MANAGED_BRAIN=off` restores M7's behaviour — one shared brain,
     /// wherever `memory_cmd` points — for the user who deliberately wants their
@@ -230,6 +239,7 @@ impl Default for Config {
             agent_uid: None,
             agent_gid: None,
             agent_home: None,
+            repos_dir: None,
             managed_brain: true,
         }
     }
@@ -290,6 +300,10 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok()),
             agent_home: std::env::var("OVERMIND_AGENT_HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+            repos_dir: std::env::var("OVERMIND_REPOS_DIR")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),

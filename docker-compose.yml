@@ -1,8 +1,9 @@
 # Quickstart: `docker compose up --build` → http://localhost:7070
 #
-# Persists the DB, worktrees and (optional) managed brains on a named volume.
-# To let agents work on your repos, mount them and point tasks' workspace cwd
-# at the in-container path (see the commented `volumes` entry).
+# The image brings its own agent CLI, so a task works out of the box once the
+# agent can authenticate — see ANTHROPIC_API_KEY below, or `claude login` if you
+# are on a subscription. The database, worktrees and (optional) managed brains
+# persist on a named volume; so do the agent's credentials.
 
 services:
   overmind:
@@ -12,25 +13,41 @@ services:
       # Loopback ONLY, on purpose. Overmind has no authentication, and its API
       # starts tasks that run a CLI on this machine — publishing it on every
       # interface would hand anyone who can reach the port the ability to run
-      # commands here. Do not change this to "7070:7070" until M10 lands auth;
+      # commands here. Do not change this to "7070:7070" until auth lands;
       # to reach it from another machine, tunnel: `ssh -L 7070:localhost:7070`.
       - "127.0.0.1:7070:7070"
     volumes:
       - overmind-data:/data
-      # Agent credentials. Only needed if you sign in with `claude login`
-      # (a subscription) rather than passing a key below: the CLI writes its
-      # session under $HOME, which is NOT on /data and would be lost on every
-      # rebuild. With ANTHROPIC_API_KEY you can leave this commented out.
-      # - overmind-agent-home:/root/.claude
-      # Mount host repositories agents will work on, e.g.:
+      # The agent's credentials, kept across rebuilds.
+      #
+      # The CLI writes its session under the agent's $HOME, which is not on
+      # /data — without this volume a `claude login` is lost on the next
+      # `docker compose up --build`, and the failure looks like a login that
+      # never sticks. Mounted by default because "your sign-in survives" is not
+      # a thing anyone should have to opt into. The server takes ownership of it
+      # at startup: a fresh named volume arrives owned by root, and the agent is
+      # not root (ADR-0029).
+      - overmind-agent-home:/home/agent/.claude
+      # Repositories agents work on. Uncomment and point at yours:
       # - ${HOME}/code:/repos:rw
-      # NB: a workspace's `cwd` must then be the IN-CONTAINER path (/repos/x),
-      # not the host path — the container cannot see /Users/... .
+      #
+      # A workspace's `cwd` is then the IN-CONTAINER path — /repos/your-project,
+      # not /Users/you/code/your-project. If you get that wrong the server now
+      # tells you what it can actually see, rather than "not a directory".
+      #
+      # On Linux the mounted files keep their host ownership, and the agent runs
+      # as uid 10001, so a `code` task may not be able to write them. Set
+      # OVERMIND_AGENT_UID (and _GID) below to your own `id -u` if so — the
+      # boundary is that the agent is not the *server*, and any unprivileged uid
+      # holds it.
     environment:
-      # The agent adapter command. Configure to the CLI you installed/derived
-      # into the image, e.g. Claude Code:
-      # OVERMIND_AGENT_CMD: 'claude -p "$OVERMIND_TASK_PROMPT" --output-format json'
+      # How the agent authenticates. Either this, or `claude login` once inside
+      # the container (`docker compose exec --user agent overmind claude login`),
+      # which the volume above then keeps.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Align the agent with your host user so it can write mounted repositories:
+      # OVERMIND_AGENT_UID: "1000"
+      # OVERMIND_AGENT_GID: "1000"
       # Optional organizational memory (Wadachi or any MCP memory server).
       # Leave BRAIN_DIR out of the command: Overmind sets it per company
       # (ADR-0024), and a shell assignment here would override it and put every
@@ -43,5 +60,4 @@ services:
 
 volumes:
   overmind-data:
-  # Uncomment together with the /root/.claude mount above.
-  # overmind-agent-home:
+  overmind-agent-home:

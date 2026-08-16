@@ -37,6 +37,23 @@ RUN apt-get update \
          git ripgrep python3 python3-venv gh nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# The agent CLI, which is the whole point of the image having a toolchain.
+#
+# Until now the image installed git, gh, ripgrep, python3 and node — everything
+# an agent's *work* needs — and not the thing that does the work. The server's
+# default adapter is `claude -p …`, so every task in a fresh container died at
+# the spawn with `command not found`, and the fix was a comment in
+# docker-compose.yml telling you to derive your own image.
+#
+# Pinned, and overridable at build time (`--build-arg CLAUDE_CODE_VERSION=…`):
+# an image that installs "latest" is an image that changes under you between two
+# builds of the same commit. `OVERMIND_AGENT_CMD` remains the way to point
+# Overmind at a different adapter entirely (ADR-0003's genericity is about the
+# *memory* provider, but the same escape hatch exists here).
+ARG CLAUDE_CODE_VERSION=2.1.233
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force
+
 COPY --from=server /app/target/release/overmind-server /usr/local/bin/overmind-server
 COPY --from=web /web/dist /app/web/dist
 
@@ -62,13 +79,15 @@ ENV OVERMIND_AGENT_UID=10001 \
 ENV OVERMIND_WEB_DIR=/app/web/dist \
     OVERMIND_DB=sqlite:///data/overmind.sqlite \
     OVERMIND_DATA_DIR=/data \
-    OVERMIND_ADDR=0.0.0.0:7070
+    OVERMIND_ADDR=0.0.0.0:7070 \
+    OVERMIND_REPOS_DIR=/repos
 
 WORKDIR /app
-# Modes are the server's to set at startup — it knows which of these hold runs
-# and which hold its own shelves, and it has to do it on every boot anyway for
-# a volume that predates this layout.
-RUN mkdir -p /data
+# Modes and ownership are the server's to set at startup — it knows which of
+# these hold runs and which hold its own shelves, and it has to do it on every
+# boot anyway for volumes that predate this layout. `/repos` exists empty so
+# that a container with nothing mounted can still say so.
+RUN mkdir -p /data /repos
 VOLUME /data
 EXPOSE 7070
 

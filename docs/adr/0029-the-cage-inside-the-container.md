@@ -188,6 +188,23 @@ agent CLI and keeps `~/.claude` for the agent uid on a named volume;
 would be a credential in the image, and one living only in the container is one
 lost on the next `docker compose up --build`.
 
+The volume is mounted **by default**, not offered as a commented-out line: "your
+sign-in survives a rebuild" is not a property anyone should have to discover.
+And because a fresh named volume arrives owned by root and the agent is not
+root, the server takes ownership of the agent's home at startup — the same place
+and the same reason as the data directory's layout. Without it a `claude login`
+succeeds and then cannot write what it just obtained, and the symptom is a
+sign-in that never sticks: a failure a long way from its cause, which is the
+shape of defect this milestone keeps finding.
+
+The same startup step is what makes `OVERMIND_AGENT_UID` a real escape hatch
+rather than a setting that half-works. On Linux a mounted repository keeps its
+host ownership, so an agent on uid 10001 may not be able to write it — and a
+`code` task needs to, because a worktree's git metadata lives in the repository
+rather than in the run directory. Pointing the uid at your own `id -u` fixes
+that, and the boundary survives it: what this ADR requires is that the agent is
+not the *server*, and any unprivileged uid holds that.
+
 ## Alternatives considered
 
 - **bubblewrap.** The roadmap's first candidate, and ADR-0023's own guess.

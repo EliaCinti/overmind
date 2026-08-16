@@ -62,6 +62,37 @@ STUB
 # the boundary working and would be nothing of the kind.
 chmod 755 "$WORK/stub" "$WORK/stub/agent.sh"
 
+# Does the image ship an agent CLI, and can the agent actually run it?
+#
+# The first defect this milestone opens with is that it did not — the server's
+# default adapter is `claude -p …`, so every task died at the spawn with
+# `command not found`. This costs nothing to check and needs no credentials: an
+# unauthenticated CLI still parses its arguments and reaches the API boundary,
+# so the reply is `Not logged in`. Which is precisely the interesting answer,
+# because it can only be reached by a CLI that exists, is runnable by this uid,
+# and **was allowed the permission flag** — as root that flag is refused before
+# authentication is ever attempted, and the reply is a refusal instead.
+echo "checking the image's agent CLI…"
+docker run --rm --user 10001:10001 -e HOME=/home/agent "$IMAGE" \
+    timeout 60 claude -p hi --dangerously-skip-permissions --output-format json \
+    > "$WORK/cli.txt" 2>&1 || true
+python3 - "$WORK/cli.txt" <<'CHECK'
+import sys
+said = open(sys.argv[1]).read()
+if "not found" in said:
+    print("FAIL: the image ships no agent CLI — a task would die at the spawn.")
+    print("     ", said.strip()[:200]); sys.exit(1)
+if "root/sudo privileges" in said:
+    print("FAIL: the CLI refused the permission flag, so this uid is root after all.")
+    print("     ", said.strip()[:200]); sys.exit(1)
+if "Not logged in" not in said:
+    print("NOTE: the CLI answered something unexpected. Not fatal — it may be")
+    print("      authenticated in this environment — but worth reading:")
+    print("     ", said.strip()[:300])
+else:
+    print("  the CLI is present, runs as the agent, and was allowed the flag.")
+CHECK
+
 api() { # method path [body]
     if [ $# -ge 3 ]; then
         curl -fsS -X "$1" "${API}$2" -H 'content-type: application/json' -d "$3"

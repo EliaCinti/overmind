@@ -1234,6 +1234,55 @@ struct CreateWorkspace {
     is_primary: Option<bool>,
 }
 
+/// Why a workspace path is not there, said in terms the person can act on.
+///
+/// `cwd '/Users/me/code/thing' is not a directory` is true and useless in a
+/// container: the path exists perfectly well, on the other side of a boundary
+/// the message never mentions. The path a workspace needs is the **in-container**
+/// one, and until now the only place that was written down was a comment in
+/// `docker-compose.yml` — so the way you found out was by getting this error and
+/// guessing.
+///
+/// So when a mount point is configured, name it and say what is actually
+/// mounted. An empty one is worth saying too: "nothing is mounted" is a
+/// different problem from "you named the wrong path", and they are indeed the
+/// two things that happen.
+fn unreachable_cwd(repos_dir: Option<&std::path::Path>, cwd: &str) -> String {
+    let plain = format!("cwd '{cwd}' is not a directory");
+    let Some(repos) = repos_dir else {
+        return plain;
+    };
+    let mounted: Vec<String> = std::fs::read_dir(repos)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let repos = repos.display();
+    if mounted.is_empty() {
+        return format!(
+            "{plain}. Overmind is running in a container, so a workspace path has to be one \
+             *it* can see — host paths are not reachable from in here. Nothing is mounted at \
+             {repos} yet: add your repository to the `volumes` of docker-compose.yml, e.g. \
+             `- ${{HOME}}/code:{repos}:rw`, and use the {repos}/… path here."
+        );
+    }
+    let mut names: Vec<String> = mounted;
+    names.sort();
+    let listed = names
+        .iter()
+        .map(|n| format!("{repos}/{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{plain}. Overmind is running in a container, so a workspace path has to be one *it* \
+         can see. Mounted right now: {listed}."
+    )
+}
+
 async fn create_workspace(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -1243,9 +1292,9 @@ async fn create_workspace(
         return Err(ApiError::Invalid("workspace name must not be empty".into()));
     }
     if !std::path::Path::new(&req.cwd).is_dir() {
-        return Err(ApiError::Invalid(format!(
-            "cwd '{}' is not a directory",
-            req.cwd
+        return Err(ApiError::Invalid(unreachable_cwd(
+            state.config.repos_dir.as_deref(),
+            &req.cwd,
         )));
     }
     let is_primary = req.is_primary.unwrap_or(true);
@@ -3346,4 +3395,54 @@ async fn list_events(
 async fn verify_chain(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let report = audit::verify(&state.pool).await?;
     Ok(Json(serde_json::to_value(report)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Outside a container the old message is still the right one: there is no
+    /// mount point to name, and inventing advice about one would be noise.
+    #[test]
+    fn without_a_mount_point_the_message_stays_plain() {
+        let said = unreachable_cwd(None, "/nope");
+        assert_eq!(said, "cwd '/nope' is not a directory");
+    }
+
+    /// The whole point: a host path is not wrong so much as *unreachable*, and
+    /// the message has to say which paths are reachable instead.
+    #[test]
+    fn in_a_container_the_message_names_what_is_mounted() {
+        let repos = std::env::temp_dir().join(format!("overmind-repos-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(repos.join("my-project")).expect("mount point");
+        std::fs::create_dir_all(repos.join("another")).expect("second repo");
+        // A loose file is not a repository anyone can point a workspace at.
+        std::fs::write(repos.join("notes.txt"), b"x").expect("stray file");
+
+        let said = unreachable_cwd(Some(&repos), "/Users/me/code/my-project");
+        let _ = std::fs::remove_dir_all(&repos);
+
+        assert!(said.contains("/Users/me/code/my-project"), "{said}");
+        assert!(said.contains("container"), "{said}");
+        assert!(said.contains("my-project"), "{said}");
+        assert!(said.contains("another"), "{said}");
+        assert!(
+            !said.contains("notes.txt"),
+            "only directories are workspaces: {said}"
+        );
+    }
+
+    /// "Nothing is mounted" and "you named the wrong path" are the two things
+    /// that actually happen, and they need different advice.
+    #[test]
+    fn an_empty_mount_point_says_so_and_shows_how_to_fill_it() {
+        let repos = std::env::temp_dir().join(format!("overmind-empty-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&repos).expect("mount point");
+
+        let said = unreachable_cwd(Some(&repos), "/Users/me/code/thing");
+        let _ = std::fs::remove_dir_all(&repos);
+
+        assert!(said.contains("Nothing is mounted"), "{said}");
+        assert!(said.contains("docker-compose.yml"), "{said}");
+    }
 }

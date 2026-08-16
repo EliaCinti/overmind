@@ -413,10 +413,11 @@ fn chown_tree(_path: &Path, _user: AgentUser) -> std::io::Result<()> {
 /// Overmind runs as that user and there is no second party to keep out;
 /// quietly re-permissioning somebody's directory is not this function's call.
 pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
-    if agent_user(config).is_none() {
+    let Some(user) = agent_user(config) else {
         return Ok(());
-    }
+    };
     let root = config.data_dir.clone();
+    let home = config.agent_home.clone();
     tokio::task::spawn_blocking(move || {
         mkdir_mode(&root, 0o755)?;
         // Overmind's own shelves.
@@ -427,10 +428,35 @@ pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
         for name in ["sessions", "worktrees", "chat", "meetings"] {
             mkdir_mode(&root.join(name), 0o711)?;
         }
+        // The agent's home is the agent's. A named volume mounted there — which
+        // is how credentials survive a rebuild — arrives owned by root and empty,
+        // so without this the adapter CLI cannot write the session it just
+        // authenticated, and the failure surfaces as a login that never sticks.
+        //
+        // Only the home itself and the CLI's own directory: whatever the agent
+        // has already put in there is its own, and re-owning a tree on every
+        // boot would be a slow way to say nothing.
+        if let Some(home) = home {
+            mkdir_mode(&home, 0o700)?;
+            chown_one(&home, user)?;
+            let cli_state = home.join(".claude");
+            mkdir_mode(&cli_state, 0o700)?;
+            chown_one(&cli_state, user)?;
+        }
         Ok(())
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+#[cfg(unix)]
+fn chown_one(path: &Path, user: AgentUser) -> std::io::Result<()> {
+    std::os::unix::fs::lchown(path, Some(user.uid), Some(user.gid))
+}
+
+#[cfg(not(unix))]
+fn chown_one(_path: &Path, _user: AgentUser) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Create a directory if absent and set its mode either way.
