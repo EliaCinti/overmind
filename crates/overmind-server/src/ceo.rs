@@ -883,7 +883,12 @@ pub(crate) async fn run_adapter(
     .await?;
     tx.commit().await?;
 
-    let outcome = spawn_adapter(state, cwd, prompt, traits, memory_context).await;
+    // The cap, handed to the adapter as well as guarded around it (ADR-0030).
+    // Taken from the check made just above — before this turn reserved — so it
+    // is what remains under the cap once *other* work in flight is counted, and
+    // not this turn's own placeholder counted against itself.
+    let ceiling = check.headroom();
+    let outcome = spawn_adapter(state, cwd, prompt, traits, memory_context, ceiling).await;
 
     // Whatever happened, the money is spent and the hold must go: a reservation
     // that outlives its turn is a leak only a restart would clear.
@@ -902,6 +907,7 @@ async fn spawn_adapter(
     prompt: &str,
     traits: &str,
     memory_context: Option<&str>,
+    ceiling_cents: Option<i64>,
 ) -> Result<String, CeoError> {
     // One definition of the adapter invocation, shared with task runs
     // (ADR-0021) — it used to exist here in a second copy that named no model.
@@ -915,8 +921,12 @@ async fn spawn_adapter(
     crate::sandbox::hand_over(&state.config, cwd)
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot hand the scratch dir to the agent: {e}")))?;
-    let agent_cmd =
-        crate::runner::agent_command(state, crate::sandbox::caged(&state.config, &cage), None);
+    let agent_cmd = crate::runner::agent_command(
+        state,
+        crate::sandbox::caged(&state.config, &cage),
+        None,
+        ceiling_cents,
+    );
     let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);

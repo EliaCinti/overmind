@@ -84,9 +84,29 @@ stated gap lives:
 > turn's true cost.
 
 This does not close that gap; it narrows it from *a whole turn* to *the
-adapter's own overshoot*, which was 60% of a small cap in the one measurement we
-have. Recorded as a narrowing, not a fix, because claiming the second would be
-the mistake this project keeps finding in its own past.
+adapter's own overshoot*. Recorded as a narrowing, not a fix, because claiming
+the second would be the mistake this project keeps finding in its own past —
+and because the overshoot turns out to be large:
+
+| ceiling given | actually spent | over by |
+|---|---|---|
+| $0.05 (bare probe) | $0.080729 | 1.6× |
+| $0.05 (a real task through Overmind) | $0.13 | 2.6× |
+
+It gets proportionally **worse** the smaller the ceiling, because a run's fixed
+cost — the context loaded before a single useful token — does not shrink with
+it. So this is a coarse brake and must be described as one: it will stop a
+runaway agent long before a flat estimate would, and it will not hold anyone to
+a number. A cap of a few cents is not a cap of a few cents.
+
+Two consequences follow, and both are deliberate. The ledger records what was
+truly spent, not the ceiling, so an agent can end a run *over* its cap — and the
+next gate check then refuses it, which is the correct behaviour and would be
+wrong to smooth over. And it is passed in **every** economy, not only under a
+key: the cap is also the brake on a looping agent, a plan's quota is exactly
+what a loop burns, and the brake is the same brake whether or not the number
+means dollars. That generalises what this ADR first proposed, on the ADR's own
+reasoning that the cap survives and only its meaning is restated.
 
 `error_max_budget_usd` is recognised and reported as what it is — the agent hit
 its ceiling — rather than as a generic adapter failure. A person who is told
