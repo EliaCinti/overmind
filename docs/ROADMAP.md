@@ -269,6 +269,28 @@ Overmind has only ever been *run* on macOS. The container is how everyone else i
 
 **Docker is not a substitute for the cage, and the distinction is the whole point.** A container isolates itself from the *host*; the cage isolates the *agent* from Overmind. Inside the image an agent sits next to `overmind.sqlite` and its audit chain, every company's brain, and the per-run MCP token files. The threat model's actual adversary — an agent that misread its task, or a prompt injection inside a document someone handed it — is already inside.
 
+## M20 — How you pay, and what the cap can honestly promise `in-progress`
+A subscription and an API key are not two ways to configure the same thing. They are two different economies, and Overmind has been quietly assuming one of them since M6: `budget_cents`, `spent_cents` and the monthly cap are **money**, which is exactly right when you hold an API key and means nothing at all when you hold a subscription. Under a plan there is no dollar to run out of — there is a window, and a quota inside it, and Overmind can see neither.
+
+**Measured first, before designing anything** (2026-08-17, claude 2.1.233):
+
+| | what the CLI will tell us |
+|---|---|
+| which economy we are in | ✅ `claude auth status --json` → `authMethod`, `apiKeySource`. Free, local, machine-readable. Clean when there is one auth source (`api_key` in the container); ambiguous when there are two (`claude.ai` **and** `apiKeySource` on a host that has both) |
+| dollars spent on a run | ✅ already in the envelope, already in the ledger since M18 |
+| a hard ceiling inside the adapter | ✅ `--max-budget-usd`, works only with `--print` — which is how we invoke it. Fails recognisably: `subtype: "error_max_budget_usd"`, `terminal_reason: "budget_exhausted"`. **But it overshoots**: a $0.05 cap spent $0.080729, because it stops *after* exceeding rather than pre-authorising |
+| quota remaining on a plan | ❌ **nowhere**. The authenticated envelope carries `usage`, `modelUsage`, `service_tier`, `total_cost_usd` and no quota field of any kind. `/usage` exists only inside an interactive session. `auth status` does not carry it |
+
+So the life-line asked for on the API side is buildable and mostly already paid for; the one asked for on the subscription side **cannot be built truthfully**, and the interesting work is deciding what to show instead of a number we would be inventing.
+
+- ☐ **A · The economy is a known fact, not an assumption.** Detect it, store it, show it. Everything below forks on it, and a system that guesses wrong bills you or lies to you.
+- ☐ **B · With a key, the cap becomes a ceiling instead of an estimate.** Pass the remaining budget as `--max-budget-usd`, which closes M18's own stated gap — *"a turn is still not priced before it runs — the estimate is flat, so an agent can overrun by the difference"*. It narrows that difference to the adapter's own overshoot instead of a whole turn. Plus the life-line itself: percentage of cap remaining, which is a view over data M6 and M18 already made correct.
+- ☐ **C · With a subscription, say what is true.** Overmind knows what *it* spent in the window — every `cost_event` since M18 — and does not know what your plan has left, because you use the CLI outside Overmind too. Showing the first under the second's name would be the fourth field in the family of `permissions`, `model` and the cost ledger: believed, displayed, and wired to something that is not what it claims. What can be honest is our own consumption, labelled as ours, and **exhaustion recognised when it arrives** — M18 already put that on the shelf: *"subscription exhaustion is a different failure that arrives as an adapter error; the pause path is where it belongs once we can recognise it reliably."*
+- ☐ **D · A key must not silently outrank a plan.** `ANTHROPIC_API_KEY` takes precedence over a claude.ai login and the CLI says so out loud. Half of this landed in M19 — the compose file stopped defining the variable empty in every container — but a person who signed in and is being billed anyway deserves to be told by Overmind, not by reading a warning in a log.
+- **Accept:** the same company runs a task under a key and under a plan, and in each case the interface says which economy it is in, what it can promise, and — where a number would be a guess — that it is not one.
+
+**Not in scope, and worth writing down:** Anthropic's Admin usage-and-cost API could give a real organizational picture, but it needs a separate admin key and answers a question about an *organization*, not about the plan behind one CLI login. That is a different product.
+
 ## Known gaps — carried deliberately, not forgotten
 
 - **No authentication of any kind.** For a single user on their own machine this is the right trade — the boundary is the machine, and anyone who has it can run the CLI directly. It stops being fine the moment the port is reachable by anyone else: the API spawns processes. Compose binds loopback only; the browser boundary (CORS + WebSocket origin) is held by `tests/browser_boundary.rs`. Real auth is M10, and it is what a shared or hosted Overmind needs first.
