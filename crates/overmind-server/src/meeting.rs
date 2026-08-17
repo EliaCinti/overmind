@@ -622,6 +622,74 @@ async fn pause_meeting(
     Ok(())
 }
 
+/// The same waiting, for a limit nobody chose and nobody can raise.
+///
+/// Deliberately its own function and its own notification kind rather than a
+/// parameter on the budget one. The two look identical from the outside — a
+/// room stopped, a person told, a `resume` waiting — and their remedies are
+/// opposite: one says "raise the cap", and here there *is* no cap. Telling
+/// somebody to raise a limit that is not theirs is worse than saying nothing.
+async fn pause_for_plan(
+    state: &AppState,
+    company_id: &str,
+    meeting_id: &str,
+    topic: &str,
+    speaker: &Speaker,
+    window: &crate::economy::PlanWindow,
+) -> Result<(), CeoError> {
+    let resets = crate::economy::reset_time(window);
+    let pretty = window.window.replace('_', "-");
+    let note =
+        format!("The subscription has run out for its {pretty} window; it resets at {resets}.");
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE meetings SET status = 'paused', paused_agent_id = ?, paused_note = ?
+         WHERE id = ? AND status = 'open'",
+    )
+    .bind(&speaker.id)
+    .bind(&note)
+    .bind(meeting_id)
+    .execute(&mut *tx)
+    .await?;
+    crate::audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        crate::domain::event_kind::MEETING_PAUSED,
+        &json!({
+            "meeting_id": meeting_id,
+            "agent_id": speaker.id,
+            "reason": "plan_exhausted",
+            "window": window.window,
+            "resets_at": window.resets_at,
+        }),
+    )
+    .await?;
+    let pushed = crate::notify::post(
+        &mut tx,
+        company_id,
+        crate::notify::New {
+            kind: crate::notify::kind::MEETING_PAUSED_PLAN,
+            title: &format!("Meeting paused: {topic}"),
+            body: &format!("{note} Nothing is over budget — resume when the window has reset."),
+            params: json!({
+                "agent": speaker.name,
+                "topic": topic,
+                "window": window.window,
+                "resetsAt": window.resets_at,
+            }),
+            agent_id: Some(&speaker.id),
+            subject: Some(("meeting", meeting_id)),
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    crate::notify::deliver(state, company_id, &pushed);
+    state.notify(company_id);
+    Ok(())
+}
+
 /// Pick a paused room back up, from the ordinal it stopped at.
 ///
 /// Re-runs the same deliberation: if the agent still has no budget it simply
@@ -721,6 +789,13 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
             Err(CeoError::OverBudget(check)) => {
                 return pause_meeting(state, company_id, meeting_id, &topic, speaker, &check).await;
             }
+            // The *subscription* ran out, which is not the room's fault and not
+            // this agent's cap. Same waiting, different sentence: there is no
+            // cap to raise, only a window to wait out (ADR-0030).
+            Err(CeoError::PlanExhausted(window)) => {
+                return pause_for_plan(state, company_id, meeting_id, &topic, speaker, &window)
+                    .await;
+            }
             Err(e) => return Err(e),
         };
         let turn = turn_json(&output);
@@ -770,6 +845,9 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
     .await
     {
         Ok(out) => out,
+        Err(CeoError::PlanExhausted(window)) => {
+            return pause_for_plan(state, company_id, meeting_id, &topic, speaker, &window).await;
+        }
         Err(CeoError::OverBudget(check)) => {
             return pause_meeting(state, company_id, meeting_id, &topic, speaker, &check).await;
         }

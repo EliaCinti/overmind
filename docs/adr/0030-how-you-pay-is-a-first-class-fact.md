@@ -206,8 +206,22 @@ What this gives, and what it still does not:
   before the first report.
 
 **Exhaustion is therefore recognisable exactly**, from `status`, and not by
-matching prose. Whether a room *pauses* on it is the next question and is not
-settled here; what is settled is that the signal exists and has a name.
+matching prose — which is precisely the condition M18 attached to the pause
+path: *"the pause path is where it belongs once we can recognise it reliably."*
+
+So a room whose plan runs out **waits**, exactly as a room that runs out of
+money does. The wiring is small; the sentence is not. From the outside the two
+are indistinguishable — a room stopped, a person told, a `resume` waiting — and
+their remedies are opposite. One says *raise the cap*. Here there is no cap:
+nobody chose this limit and nobody can lift it, and the only true next move is
+to wait for the window. So it gets its own function and its own notification
+kind rather than a parameter on the budget one, and a test asserts the note does
+**not** contain "raise" — sending somebody to change a setting that cannot help
+is worse than saying nothing.
+
+`allowed_warning` does not pause. Stopping work that is still permitted would
+invert the reasoning that makes pausing right at all: it is right *because* the
+refusal is real, transient, and external to the deliberation.
 
 The correction that made this possible is worth keeping in view: the first
 answer was "the quota is exposed nowhere", and it was an absence inferred from

@@ -28,6 +28,13 @@ pub enum CeoError {
     /// numbers so the refusal can say what it is refusing on.
     #[error("monthly budget reached")]
     OverBudget(crate::governance::BudgetCheck),
+    /// The **subscription** ran out, which is a different thing from the agent
+    /// reaching its cap (ADR-0030). Nobody chose this and no cap can be raised
+    /// to fix it: it is transient and external, and the only move is to wait
+    /// for the window. M18 said this belonged on the pause path "once we can
+    /// recognise it reliably" — the adapter's `rate_limit_event` is that.
+    #[error("the subscription has run out for this window")]
+    PlanExhausted(crate::economy::PlanWindow),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -661,6 +668,18 @@ async fn run_agent_turn(
             budget_exhausted_notice(state, company_id, agent_id, &name, &check).await?;
             return Ok(());
         }
+        // The same courtesy for a different cause, and the difference matters:
+        // there is no cap to raise here. Nobody chose this limit and nobody can
+        // lift it — the only true next move is to wait for the window.
+        Err(CeoError::PlanExhausted(window)) => {
+            let body = format!(
+                "The subscription has run out for its {} window, so {name} cannot answer right now. It resets at {}. This is not {name}'s budget — there is no cap to raise.",
+                window.window.replace('_', "-"),
+                crate::economy::reset_time(&window),
+            );
+            post_system_message(state, company_id, conversation_id, &body).await?;
+            return Ok(());
+        }
         Err(e) => return Err(e),
     };
 
@@ -897,6 +916,18 @@ pub(crate) async fn run_adapter(
             .await;
     }
     crate::governance::release_turn(&state.pool, &reservation).await;
+
+    // What the turn learned about the plan on its way past (ADR-0030). Recorded
+    // *after* the money is settled, because a plan that has run out does not
+    // make the turn we just paid for un-happen.
+    let Ok(output) = &outcome else { return outcome };
+    let Some(window) = crate::economy::plan_window_in(output) else {
+        return outcome;
+    };
+    state.set_plan_window(window.clone());
+    if window.health == crate::economy::PlanHealth::Exhausted {
+        return Err(CeoError::PlanExhausted(window));
+    }
     outcome
 }
 

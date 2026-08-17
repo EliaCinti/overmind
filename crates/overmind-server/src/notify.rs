@@ -33,6 +33,11 @@ pub mod kind {
     /// A room stopped mid-deliberation for the same reason, and is waiting to
     /// be resumed rather than being closed (ADR-0022).
     pub const MEETING_PAUSED: &str = "meeting.paused";
+    /// A room stopped because the **subscription** ran out, not because an
+    /// agent hit its cap (ADR-0030). Its own kind rather than a parameter on
+    /// the one above, because the two have different fixes: one is "raise the
+    /// cap", the other is "there is no cap — wait for the window".
+    pub const MEETING_PAUSED_PLAN: &str = "meeting.pausedPlan";
     /// Two agents wrote about the same thing without seeing each other
     /// (ADR-0026). Informational by design: the writes already happened and
     /// there is nothing to authorize, so it carries no `approval_id`.

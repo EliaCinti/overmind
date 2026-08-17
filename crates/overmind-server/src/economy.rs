@@ -242,6 +242,18 @@ pub type PlanWindows = std::collections::BTreeMap<String, PlanWindow>;
 /// them: the one that bites first, then the one behind it.
 pub const PLAN_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
 
+/// A window's reset moment as a readable UTC timestamp.
+///
+/// For the durable `title`/`body` of a notification and for a chat message,
+/// which are written once and read later; the *client* words the countdown,
+/// because "tra 2 ore" and "in 2 hours" differ in more than vocabulary and only
+/// the reader's locale knows which is right (M16).
+pub fn reset_time(window: &PlanWindow) -> String {
+    chrono::DateTime::from_timestamp(window.resets_at, 0)
+        .map(|t| t.format("%H:%M UTC").to_string())
+        .unwrap_or_else(|| "an unknown time".to_string())
+}
+
 /// How a plan window reaches a client.
 pub fn window_as_json(window: &PlanWindow) -> Value {
     serde_json::json!({
@@ -582,5 +594,58 @@ mod override_tests {
             overrides_login: false,
         });
         assert_eq!(quiet["overrides_login"], false);
+    }
+}
+
+#[cfg(test)]
+mod exhaustion_tests {
+    use super::*;
+
+    /// Exhaustion is a status, not a sentence. This is the whole reason the
+    /// pause path could be wired at all: M18 left it open "once we can
+    /// recognise it reliably", and prose in an unknown language was never going
+    /// to be reliable.
+    #[test]
+    fn a_blocked_window_is_recognised_without_reading_any_prose() {
+        let blocked = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"blocked","resetsAt":1786983000,"rateLimitType":"seven_day"}}"#;
+        let window = plan_window_in(blocked).expect("a window");
+        assert_eq!(window.health, PlanHealth::Exhausted);
+        assert_eq!(window.window, "seven_day");
+    }
+
+    /// `allowed_warning` is close to the edge, not over it. Pausing a room on a
+    /// warning would stop work that was still permitted — the opposite of the
+    /// "transient and external" reasoning that makes pausing right at all.
+    #[test]
+    fn a_warning_is_not_an_exhaustion() {
+        let warned = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1,"rateLimitType":"five_hour"}}"#;
+        let window = plan_window_in(warned).expect("a window");
+        assert_ne!(window.health, PlanHealth::Exhausted);
+        assert_eq!(window.health, PlanHealth::Warning);
+    }
+
+    /// The reset moment is written down readably for the durable record, and
+    /// left to the client to turn into a countdown (M16).
+    #[test]
+    fn a_reset_moment_is_readable_in_the_durable_record() {
+        let said = reset_time(&PlanWindow {
+            window: "five_hour".into(),
+            resets_at: 1_786_983_000,
+            health: PlanHealth::Exhausted,
+        });
+        assert!(said.contains("UTC"), "{said}");
+        assert!(said.contains(':'), "{said}");
+    }
+
+    /// A timestamp we cannot make sense of does not become a confident lie
+    /// about when work resumes.
+    #[test]
+    fn an_impossible_reset_moment_says_it_does_not_know() {
+        let said = reset_time(&PlanWindow {
+            window: "five_hour".into(),
+            resets_at: i64::MAX,
+            health: PlanHealth::Exhausted,
+        });
+        assert!(said.contains("unknown"), "{said}");
     }
 }

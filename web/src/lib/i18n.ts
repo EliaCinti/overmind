@@ -256,6 +256,9 @@ export const en = {
     budgetExhaustedBody:
       "{spent} of {limit} spent this month, so {agent} could not take its turn. Raise its cap, or wait for the new month.",
     meetingPausedTitle: "Meeting paused: {topic}",
+    meetingPausedPlanTitle: "Meeting paused: {topic}",
+    meetingPausedPlanBody:
+      "The subscription has run out for the {window}. Nothing is over budget — {agent} can carry on once it resets {when}.",
     meetingPausedBody:
       "{agent} reached its monthly budget ({spent} of {limit}), so the room stopped mid-discussion. Nothing is lost — raise the cap or wait for the new month, then resume it.",
   },
@@ -692,6 +695,9 @@ export const it: Dictionary = {
     budgetExhaustedBody:
       "{spent} di {limit} spesi questo mese, quindi {agent} non ha potuto fare il suo turno. Alza il suo tetto, o aspetta il mese nuovo.",
     meetingPausedTitle: "Riunione in pausa: {topic}",
+    meetingPausedPlanTitle: "Riunione in pausa: {topic}",
+    meetingPausedPlanBody:
+      "L'abbonamento è esaurito per la {window}. Nessuno ha sforato il budget — {agent} può riprendere quando si ricarica {when}.",
     meetingPausedBody:
       "{agent} ha raggiunto il budget mensile ({spent} di {limit}), quindi la stanza si è fermata a metà discussione. Non è andato perso niente — alza il tetto o aspetta il mese nuovo, poi riprendila.",
   },
@@ -1009,7 +1015,7 @@ export function useCatalogText(): (
  */
 export function useNotificationText(): (n: Notification) => { title: string; body: string } {
   const t = useT();
-  const { formatCents } = useFormats();
+  const { formatCents, timeUntil } = useFormats();
   return (n) => {
     const p = n.params;
     const fallback = { title: n.title, body: n.body };
@@ -1063,6 +1069,25 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
             limit: formatCents(Number(p.limitCents ?? 0)),
           }),
         };
+      case "meeting.pausedPlan": {
+        // A limit nobody chose, so the sentence must not imply one that can be
+        // raised (ADR-0030). The window is named in the reader's language and
+        // the countdown is worded by `Intl`, not by us.
+        const w = String(p.window ?? "");
+        return {
+          title: t("notif.meetingPausedPlanTitle", { topic: v("topic") }),
+          body: t("notif.meetingPausedPlanBody", {
+            agent: v("agent"),
+            window:
+              w === "five_hour"
+                ? t("economy.windowFiveHour")
+                : w === "seven_day"
+                  ? t("economy.windowSevenDay")
+                  : t("economy.windowOther"),
+            when: timeUntil(Number(p.resetsAt ?? 0)),
+          }),
+        };
+      }
       case "meeting.failed":
         return {
           title: t("notif.meetingFailedTitle", { topic: v("topic") }),

@@ -254,6 +254,14 @@ impl From<crate::ceo::CeoError> for ApiError {
                 crate::governance::euros(check.spent + check.reserved),
                 crate::governance::euros(check.cap),
             )),
+            // Also a conflict with the world, and also transient — but with a
+            // different remedy, so it says which one it is rather than letting
+            // a reader assume there is a cap to raise (ADR-0030).
+            CeoError::PlanExhausted(window) => ApiError::Conflict(format!(
+                "the subscription has run out for its {} window; it resets at {}",
+                window.window.replace('_', "-"),
+                crate::economy::reset_time(&window),
+            )),
             CeoError::Db(e) => ApiError::Internal(Box::new(e)),
         }
     }
