@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
-import type { Agent, AgentBudget, OrgProposal } from "../lib/api";
+import type { Agent, AgentBudget, Economy, OrgProposal } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
@@ -13,6 +13,7 @@ import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
 export function OrgChart({
   agents,
   budgets,
+  economy,
   proposal,
   onChanged,
   onHireUnder,
@@ -20,6 +21,8 @@ export function OrgChart({
 }: {
   agents: Agent[];
   budgets: AgentBudget[];
+  /** How the server pays, so a cap is read as what it is (ADR-0030). */
+  economy: Economy | null;
   /** A team the CEO drew up and you have not answered yet (M15). */
   proposal: OrgProposal | null;
   onChanged: () => void;
@@ -46,6 +49,8 @@ export function OrgChart({
         )}
         {proposal && <OrgProposalPanel proposal={proposal} onChanged={onChanged} />}
 
+        {active.length > 0 && <EconomyNote economy={economy} />}
+
         {/* The human owner is the root of the chart. */}
         <div className="mb-2 flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 shadow-soft">
           <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
@@ -66,6 +71,7 @@ export function OrgChart({
           childrenOf={childrenOf}
           agents={active}
           budgetOf={budgetOf}
+          economy={economy}
           depth={0}
           onChanged={onChanged}
           onHireUnder={onHireUnder}
@@ -83,6 +89,7 @@ function Tree({
   childrenOf,
   agents,
   budgetOf,
+  economy,
   depth,
   onChanged,
   onHireUnder,
@@ -91,6 +98,7 @@ function Tree({
   childrenOf: (id: string) => Agent[];
   agents: Agent[];
   budgetOf: (id: string) => AgentBudget | undefined;
+  economy: Economy | null;
   depth: number;
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
@@ -103,6 +111,7 @@ function Tree({
             agent={agent}
             agents={agents}
             budget={budgetOf(agent.id)}
+            economy={economy}
             onChanged={onChanged}
             onHireUnder={onHireUnder}
           />
@@ -111,6 +120,7 @@ function Tree({
             childrenOf={childrenOf}
             agents={agents}
             budgetOf={budgetOf}
+            economy={economy}
             depth={depth + 1}
             onChanged={onChanged}
             onHireUnder={onHireUnder}
@@ -125,12 +135,14 @@ function Node({
   agent,
   agents,
   budget,
+  economy,
   onChanged,
   onHireUnder,
 }: {
   agent: Agent;
   agents: Agent[];
   budget: AgentBudget | undefined;
+  economy: Economy | null;
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
 }) {
@@ -197,7 +209,7 @@ function Node({
         </div>
       </div>
 
-      {budget && budget.budget_cents > 0 && <BudgetBar budget={budget} />}
+      {budget && budget.budget_cents > 0 && <BudgetBar budget={budget} economy={economy} />}
 
       {editing && (
         <EditRow
@@ -211,19 +223,36 @@ function Node({
   );
 }
 
-/** Month-to-date spend (+ in-flight reservation) against the cap. */
-function BudgetBar({ budget }: { budget: AgentBudget }) {
+/**
+ * Month-to-date spend (+ in-flight reservation) against the cap — and how much
+ * of it is left, which is the number a person actually steers by.
+ *
+ * What it says depends on how the work is paid for (ADR-0030). Under an API key
+ * these are charges and the cap is a ceiling in money. Under a subscription they
+ * are equivalents nobody will be billed for, so the amounts wear a `≈` and the
+ * remaining percentage is of *Overmind's own cap* — never of the plan, whose
+ * quota is not visible from here. Presenting one as the other would be the lie
+ * this milestone exists to avoid.
+ */
+function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy | null }) {
+  const t = useT();
   const { formatCents } = useFormats();
   const used = budget.spent_cents + budget.reserved_cents;
   const pct = Math.min(100, (used / budget.budget_cents) * 100);
+  const left = Math.max(0, 100 - Math.round(pct));
   const tone =
     pct >= 100
       ? "var(--color-status-blocked)"
       : pct >= 80
         ? "var(--color-status-in_review)"
         : "var(--color-status-done)";
+  const equivalent = economy?.kind === "subscription";
+  const amounts = t(equivalent ? "economy.approxOfCap" : "economy.ofCap", {
+    used: formatCents(used),
+    cap: formatCents(budget.budget_cents),
+  });
   return (
-    <div className="mt-2.5 flex items-center gap-2">
+    <div className="mt-2.5 flex items-center gap-2" title={amounts}>
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
         <div
           className="h-full rounded-full transition-all"
@@ -231,9 +260,40 @@ function BudgetBar({ budget }: { budget: AgentBudget }) {
         />
       </div>
       <span className="mono shrink-0 text-[11px] text-muted-foreground">
-        {formatCents(used)}/{formatCents(budget.budget_cents)}
+        {t("economy.left", { pct: left })}
       </span>
     </div>
+  );
+}
+
+/**
+ * Said once, above the chart, rather than on every agent card.
+ *
+ * The meaning of a cap is a property of the whole server, so repeating it beside
+ * each bar would be noise — and leaving it out entirely is how a number gets
+ * read as a promise nobody made.
+ */
+function EconomyNote({ economy }: { economy: Economy | null }) {
+  const t = useT();
+  if (!economy) return null;
+  const what =
+    economy.kind === "key"
+      ? t("economy.key")
+      : economy.kind === "subscription"
+        ? economy.plan
+          ? t("economy.subscriptionWithPlan", { plan: economy.plan })
+          : t("economy.subscription")
+        : t("economy.unknown");
+  const means =
+    economy.kind === "key"
+      ? t("economy.keyMeaning")
+      : economy.kind === "subscription"
+        ? t("economy.subscriptionMeaning")
+        : t("economy.unknownMeaning");
+  return (
+    <p className="mb-2.5 text-[11px] text-muted-foreground">
+      <span className="font-medium">{what}</span> · {means}
+    </p>
   );
 }
 

@@ -259,6 +259,20 @@ export const en = {
     meetingPausedBody:
       "{agent} reached its monthly budget ({spent} of {limit}), so the room stopped mid-discussion. Nothing is lost — raise the cap or wait for the new month, then resume it.",
   },
+  economy: {
+    key: "Billed to an API key",
+    keyMeaning: "The cap is a ceiling in real money.",
+    subscription: "Covered by a subscription",
+    subscriptionWithPlan: "Covered by a {plan} subscription",
+    subscriptionMeaning:
+      "Amounts are equivalents, not charges — and your plan's own remaining quota is not visible from here.",
+    unknown: "Overmind cannot tell how it is paying",
+    unknownMeaning: "The cap still brakes a looping agent, but do not read it as a promise.",
+    left: "{pct}% left",
+    ofCap: "{used} of {cap}",
+    approxOfCap: "≈{used} of {cap}",
+    spentNoCap: "{used} spent",
+  },
   org: {
     you: "You",
     ownerLine: "Owner · everyone ultimately reports here",
@@ -665,6 +679,20 @@ export const it: Dictionary = {
     meetingPausedTitle: "Riunione in pausa: {topic}",
     meetingPausedBody:
       "{agent} ha raggiunto il budget mensile ({spent} di {limit}), quindi la stanza si è fermata a metà discussione. Non è andato perso niente — alza il tetto o aspetta il mese nuovo, poi riprendila.",
+  },
+  economy: {
+    key: "Addebitato su una chiave API",
+    keyMeaning: "Il tetto è un limite in denaro vero.",
+    subscription: "Coperto da un abbonamento",
+    subscriptionWithPlan: "Coperto da un abbonamento {plan}",
+    subscriptionMeaning:
+      "Gli importi sono equivalenti, non addebiti — e la quota residua del tuo piano non è visibile da qui.",
+    unknown: "Overmind non riesce a capire come sta pagando",
+    unknownMeaning: "Il tetto frena comunque un agente in loop, ma non leggerlo come una promessa.",
+    left: "{pct}% rimasto",
+    ofCap: "{used} di {cap}",
+    approxOfCap: "≈{used} di {cap}",
+    spentNoCap: "{used} spesi",
   },
   org: {
     you: "Tu",

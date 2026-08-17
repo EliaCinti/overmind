@@ -12,6 +12,7 @@ import type {
   ProjectDetail,
   Task,
   View,
+  Economy,
 } from "./lib/api";
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
@@ -48,6 +49,14 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectDetail[]>([]);
   const [budgets, setBudgets] = useState<AgentBudget[]>([]);
   const [proposals, setProposals] = useState<OrgProposal[]>([]);
+  /**
+   * How the server pays (ADR-0030). A property of the machine, not of a
+   * company, so it is fetched once beside the catalogs rather than on every
+   * company switch. `null` until it answers, and the interface simply says
+   * nothing about the meaning of a cap until then — better than flashing the
+   * wrong meaning and correcting it.
+   */
+  const [economy, setEconomy] = useState<Economy | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("chat");
@@ -75,6 +84,12 @@ export default function App() {
 
   // Bootstrap: companies + both catalogs + the models we ship (ADR-0021).
   useEffect(() => {
+    // Not knowing how we pay must never stop the app from starting; the
+    // interface has words for `unknown` and none for a failed boot.
+    api
+      .health()
+      .then((h) => setEconomy(h.economy))
+      .catch(() => setEconomy(null));
     Promise.all([
       api.listCompanies(),
       api.listArchetypes(),
@@ -252,6 +267,7 @@ export default function App() {
               <OrgChart
                 agents={agents}
                 budgets={budgets}
+                economy={economy}
                 proposal={proposals.find((p) => p.status === "proposed") ?? null}
                 onChanged={bump}
                 onHireUnder={openHire}

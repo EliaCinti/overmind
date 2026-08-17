@@ -397,7 +397,23 @@ export interface HireAgentBody {
   reports_to?: string | null;
 }
 
+/**
+ * How this Overmind pays for the work it does (ADR-0030).
+ *
+ * A property of the *server*, not of a company: two companies on one machine
+ * cannot be paying different ways. `metered` is the one the interface acts on —
+ * it is the difference between a cap that is a ceiling in real money and a cap
+ * that is an equivalent nobody will ever be charged.
+ */
+export type Economy =
+  | { kind: "key"; metered: true }
+  | { kind: "subscription"; metered: false; plan: string | null }
+  | { kind: "unknown"; metered: false; reason: string };
+
 export const api = {
+  /** Server identity, and how it pays. */
+  health: () => req<{ status: string; version: string; economy: Economy }>("GET", "/health"),
+
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
   createCompany: (name: string, language: LanguageCode) =>
     req<Company>("POST", "/companies", { name, language }),
