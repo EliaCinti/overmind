@@ -40,22 +40,34 @@ services:
       # OVERMIND_AGENT_UID (and _GID) below to your own `id -u` if so — the
       # boundary is that the agent is not the *server*, and any unprivileged uid
       # holds it.
+
     environment:
-      # How the agent authenticates. Either this, or `claude login` once inside
-      # the container (`docker compose exec --user agent overmind claude login`),
-      # which the volume above then keeps.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # How the agent authenticates — and the order matters more than it looks.
+      #
+      # `ANTHROPIC_API_KEY` **takes precedence over a claude.ai login**; the CLI
+      # says so out loud when both are present. So a subscription is not
+      # something you prefer, it is something you get by *not* setting a key —
+      # which is why this is a passthrough (a bare name, forwarded only when it
+      # exists on the host) and not an assignment. Written `KEY: ${KEY:-}` it
+      # would be defined-and-empty in every container, and "I signed in and it
+      # billed my key anyway" is a bad afternoon.
+      - ANTHROPIC_API_KEY
+      #
+      # For a subscription instead, sign in once — the volume above keeps it:
+      #   docker compose exec --user agent overmind claude setup-token
+      #
       # Align the agent with your host user so it can write mounted repositories:
-      # OVERMIND_AGENT_UID: "1000"
-      # OVERMIND_AGENT_GID: "1000"
+      # - OVERMIND_AGENT_UID=1000
+      # - OVERMIND_AGENT_GID=1000
+      #
       # Optional organizational memory (Wadachi or any MCP memory server).
       # Leave BRAIN_DIR out of the command: Overmind sets it per company
       # (ADR-0024), and a shell assignment here would override it and put every
       # company back in one brain.
-      # OVERMIND_MEMORY_CMD: 'wadachi'
-      # OVERMIND_MEMORY_POOL: "4"
+      # - OVERMIND_MEMORY_CMD=wadachi
+      # - OVERMIND_MEMORY_POOL=4
       # Deliberately share one brain instead of one per company:
-      # OVERMIND_MANAGED_BRAIN: "off"
+      # - OVERMIND_MANAGED_BRAIN=off
     restart: unless-stopped
 
 volumes:
