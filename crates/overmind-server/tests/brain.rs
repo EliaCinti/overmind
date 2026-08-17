@@ -191,15 +191,39 @@ for line in sys.stdin:
         print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{}}), flush=True)
 "#;
 
-/// Same as [`MEMORY_AGENT`] but dawdles, so two runs started back to back are
-/// both still open when either writes. Overlap is the whole point of ADR-0026,
-/// and without it a collision test would be asserting a race it did not create.
-const SLOW_MEMORY_AGENT: &str = r#"#!/bin/sh
-sleep 2
+/// An agent that waits for the test to let it finish.
+///
+/// Overlap is the whole point of ADR-0026: a collision test has to keep two runs
+/// open at once, and a token test has to catch one while it is still going.
+/// Both used to buy that with `sleep 2` and the hope that everything else
+/// happened inside those two seconds.
+///
+/// It did, on a developer's machine. On a loaded macOS runner it did not, and
+/// the test failed reporting no collision — a red build that says nothing about
+/// the code, which is the worst kind. So the wall clock is gone: the agent
+/// blocks until the test creates `gate`, and the test creates it only once the
+/// state it wanted to arrange exists. The overlap is now constructed rather
+/// than raced for.
+///
+/// Bounded at roughly thirty seconds so a test that dies before releasing its
+/// agents fails there instead of hanging until the session timeout.
+fn gated_agent(gate: &std::path::Path) -> String {
+    format!(
+        r#"#!/bin/sh
+i=0
+while [ ! -f "{}" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done
 echo "agent saw memory: $OVERMIND_MEMORY_CONTEXT"
 echo done > out.txt
-echo '{"total_cost_usd":0.01,"session_id":"s"}'
-"#;
+echo '{{"total_cost_usd":0.01,"session_id":"s"}}'
+"#,
+        gate.display()
+    )
+}
+
+/// A path in temp for [`gated_agent`], which the cage grants on every platform.
+fn gate_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("overmind-gate-{}", uuid::Uuid::now_v7().simple()))
+}
 
 /// Echoes the injected memory context so a test can read what the agent saw.
 const MEMORY_AGENT: &str = r#"#!/bin/sh
@@ -919,15 +943,20 @@ async fn two_overlapping_runs_writing_the_same_thing_are_reported() {
         eprintln!("skipping: python3 not available");
         return;
     }
-    let env = setup_full(true, true, "", SLOW_MEMORY_AGENT).await;
+    let gate = gate_path();
+    let env = setup_full(true, true, "", &gated_agent(&gate)).await;
     let (acme, goal) = found_company(&env, "Acme").await;
 
-    // Both start before either can finish: the agent dawdles for two seconds,
-    // so both watermarks are taken while the brain still holds neither write.
+    // Both start before either can finish, by construction rather than by
+    // racing a clock: neither agent gets past the gate until both have been
+    // checked out, so both watermarks are taken while the brain holds neither
+    // write. That is the overlap ADR-0026 is about.
     let a = start_task(&env, &acme, &goal, "deprecate the legacy cart").await;
     let b = start_task(&env, &acme, &goal, "extend the legacy cart").await;
+    std::fs::write(&gate, b"go").expect("release both agents");
     await_session(&env, &a).await;
     await_session(&env, &b).await;
+    let _ = std::fs::remove_file(&gate);
 
     let ns = notifications(&env, &acme).await;
     let collision = ns.iter().find(|n| n["kind"] == "memory.collision");
@@ -1026,9 +1055,12 @@ async fn agents_are_offered_reads_and_refused_writes() {
         eprintln!("skipping: python3 not available");
         return;
     }
-    // A slow agent: the config file exists only while the run does, and the
-    // stub finishes in milliseconds — too fast to observe what we are testing.
-    let env = setup_full(true, true, "", SLOW_MEMORY_AGENT).await;
+    // A gated agent: the config file exists only while the run does, and an
+    // ordinary stub finishes in milliseconds — too fast to observe what we are
+    // testing. The gate holds the run open until we are done looking, instead
+    // of a sleep that has to outlast everything else the test does.
+    let gate = gate_path();
+    let env = setup_full(true, true, "", &gated_agent(&gate)).await;
     let (acme, goal) = found_company(&env, "Acme").await;
     let session = start_task(&env, &acme, &goal, "A task with a live token").await;
     let token = env.session_token(&session).await;
@@ -1071,7 +1103,9 @@ async fn agents_are_offered_reads_and_refused_writes() {
         "the refusal should say why: {text}"
     );
 
+    std::fs::write(&gate, b"go").expect("release the agent");
     await_session(&env, &session).await;
+    let _ = std::fs::remove_file(&gate);
 }
 
 /// The token is the identity: a request names no company, and once the run is
@@ -1083,9 +1117,10 @@ async fn a_token_dies_with_its_run() {
         eprintln!("skipping: python3 not available");
         return;
     }
-    // A slow agent: the config file exists only while the run does, and the
-    // stub finishes in milliseconds — too fast to observe what we are testing.
-    let env = setup_full(true, true, "", SLOW_MEMORY_AGENT).await;
+    // A gated agent, so "during the run" is a fact rather than a bet on the
+    // next few lines executing inside a two-second sleep.
+    let gate = gate_path();
+    let env = setup_full(true, true, "", &gated_agent(&gate)).await;
     let (acme, goal) = found_company(&env, "Acme").await;
     let session = start_task(&env, &acme, &goal, "A task that will finish").await;
     let token = env.session_token(&session).await;
@@ -1098,7 +1133,9 @@ async fn a_token_dies_with_its_run() {
         "the token should work during the run"
     );
 
+    std::fs::write(&gate, b"go").expect("release the agent");
     await_session(&env, &session).await;
+    let _ = std::fs::remove_file(&gate);
 
     let (status, _) = mcp(&env, Some(&token), live).await;
     assert_eq!(

@@ -395,6 +395,23 @@ export const en = {
     submitting: "Connecting…",
     failed: "Failed to connect the repository",
   },
+  connections: {
+    title: "Connections",
+    desc: "Let a Claude Code session, or anything that speaks MCP, file work into this company and read its board. It files; it never starts a run.",
+    label: "What is connecting",
+    labelHint: "So you can tell one from another when you come to withdraw it.",
+    labelPlaceholder: "e.g. my editor",
+    create: "Connect",
+    onceOnly: "shown once. Paste this into the MCP configuration of whatever is connecting.",
+    copy: "Copy configuration",
+    copied: "Copied",
+    done: "Done",
+    revoke: "Withdraw",
+    revoked: "withdrawn",
+    neverUsed: "never used",
+    lastUsed: "last used {when}",
+    empty: "Nothing is connected yet.",
+  },
   onboard: {
     step1: "Step 1 of 2",
     step2: "Step 2 of 2 · optional",
@@ -402,6 +419,8 @@ export const en = {
     nameSubtitle: "An organization of AI agents that work for you.",
     companyName: "Company name",
     companyPlaceholder: "e.g. Acme Labs",
+    language: "Working language",
+    languageHint: "What your agents write in — replies, documents, decisions. Changeable later.",
     continue: "Continue",
     creating: "Creating…",
     repoTitle: "Connect a git repo",
@@ -787,6 +806,24 @@ export const it: Dictionary = {
     submitting: "Collegamento…",
     failed: "Collegamento del repository fallito",
   },
+  connections: {
+    title: "Connessioni",
+    desc: "Permetti a una sessione Claude Code, o a qualsiasi cosa parli MCP, di aprire task in questa azienda e leggerne la board. Deposita lavoro; non ne avvia mai.",
+    label: "Che cosa si collega",
+    labelHint: "Per distinguerle l'una dall'altra quando verrà il momento di ritirarne una.",
+    labelPlaceholder: "es. il mio editor",
+    create: "Collega",
+    onceOnly:
+      "mostrato una volta sola. Incollalo nella configurazione MCP di ciò che si sta collegando.",
+    copy: "Copia la configurazione",
+    copied: "Copiato",
+    done: "Fatto",
+    revoke: "Ritira",
+    revoked: "ritirata",
+    neverUsed: "mai usata",
+    lastUsed: "ultimo uso {when}",
+    empty: "Non è collegato ancora niente.",
+  },
   onboard: {
     step1: "Passo 1 di 2",
     step2: "Passo 2 di 2 · facoltativo",
@@ -794,6 +831,8 @@ export const it: Dictionary = {
     nameSubtitle: "Un'organizzazione di agenti AI che lavorano per te.",
     companyName: "Nome dell'azienda",
     companyPlaceholder: "es. Acme Labs",
+    language: "Lingua di lavoro",
+    languageHint: "Quella in cui scrivono i tuoi agenti — risposte, documenti, decisioni. Si cambia anche dopo.",
     continue: "Continua",
     creating: "Creazione…",
     repoTitle: "Collega un repo git",
@@ -813,6 +852,20 @@ export type Translate = (key: TranslationKey, vars?: Record<string, string | num
 export type TranslationKey = {
   [S in keyof typeof en]: `${S & string}.${keyof (typeof en)[S] & string}`;
 }[keyof typeof en];
+
+/**
+ * The languages on offer, each named **in its own language** — a speaker finds
+ * "Italiano" faster than "Italian", and a list of endonyms needs no translation
+ * of its own. Mirrors `i18n::SUPPORTED` on the server.
+ *
+ * Deliberately no flags: a flag is a country, and languages are not countries.
+ * English is not the United Kingdom, and picking one flag for it would be
+ * taking a side in someone's argument.
+ */
+export const LANGUAGES: { code: LanguageCode; name: string }[] = [
+  { code: "en", name: "English" },
+  { code: "it", name: "Italiano" },
+];
 
 /**
  * The best supported match for what the browser says the reader prefers.

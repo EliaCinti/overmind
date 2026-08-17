@@ -68,13 +68,22 @@ async fn probe(sandbox: bool) -> std::collections::HashMap<String, String> {
 
 async fn probe_with(sandbox: bool, stub: &str) -> std::collections::HashMap<String, String> {
     let root = std::env::temp_dir().join(format!("overmind-sb-{}", uuid::Uuid::now_v7().simple()));
+    probe_at(sandbox, stub, root.join("data")).await
+}
+
+async fn probe_at(
+    sandbox: bool,
+    stub: &str,
+    data_dir: std::path::PathBuf,
+) -> std::collections::HashMap<String, String> {
+    let root = std::env::temp_dir().join(format!("overmind-sb-{}", uuid::Uuid::now_v7().simple()));
     std::fs::create_dir_all(&root).expect("create test root");
     let script = root.join("stub.sh");
     std::fs::write(&script, stub).expect("write stub");
 
     let config = overmind_server::Config {
         agent_cmd: Some(format!("sh {}", script.display())),
-        data_dir: root.join("data"),
+        data_dir,
         sandbox,
         ..overmind_server::Config::default()
     };
@@ -154,7 +163,7 @@ async fn probe_with(sandbox: bool, stub: &str) -> std::collections::HashMap<Stri
 /// The M10 criterion, for the half a sandbox can carry.
 #[tokio::test]
 async fn a_caged_agent_cannot_reach_the_machine_it_runs_on() {
-    if !overmind_server::sandbox::available() {
+    if !overmind_server::sandbox::profile_available() {
         eprintln!("no sandbox on this platform — skipping");
         return;
     }
@@ -179,6 +188,47 @@ async fn a_caged_agent_cannot_reach_the_machine_it_runs_on() {
         caged.get("mine.txt").map(String::as_str),
         Some("inside"),
         "its own run directory stays writable: {caged:?}"
+    );
+}
+
+/// The cage must grant the run directory *wherever it was configured*, not only
+/// where the tests happen to put it.
+///
+/// A sandbox profile matches real paths, literally, so a relative one — and
+/// `data_dir` defaults to `./overmind-data` — is a string that matches nothing:
+/// the rule is accepted, the agent is denied its own working directory, and the
+/// CLI dies with `EPERM` on `getcwd` before reading the prompt. Every test above
+/// missed it by writing under `$TMPDIR`, which the profile grants outright, so
+/// the run directory's own (dead) rule never had to work. Found live on
+/// 2026-08-13, when the server was first started with its defaults.
+///
+/// So the data dir here is relative *and* outside temp: the run directory is
+/// then the only rule that can let the stub write, which is the whole point.
+#[tokio::test]
+async fn a_relative_data_dir_is_still_a_real_cage() {
+    if !overmind_server::sandbox::profile_available() {
+        eprintln!("no sandbox on this platform — skipping");
+        return;
+    }
+    // Integration tests run with the package root as their cwd, so this is
+    // relative in exactly the way the default is, without moving anyone's cwd.
+    let relative = std::path::PathBuf::from(format!(
+        "target/overmind-rel-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let out = probe_at(true, PROBING_STUB, relative.clone()).await;
+    let _ = std::fs::remove_dir_all(&relative);
+
+    assert_eq!(
+        out.get("mine.txt").map(String::as_str),
+        Some("inside"),
+        "a caged agent must be able to write its own run directory however the \
+         data dir was spelled: {out:?}"
+    );
+    assert_eq!(
+        out.get("home.txt").map(String::as_str),
+        Some("DENIED"),
+        "and the cage must still be a cage: {out:?}"
     );
 }
 
@@ -239,5 +289,72 @@ async fn git_still_works_and_has_no_credentials_to_push_with() {
         out.get("creds.txt").map(String::as_str),
         Some("NOCREDS"),
         "no credentials reach the agent, whatever the repo asked for: {out:?}"
+    );
+}
+
+/// Landlock's half of ADR-0029: a run cannot leave its own directory.
+///
+/// This is the property the unprivileged uid does *not* give. Every run shares
+/// that uid, so one run can reach a sibling's worktree; macOS has never allowed
+/// that, and on a kernel with Landlock neither does Linux.
+///
+/// The data directory is deliberately **outside temp**. Temp is granted
+/// outright — compilers and package managers expect it — so a run directory
+/// under it would be writable through that grant and the run directory's own
+/// rule would never have to work. That is precisely how the empty cage of
+/// 2026-08-13 went unnoticed for a month.
+///
+/// Paired, like every probe in this file: uncaged, the same script escapes.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_landlocked_agent_cannot_leave_its_run_directory() {
+    if overmind_server::landlock::abi().is_none() {
+        eprintln!("no Landlock in this kernel — skipping");
+        return;
+    }
+    const ESCAPE_STUB: &str = r#"#!/bin/sh
+echo inside > mine.txt
+( echo out > ../escaped.txt 2>/dev/null && echo REACHABLE || echo DENIED ) > sibling.txt
+( ls /etc >/dev/null 2>&1 && echo REACHABLE || echo DENIED ) > etc.txt
+echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+
+    let caged_dir = std::path::PathBuf::from(format!(
+        "target/overmind-ll-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let caged = probe_at(true, ESCAPE_STUB, caged_dir.clone()).await;
+    let _ = std::fs::remove_dir_all(&caged_dir);
+
+    let open_dir = std::path::PathBuf::from(format!(
+        "target/overmind-ll-open-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let uncaged = probe_at(false, ESCAPE_STUB, open_dir.clone()).await;
+    let _ = std::fs::remove_dir_all(&open_dir);
+
+    // The run still works: the cage is a boundary, not a wall around everything.
+    assert_eq!(
+        caged.get("mine.txt").map(String::as_str),
+        Some("inside"),
+        "a landlocked agent must still write its own run directory: {caged:?}"
+    );
+    assert_eq!(
+        caged.get("etc.txt").map(String::as_str),
+        Some("REACHABLE"),
+        "the system it needs to exist stays readable: {caged:?}"
+    );
+    // The property this layer exists for.
+    assert_eq!(
+        caged.get("sibling.txt").map(String::as_str),
+        Some("DENIED"),
+        "a landlocked agent must not write beside its own run directory: {caged:?}"
+    );
+    // Without which the denial above proves nothing.
+    assert_eq!(
+        uncaged.get("sibling.txt").map(String::as_str),
+        Some("REACHABLE"),
+        "uncaged, the identical script must escape — otherwise the caged \
+         denial is a broken probe, not a boundary: {uncaged:?}"
     );
 }

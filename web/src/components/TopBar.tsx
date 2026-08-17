@@ -9,6 +9,7 @@ import {
   Wifi,
   WifiOff,
   BrainCircuit,
+  Plug,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -16,6 +17,7 @@ import { Button } from "./ui/button";
 import { Segmented } from "./ui/controls";
 import { Inbox } from "./Inbox";
 import { LanguageMenu } from "./LanguageMenu";
+import { ConnectionsDialog } from "./ConnectionsDialog";
 import { useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
@@ -127,6 +129,7 @@ export function TopBar({
             </Button>
           </>
         )}
+        {companyId && <Connections companyId={companyId} />}
         {companyId && <LanguageMenu language={language} onChange={onChangeLanguage} />}
         <Button
           variant="ghost"
@@ -234,6 +237,30 @@ function MemoryIndicator({ companyId }: { companyId: string | null }) {
       <BrainCircuit className="h-3.5 w-3.5" />
       {t("nav.memory")}
     </span>
+  );
+}
+
+/** The way in to this company's integration credentials (M9, ADR-0028).
+ *
+ * An icon, not a button with a word on it: most people never connect anything,
+ * and the bar beside "New task" is not where a rarely-used control earns its
+ * space. */
+function Connections({ companyId }: { companyId: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() => setOpen(true)}
+        aria-label={t("connections.title")}
+        title={t("connections.title")}
+      >
+        <Plug className="h-4.5 w-4.5" />
+      </Button>
+      <ConnectionsDialog open={open} onOpenChange={setOpen} companyId={companyId} />
+    </>
   );
 }
 

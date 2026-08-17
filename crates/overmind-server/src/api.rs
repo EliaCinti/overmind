@@ -97,6 +97,11 @@ fn api_router() -> Router<AppState> {
         )
         .route("/languages", get(list_languages))
         .route(
+            "/companies/{company_id}/tokens",
+            post(create_company_token).get(list_company_tokens),
+        )
+        .route("/tokens/{token_id}/revoke", post(revoke_company_token))
+        .route(
             "/companies/{company_id}/agents",
             post(hire_agent).get(list_agents),
         )
@@ -315,6 +320,16 @@ async fn health() -> Json<Value> {
 #[derive(Deserialize)]
 struct CreateCompany {
     name: String,
+    /// The language this company works in (M16). Optional, and validated the
+    /// same way `set_language` validates it.
+    ///
+    /// It belongs here and not only on the settings endpoint because the very
+    /// next thing that happens is a CEO speaking (M15): a company founded
+    /// without a language has already answered its first question in the wrong
+    /// one by the time you find the setting. Until this existed the field was
+    /// simply *dropped* — a request saying `"language": "it"` was accepted,
+    /// stored as English, and nothing said otherwise.
+    language: Option<String>,
 }
 
 async fn create_company(
@@ -324,11 +339,18 @@ async fn create_company(
     if req.name.trim().is_empty() {
         return Err(ApiError::Invalid("company name must not be empty".into()));
     }
+    let language = req.language.as_deref().unwrap_or(crate::i18n::DEFAULT);
+    if !crate::i18n::is_supported(language) {
+        return Err(ApiError::Invalid(format!(
+            "unsupported language `{language}`"
+        )));
+    }
     let (id, created_at) = (new_id(), now());
     let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO companies (id, name, created_at) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO companies (id, name, language, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(req.name.trim())
+        .bind(language)
         .bind(&created_at)
         .execute(&mut *tx)
         .await?;
@@ -337,7 +359,7 @@ async fn create_company(
         Some(&id),
         None,
         event_kind::COMPANY_CREATED,
-        &json!({ "name": req.name.trim() }),
+        &json!({ "name": req.name.trim(), "language": language }),
     )
     .await?;
 
@@ -387,7 +409,7 @@ async fn create_company(
         Json(json!({
             "id": id,
             "name": req.name.trim(),
-            "language": crate::i18n::DEFAULT,
+            "language": language,
             "created_at": created_at,
             "brain_enabled": true,
             "ceo": ceo,
@@ -968,14 +990,14 @@ async fn create_goal(
 // ---------- tasks ----------
 
 #[derive(Deserialize)]
-struct CreateTask {
-    title: String,
+pub(crate) struct CreateTask {
+    pub(crate) title: String,
     #[serde(default)]
-    description: String,
-    goal_id: Option<String>,
-    priority: Option<String>,
+    pub(crate) description: String,
+    pub(crate) goal_id: Option<String>,
+    pub(crate) priority: Option<String>,
     /// `code` (default) or `knowledge` (ADR-0017).
-    execution_kind: Option<String>,
+    pub(crate) execution_kind: Option<String>,
 }
 
 async fn create_task(
@@ -983,6 +1005,25 @@ async fn create_task(
     Path(company_id): Path<String>,
     Json(req): Json<CreateTask>,
 ) -> Result<impl IntoResponse, ApiError> {
+    Ok((
+        StatusCode::CREATED,
+        Json(open_task(&state, &company_id, &req).await?),
+    ))
+}
+
+/// File a task in a company's backlog, and say what was filed.
+///
+/// One definition of what a valid new task is, because there are now two doors
+/// into it: this one and the MCP tool an outside caller uses (ADR-0028). Split
+/// out rather than copied — parallel copies of a rule is a mistake this project
+/// has already paid for once, in `agent_command` (ADR-0021), where the second
+/// copy named no model and nobody noticed for a milestone.
+pub(crate) async fn open_task(
+    state: &AppState,
+    company_id: &str,
+    req: &CreateTask,
+) -> Result<Value, ApiError> {
+    let company_id = company_id.to_string();
     if req.title.trim().is_empty() {
         return Err(ApiError::Invalid("task title must not be empty".into()));
     }
@@ -1042,19 +1083,16 @@ async fn create_task(
     .await?;
     tx.commit().await?;
     state.notify(&company_id);
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "id": id,
-            "company_id": company_id,
-            "goal_id": req.goal_id,
-            "title": req.title.trim(),
-            "status": "backlog",
-            "priority": priority,
-            "execution_kind": execution_kind,
-            "created_at": created_at,
-        })),
-    ))
+    Ok(json!({
+        "id": id,
+        "company_id": company_id,
+        "goal_id": req.goal_id,
+        "title": req.title.trim(),
+        "status": "backlog",
+        "priority": priority,
+        "execution_kind": execution_kind,
+        "created_at": created_at,
+    }))
 }
 
 /// (id, goal_id, title, status, priority, assignee_agent_id, execution_kind, updated_at)
@@ -1196,6 +1234,55 @@ struct CreateWorkspace {
     is_primary: Option<bool>,
 }
 
+/// Why a workspace path is not there, said in terms the person can act on.
+///
+/// `cwd '/Users/me/code/thing' is not a directory` is true and useless in a
+/// container: the path exists perfectly well, on the other side of a boundary
+/// the message never mentions. The path a workspace needs is the **in-container**
+/// one, and until now the only place that was written down was a comment in
+/// `docker-compose.yml` — so the way you found out was by getting this error and
+/// guessing.
+///
+/// So when a mount point is configured, name it and say what is actually
+/// mounted. An empty one is worth saying too: "nothing is mounted" is a
+/// different problem from "you named the wrong path", and they are indeed the
+/// two things that happen.
+fn unreachable_cwd(repos_dir: Option<&std::path::Path>, cwd: &str) -> String {
+    let plain = format!("cwd '{cwd}' is not a directory");
+    let Some(repos) = repos_dir else {
+        return plain;
+    };
+    let mounted: Vec<String> = std::fs::read_dir(repos)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let repos = repos.display();
+    if mounted.is_empty() {
+        return format!(
+            "{plain}. Overmind is running in a container, so a workspace path has to be one \
+             *it* can see — host paths are not reachable from in here. Nothing is mounted at \
+             {repos} yet: add your repository to the `volumes` of docker-compose.yml, e.g. \
+             `- ${{HOME}}/code:{repos}:rw`, and use the {repos}/… path here."
+        );
+    }
+    let mut names: Vec<String> = mounted;
+    names.sort();
+    let listed = names
+        .iter()
+        .map(|n| format!("{repos}/{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{plain}. Overmind is running in a container, so a workspace path has to be one *it* \
+         can see. Mounted right now: {listed}."
+    )
+}
+
 async fn create_workspace(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
@@ -1205,9 +1292,9 @@ async fn create_workspace(
         return Err(ApiError::Invalid("workspace name must not be empty".into()));
     }
     if !std::path::Path::new(&req.cwd).is_dir() {
-        return Err(ApiError::Invalid(format!(
-            "cwd '{}' is not a directory",
-            req.cwd
+        return Err(ApiError::Invalid(unreachable_cwd(
+            state.config.repos_dir.as_deref(),
+            &req.cwd,
         )));
     }
     let is_primary = req.is_primary.unwrap_or(true);
@@ -2122,6 +2209,142 @@ async fn set_language(
     }
     state.notify(&company_id);
     Ok(Json(json!({ "id": company_id, "language": req.language })))
+}
+
+// ---------- integration tokens (M9, ADR-0028) ----------
+
+#[derive(Deserialize)]
+struct CreateToken {
+    label: String,
+}
+
+/// Issue a credential for a caller outside Overmind — a Claude Code session, a
+/// script — so it can file work and read the board over MCP (ADR-0028).
+///
+/// The secret is in this response and nowhere else afterwards. Not because the
+/// store is untrusted (it is plaintext in `overmind.sqlite`, and the threat
+/// model says the machine is the boundary) but because a credential you can
+/// re-read is one nobody bothers to keep track of, and the label is what makes
+/// revoking it later a decision rather than a guess.
+async fn create_company_token(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<CreateToken>,
+) -> Result<impl IntoResponse, ApiError> {
+    let label = req.label.trim();
+    if label.is_empty() {
+        return Err(ApiError::Invalid("a token needs a label".into()));
+    }
+    let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
+        .bind(&company_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound("company"));
+    }
+    // v4, not the v7 used for ids: a v7 encodes the time it was minted, and a
+    // secret should not be predictable in any dimension (ADR-0027).
+    let token = uuid::Uuid::new_v4().to_string();
+    let (id, created_at) = (new_id(), now());
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO company_tokens (id, company_id, label, token, created_at)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&company_id)
+    .bind(label)
+    .bind(&token)
+    .bind(&created_at)
+    .execute(&mut *tx)
+    .await?;
+    // The label, never the token: an audit log is read by people, and a log
+    // that quotes secrets is a place secrets leak from.
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::TOKEN_ISSUED,
+        &json!({ "token_id": id, "label": label }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "label": label,
+            "token": token,
+            "created_at": created_at,
+        })),
+    ))
+}
+
+/// (id, label, created_at, last_used_at, revoked_at)
+type TokenRow = (String, String, String, Option<String>, Option<String>);
+
+/// The credentials this company has issued — what they are for, whether they
+/// have ever been used, and whether they still work. Never the secrets.
+async fn list_company_tokens(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<TokenRow> = sqlx::query_as(
+        "SELECT id, label, created_at, last_used_at, revoked_at
+           FROM company_tokens WHERE company_id = ? ORDER BY created_at DESC",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "tokens": rows
+            .into_iter()
+            .map(|(id, label, created_at, last_used_at, revoked_at)| json!({
+                "id": id,
+                "label": label,
+                "created_at": created_at,
+                "last_used_at": last_used_at,
+                "revoked_at": revoked_at,
+            }))
+            .collect::<Vec<_>>()
+    })))
+}
+
+/// Withdraw a credential. A timestamp, not a delete: the audit log names the
+/// token that filed a task, and a row that vanished would leave that name
+/// pointing at nothing.
+async fn revoke_company_token(
+    State(state): State<AppState>,
+    Path(token_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let row: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT company_id, label, revoked_at FROM company_tokens WHERE id = ?")
+            .bind(&token_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let (company_id, label, revoked_at) = row.ok_or(ApiError::NotFound("token"))?;
+    if let Some(at) = revoked_at {
+        // Already gone, and saying so beats appending a second revocation event
+        // for a credential that stopped working the first time.
+        return Ok(Json(json!({ "id": token_id, "revoked_at": at })));
+    }
+    let at = now();
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("UPDATE company_tokens SET revoked_at = ? WHERE id = ?")
+        .bind(&at)
+        .bind(&token_id)
+        .execute(&mut *tx)
+        .await?;
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::TOKEN_REVOKED,
+        &json!({ "token_id": token_id, "label": label }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "id": token_id, "revoked_at": at })))
 }
 
 // ---------- the company's brain (M8, ADR-0024) ----------
@@ -3172,4 +3395,54 @@ async fn list_events(
 async fn verify_chain(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let report = audit::verify(&state.pool).await?;
     Ok(Json(serde_json::to_value(report)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Outside a container the old message is still the right one: there is no
+    /// mount point to name, and inventing advice about one would be noise.
+    #[test]
+    fn without_a_mount_point_the_message_stays_plain() {
+        let said = unreachable_cwd(None, "/nope");
+        assert_eq!(said, "cwd '/nope' is not a directory");
+    }
+
+    /// The whole point: a host path is not wrong so much as *unreachable*, and
+    /// the message has to say which paths are reachable instead.
+    #[test]
+    fn in_a_container_the_message_names_what_is_mounted() {
+        let repos = std::env::temp_dir().join(format!("overmind-repos-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(repos.join("my-project")).expect("mount point");
+        std::fs::create_dir_all(repos.join("another")).expect("second repo");
+        // A loose file is not a repository anyone can point a workspace at.
+        std::fs::write(repos.join("notes.txt"), b"x").expect("stray file");
+
+        let said = unreachable_cwd(Some(&repos), "/Users/me/code/my-project");
+        let _ = std::fs::remove_dir_all(&repos);
+
+        assert!(said.contains("/Users/me/code/my-project"), "{said}");
+        assert!(said.contains("container"), "{said}");
+        assert!(said.contains("my-project"), "{said}");
+        assert!(said.contains("another"), "{said}");
+        assert!(
+            !said.contains("notes.txt"),
+            "only directories are workspaces: {said}"
+        );
+    }
+
+    /// "Nothing is mounted" and "you named the wrong path" are the two things
+    /// that actually happen, and they need different advice.
+    #[test]
+    fn an_empty_mount_point_says_so_and_shows_how_to_fill_it() {
+        let repos = std::env::temp_dir().join(format!("overmind-empty-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&repos).expect("mount point");
+
+        let said = unreachable_cwd(Some(&repos), "/Users/me/code/thing");
+        let _ = std::fs::remove_dir_all(&repos);
+
+        assert!(said.contains("Nothing is mounted"), "{said}");
+        assert!(said.contains("docker-compose.yml"), "{said}");
+    }
 }

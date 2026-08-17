@@ -1,21 +1,8 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Check, Languages } from "lucide-react";
 import type { LanguageCode } from "../lib/api";
-import { useT } from "../lib/i18n";
+import { LANGUAGES, useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
-
-/**
- * Languages are named in their own language — a speaker finds "Italiano"
- * faster than "Italian", and a list of endonyms needs no translation.
- *
- * Deliberately no flags: a flag is a country, and languages are not countries.
- * English is not the United Kingdom, and choosing one flag for it would be
- * picking a side in someone's argument.
- */
-const LANGUAGES: { code: LanguageCode; name: string }[] = [
-  { code: "en", name: "English" },
-  { code: "it", name: "Italiano" },
-];
 
 export function LanguageMenu({
   language,
