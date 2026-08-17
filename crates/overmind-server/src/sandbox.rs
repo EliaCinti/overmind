@@ -449,6 +449,27 @@ fn drop_to(_cmd: &mut Command, _config: &Config, _user: AgentUser) {
     // so this exists to keep the module compiling, not to be called.
 }
 
+/// A command that runs *as the agent does* — same uid, same `HOME` — and is not
+/// caged.
+///
+/// For asking questions about the agent's own environment (ADR-0030). In the
+/// image the server is root and the agent's credentials are not root's, so a
+/// probe run as the server answers confidently about the wrong home directory:
+/// it would report "not signed in" for a perfectly well signed-in agent, and
+/// Overmind would then believe it was in an economy nobody is in.
+///
+/// No cage, on the same reasoning [`command`] applies to `git` and the memory
+/// server: this is our own program with our own arguments, not agent-controlled
+/// work. The uid is not a cage here either — it is how we ask the question from
+/// the right place.
+pub fn as_agent(config: &Config, program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(user) = agent_user(config) {
+        drop_to(&mut cmd, config, user);
+    }
+    cmd
+}
+
 /// Hand a path to the agent's uid, so the agent can work in it.
 ///
 /// A no-op when there is no agent uid, which is every platform but our image.

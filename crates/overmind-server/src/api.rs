@@ -307,11 +307,17 @@ where
     Ok(Some(Option::deserialize(deserializer)?))
 }
 
-async fn health() -> Json<Value> {
+async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
+        // How this Overmind pays (ADR-0030). A machine-level fact rather than a
+        // company one, so it belongs here and not on the budget: two companies
+        // on one server cannot be paying different ways. The client reads it
+        // once and words the budget accordingly — a cap in dollars promises
+        // something under a key that it cannot promise under a plan.
+        "economy": crate::economy::as_json(&state.economy()),
     }))
 }
 
