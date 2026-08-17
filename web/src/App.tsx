@@ -13,6 +13,7 @@ import type {
   Task,
   View,
   Economy,
+  PlanWindow,
 } from "./lib/api";
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
@@ -57,6 +58,8 @@ export default function App() {
    * wrong meaning and correcting it.
    */
   const [economy, setEconomy] = useState<Economy | null>(null);
+  /** Where each plan window stands; refreshed on every live change. */
+  const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("chat");
@@ -84,12 +87,6 @@ export default function App() {
 
   // Bootstrap: companies + both catalogs + the models we ship (ADR-0021).
   useEffect(() => {
-    // Not knowing how we pay must never stop the app from starting; the
-    // interface has words for `unknown` and none for a failed boot.
-    api
-      .health()
-      .then((h) => setEconomy(h.economy))
-      .catch(() => setEconomy(null));
     Promise.all([
       api.listCompanies(),
       api.listArchetypes(),
@@ -110,6 +107,27 @@ export default function App() {
   useEffect(() => {
     if (companyId) localStorage.setItem(LAST_COMPANY, companyId);
   }, [companyId]);
+
+  /**
+   * How we pay, and where the plan stands. The economy is fixed for the life of
+   * the server; the plan window is not — it is learned from each run, so it is
+   * refetched on every live change alongside the rest.
+   */
+  const refreshHealth = useCallback(() => {
+    // Not knowing how we pay must never stop the app; the interface has words
+    // for `unknown` and none for a failed boot.
+    api
+      .health()
+      .then((h) => {
+        setEconomy(h.economy);
+        setPlanWindows(h.plan_windows);
+      })
+      .catch(() => setEconomy(null));
+  }, []);
+
+  useEffect(() => {
+    refreshHealth();
+  }, [refreshHealth, tick]);
 
   // Load everything for the selected company.
   const loadCompany = useCallback(async (id: string) => {
@@ -268,6 +286,7 @@ export default function App() {
                 agents={agents}
                 budgets={budgets}
                 economy={economy}
+                planWindows={planWindows}
                 proposal={proposals.find((p) => p.status === "proposed") ?? null}
                 onChanged={bump}
                 onHireUnder={openHire}

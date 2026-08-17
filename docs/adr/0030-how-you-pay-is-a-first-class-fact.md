@@ -44,14 +44,59 @@ With claude 2.1.233, on 2026-08-17:
   `subtype: "error_max_budget_usd"`, `terminal_reason: "budget_exhausted"`. It
   **overshoots**: a $0.05 cap recorded $0.080729, because it stops after
   exceeding rather than pre-authorising.
-- **Plan quota is not exposed anywhere we can reach.** An authenticated result
-  envelope carries `usage`, `modelUsage`, `service_tier` and `total_cost_usd`,
-  and no quota field. `/usage` exists only inside an interactive session.
-  `auth status` does not carry it.
+- **Plan quota is not on the surface we consume** — which is a narrower claim
+  than the one this ADR first made, and the correction is recorded below.
 
 That last one is the whole difficulty. The natural feature request — *"under a
-plan, show me the tokens left in the window"* — asks for a number the system
-cannot obtain.
+plan, show me what is left in the window"* — asks for a number that is not in
+anything Overmind reads.
+
+### Correction (2026-08-17, same day): the quota exists, on a surface we do not use
+
+This ADR first said the quota was "exposed nowhere we can reach". That was
+wrong, and it was wrong in the way worth catching: an absence inferred from the
+two places we happened to look. Reading the CLI's own vocabulary rather than
+guessing at it turns up a documented contract — the JSON a **status line**
+command receives:
+
+```
+"rate_limits": {   // Optional: Claude.ai subscription usage limits.
+                   // Only present for subscribers after first API response.
+  "five_hour": { "used_percentage": number, "resets_at": number },
+  "seven_day": { "used_percentage": number, "resets_at": number }
+}
+```
+
+A sibling field says plainly when it does not apply: `rate_limits_available` is
+*"False when plan rate limits do not apply (API key / 3P provider sessions)"* —
+which independently confirms the economy split this ADR is built on.
+
+**It changes the reason, not the decision.** A status line belongs to an
+interactive session, and Overmind invokes `-p`; the headless result envelope
+carries `usage`, `modelUsage`, `service_tier` and `total_cost_usd`, and no quota.
+So the life-line still shows no denominator under a plan — but because the
+number is absent from *the surface we consume*, which is a fact about our
+invocation and could change, rather than because it does not exist, which would
+have been a claim about the world that happened to be false.
+
+Exhaustion has a shape too, and it is worth writing down now that it has been
+seen:
+
+```
+error: { message, status, formatted, is_network_down,
+         rate_limits: { resets_at?, rate_limit_type? } | null
+           // "Quota-429 headers surfaced by the retry banner;
+           //  null when not a quota 429." }
+```
+
+So a plan running out is a **quota 429 carrying a reset time**, not one of the
+adapter's `subtype` values — the closed set is `success`, `error_during_execution`,
+`error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`,
+and none of them is this. That is why exhaustion cannot be recognised the way a
+budget ceiling can, and it is marked `@internal` on a retry event rather than
+present on the result. What reaches a headless run is whatever `formatted`
+became. **Still not matched on**, because the string has not been observed, and
+a matcher written from a schema is a matcher written from a guess.
 
 ## Decision
 
@@ -123,11 +168,51 @@ Showing the first under the second's name would put a fourth entry in the family
 of `permissions`, `model` and the cost ledger: believed, displayed, and wired to
 something that is not what it claims.
 
-So the life-line under a plan shows **what this Overmind has consumed in the
-window**, labelled as that, with no denominator — and says plainly that the
-plan's own remaining quota is not visible from here. A meter with an honest
-numerator and no denominator is more useful than a percentage of a number we
-made up.
+### 3b. Amended the same day: the plan *does* report, and it reports two clocks
+
+Pushed to look harder rather than accept "no", the answer changed twice. A
+headless run **does** report on the plan — not in the `-p json` envelope, but as
+a `rate_limit_event` on `--output-format stream-json --verbose`, measured:
+
+```json
+{"type":"rate_limit_event","rate_limit_info":{
+  "status":"allowed","resetsAt":1786983000,"rateLimitType":"five_hour",
+  "overageStatus":"rejected","overageDisabledReason":"out_of_credits",
+  "isUsingOverage":false}}
+```
+
+So the default adapter command becomes `stream-json`, and the reason is not the
+streaming: it is that the plan's state then **rides along with work already
+being done** rather than costing a call of its own — the bargain ADR-0026 made
+for memory watermarks. The final `result` event is the identical envelope
+`json` produced, so cost parsing and failure reporting read exactly what they
+always did.
+
+What this gives, and what it still does not:
+
+- **Not a percentage.** `used_percentage` lives only in the status line, and a
+  status line is never invoked headless — measured directly, with a probe
+  configured to capture it, which never fired.
+- **But a window, a reset time, and a state.** Which of the plan's two clocks is
+  limiting, when it lets go, and `allowed` / `allowed_warning` / `blocked` /
+  `rejected` — the adapter's own closed vocabulary, read rather than inferred
+  from prose. For someone waiting on a plan, "the five-hour window is back in
+  two hours" answers the question a percentage only implies.
+- **Two clocks, kept apart.** A plan limits on five hours *and* seven days, and
+  a run reports whichever is biting at that moment. So they are learned
+  separately and displayed separately: collapsing them into "the plan" hides
+  the one you are about to hit. A window nobody has reported yet says **"not
+  reported yet"** rather than borrowing the other's state — "we have not heard"
+  and "you are fine" are different sentences, and only one of them is true
+  before the first report.
+
+**Exhaustion is therefore recognisable exactly**, from `status`, and not by
+matching prose. Whether a room *pauses* on it is the next question and is not
+settled here; what is settled is that the signal exists and has a name.
+
+The correction that made this possible is worth keeping in view: the first
+answer was "the quota is exposed nowhere", and it was an absence inferred from
+two places we happened to look.
 
 **Exhaustion is recognised when it arrives.** M18 already put this on the shelf:
 *"subscription exhaustion is a different failure that arrives as an adapter

@@ -645,8 +645,22 @@ pub(crate) fn agent_command(
     if let Some(configured) = state.config.agent_cmd.clone() {
         return configured;
     }
+    // `stream-json` rather than `json`, and the reason is not the streaming.
+    //
+    // A stream run emits a `rate_limit_event` carrying the subscription's
+    // current window, when it resets, and whether we are still allowed inside
+    // it (ADR-0030). A `-p json` run does not, and the status line that would
+    // otherwise carry it is never invoked headless — measured, not assumed. So
+    // this is how the plan's state **rides along with work already being done**
+    // instead of costing a call of its own, the same bargain ADR-0026 made for
+    // memory watermarks.
+    //
+    // The final `result` event is the identical envelope `json` produced, so
+    // cost parsing and failure reporting read exactly what they always did.
+    // `--verbose` is not optional here: the CLI refuses `stream-json` under
+    // `--print` without it.
     let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
-                   --output-format json"
+                   --output-format stream-json --verbose"
         .to_string();
     // The cap, handed to the adapter itself (ADR-0030). Since M6 the gate has
     // been *around* the run: check, reserve, spawn, record. What it could not do
@@ -1226,6 +1240,12 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             if !stderr.trim().is_empty() {
                 output.push_str("\n--- stderr ---\n");
                 output.push_str(stderr.trim());
+            }
+            // What the run learned about the plan on its way past (ADR-0030).
+            // Read from success and failure alike: a run that was *refused* for
+            // running out is exactly the one whose report matters most.
+            if let Some(window) = crate::economy::plan_window_in(&output) {
+                ctx.state.set_plan_window(window);
             }
             let exit_code = out.status.code().unwrap_or(-1);
             if exit_code == 0 {

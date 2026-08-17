@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
-import type { Agent, AgentBudget, Economy, OrgProposal } from "../lib/api";
+import type { Agent, AgentBudget, Economy, OrgProposal, PlanWindow } from "../lib/api";
+import { PLAN_WINDOWS } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
@@ -14,6 +15,7 @@ export function OrgChart({
   agents,
   budgets,
   economy,
+  planWindows,
   proposal,
   onChanged,
   onHireUnder,
@@ -23,6 +25,8 @@ export function OrgChart({
   budgets: AgentBudget[];
   /** How the server pays, so a cap is read as what it is (ADR-0030). */
   economy: Economy | null;
+  /** Where each of the plan's windows stands, as last reported. */
+  planWindows: Record<string, PlanWindow>;
   /** A team the CEO drew up and you have not answered yet (M15). */
   proposal: OrgProposal | null;
   onChanged: () => void;
@@ -49,7 +53,7 @@ export function OrgChart({
         )}
         {proposal && <OrgProposalPanel proposal={proposal} onChanged={onChanged} />}
 
-        {active.length > 0 && <EconomyNote economy={economy} />}
+        {active.length > 0 && <EconomyNote economy={economy} planWindows={planWindows} />}
 
         {/* The human owner is the root of the chart. */}
         <div className="mb-2 flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 shadow-soft">
@@ -273,7 +277,13 @@ function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy 
  * each bar would be noise — and leaving it out entirely is how a number gets
  * read as a promise nobody made.
  */
-function EconomyNote({ economy }: { economy: Economy | null }) {
+function EconomyNote({
+  economy,
+  planWindows,
+}: {
+  economy: Economy | null;
+  planWindows: Record<string, PlanWindow>;
+}) {
   const t = useT();
   if (!economy) return null;
   const what =
@@ -291,9 +301,70 @@ function EconomyNote({ economy }: { economy: Economy | null }) {
         ? t("economy.subscriptionMeaning")
         : t("economy.unknownMeaning");
   return (
-    <p className="mb-2.5 text-[11px] text-muted-foreground">
-      <span className="font-medium">{what}</span> · {means}
-    </p>
+    <div className="mb-2.5 space-y-1">
+      <p className="text-[11px] text-muted-foreground">
+        <span className="font-medium">{what}</span> · {means}
+      </p>
+      {economy.kind === "subscription" && <PlanLifeline windows={planWindows} />}
+    </div>
+  );
+}
+
+/**
+ * The plan's own life-line: **both** windows, side by side (ADR-0030).
+ *
+ * A plan limits on two clocks at once — five hours and seven days — and they
+ * run out at different moments, so collapsing them into "the plan" hides the
+ * thing you are about to hit. Each is learned separately, because a run reports
+ * whichever is governing it right then; one nobody has reported yet says so
+ * rather than borrowing the other's state.
+ *
+ * No percentage, and that is not an oversight: `used_percentage` exists only in
+ * the status line, which a headless run never invokes. What a run does report is
+ * the window, when it resets, and whether we are still allowed inside it —
+ * which is what a person waiting on it is actually asking.
+ */
+function PlanLifeline({ windows }: { windows: Record<string, PlanWindow> }) {
+  const t = useT();
+  const { timeUntil } = useFormats();
+  const name = (w: string) =>
+    w === "five_hour"
+      ? t("economy.windowFiveHour")
+      : w === "seven_day"
+        ? t("economy.windowSevenDay")
+        : t("economy.windowOther");
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+      <span className="text-muted-foreground">{t("economy.planLifeline")}</span>
+      {PLAN_WINDOWS.map((key) => {
+        const w = windows[key];
+        if (!w) {
+          return (
+            <span key={key} className="text-muted-foreground/60">
+              {name(key)} · {t("economy.windowUnreported")}
+            </span>
+          );
+        }
+        const tone =
+          w.health === "exhausted"
+            ? "font-medium text-[var(--color-status-blocked)]"
+            : w.health === "warning"
+              ? "text-[var(--color-status-in_review)]"
+              : "text-muted-foreground";
+        const state =
+          w.health === "exhausted"
+            ? t("economy.planExhausted")
+            : w.health === "warning"
+              ? t("economy.planWarning")
+              : t("economy.planAllowed");
+        return (
+          <span key={key} className={tone}>
+            <span className="font-medium">{name(key)}</span> · {state} ·{" "}
+            {t("economy.windowResets", { when: timeUntil(w.resets_at) })}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 

@@ -318,6 +318,15 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         // once and words the budget accordingly — a cap in dollars promises
         // something under a key that it cannot promise under a plan.
         "economy": crate::economy::as_json(&state.economy()),
+        // Where each of the plan's windows stands, as last reported. Empty
+        // under an API key, where windows do not apply, and empty before the
+        // first run says anything — a window we have not heard about is absent
+        // rather than assumed healthy.
+        "plan_windows": state
+            .plan_windows()
+            .iter()
+            .map(|(k, w)| (k.clone(), crate::economy::window_as_json(w)))
+            .collect::<serde_json::Map<_, _>>(),
     }))
 }
 

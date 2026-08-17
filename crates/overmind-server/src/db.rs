@@ -42,6 +42,13 @@ pub struct AppState {
     /// fact none of them are about. It also leaves room for re-asking when
     /// credentials change under a running server.
     economy: Arc<std::sync::RwLock<crate::economy::Economy>>,
+    /// Where a subscription stands in its current window (ADR-0030).
+    ///
+    /// Learned from the adapter's own `rate_limit_event` on each run rather
+    /// than asked for, so it costs nothing and is as fresh as the last piece of
+    /// work. `None` under an API key, where plan windows do not apply at all,
+    /// and before the first run has reported one.
+    plan_windows: Arc<std::sync::RwLock<crate::economy::PlanWindows>>,
 }
 
 impl AppState {
@@ -184,6 +191,27 @@ impl AppState {
     pub fn set_economy(&self, economy: crate::economy::Economy) {
         if let Ok(mut slot) = self.economy.write() {
             *slot = economy;
+        }
+    }
+
+    /// What each of the plan's windows was last reported to be doing.
+    pub fn plan_windows(&self) -> crate::economy::PlanWindows {
+        self.plan_windows
+            .read()
+            .map(|w| w.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remember what an adapter run reported about the plan.
+    ///
+    /// Best-effort throughout: a lock we cannot take costs a stale reading, and
+    /// a stale reading of a *courtesy* number must never be allowed to affect
+    /// the work that produced it.
+    pub fn set_plan_window(&self, window: crate::economy::PlanWindow) {
+        if let Ok(mut slot) = self.plan_windows.write() {
+            // Keyed by which window it is, so a report about the five-hour
+            // limit never overwrites what we know about the seven-day one.
+            slot.insert(window.window.clone(), window);
         }
     }
 }
@@ -469,6 +497,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         memory,
         brains: Arc::new(Mutex::new(HashMap::new())),
         economy: Arc::new(std::sync::RwLock::new(economy)),
+        plan_windows: Arc::new(std::sync::RwLock::new(Default::default())),
     })
 }
 

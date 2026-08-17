@@ -146,6 +146,102 @@ pub async fn detect(config: &Config) -> Economy {
     }
 }
 
+/// Where a subscription stands in the window that is governing it right now.
+///
+/// Not a percentage — that lives only in the status line, which a headless run
+/// never invokes (measured). What a headless run *does* get is better than
+/// nothing and arguably better than a percentage: which window applies, when it
+/// resets, and whether we are still allowed inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanWindow {
+    /// `five_hour` or `seven_day` — a plan has both, and this names the one
+    /// doing the limiting at the moment.
+    pub window: String,
+    /// Unix epoch seconds at which this window resets. The countdown a person
+    /// actually wants: "back at 14:30" beats "62% used".
+    pub resets_at: i64,
+    pub health: PlanHealth,
+}
+
+/// The adapter's own taxonomy, not our reading of its prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanHealth {
+    Allowed,
+    /// `allowed_warning` — still working, close to the edge.
+    Warning,
+    /// `blocked` or `rejected` — the plan has run out for this window.
+    Exhausted,
+}
+
+impl PlanHealth {
+    fn read(status: &str) -> Option<Self> {
+        match status {
+            "allowed" => Some(PlanHealth::Allowed),
+            "allowed_warning" => Some(PlanHealth::Warning),
+            "blocked" | "rejected" => Some(PlanHealth::Exhausted),
+            // A value the CLI grew after we were written. Silence beats
+            // guessing which side of the line it falls on.
+            _ => None,
+        }
+    }
+}
+
+/// The last plan report in an adapter's output, if it made one.
+///
+/// The adapter emits a `rate_limit_event` on a stream run, which is why the
+/// default command asks for `stream-json`: the plan's state then **rides along
+/// with work already being done** rather than costing a call of its own — the
+/// same bargain ADR-0026 made for memory watermarks.
+///
+/// The last one wins: a long run may report more than once, and the newest is
+/// the one still true.
+pub fn plan_window_in(output: &str) -> Option<PlanWindow> {
+    output
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("rate_limit_event"))
+        .find_map(|v| read_plan_window(v.get("rate_limit_info")?))
+}
+
+/// One `rate_limit_info` object, as measured on 2026-08-17.
+pub fn read_plan_window(info: &Value) -> Option<PlanWindow> {
+    Some(PlanWindow {
+        window: info
+            .get("rateLimitType")
+            .and_then(Value::as_str)?
+            .to_string(),
+        resets_at: info.get("resetsAt").and_then(Value::as_i64)?,
+        health: PlanHealth::read(info.get("status").and_then(Value::as_str)?)?,
+    })
+}
+
+/// What we know about each of a plan's windows, keyed by its name.
+///
+/// A plan has **both** a five-hour and a seven-day limit, and a run reports
+/// whichever is governing it at that moment — so they are learned separately
+/// and kept separately. A window nobody has reported yet is *absent*, not
+/// assumed healthy: "we have not heard" and "you are fine" are different
+/// sentences, and only one of them is true before the first report.
+pub type PlanWindows = std::collections::BTreeMap<String, PlanWindow>;
+
+/// The window names a plan actually has, in the order a person thinks about
+/// them: the one that bites first, then the one behind it.
+pub const PLAN_WINDOWS: [&str; 2] = ["five_hour", "seven_day"];
+
+/// How a plan window reaches a client.
+pub fn window_as_json(window: &PlanWindow) -> Value {
+    serde_json::json!({
+        "window": window.window,
+        "resets_at": window.resets_at,
+        "health": match window.health {
+            PlanHealth::Allowed => "allowed",
+            PlanHealth::Warning => "warning",
+            PlanHealth::Exhausted => "exhausted",
+        },
+    })
+}
+
 /// One line for the startup log — and it says what the cap *means*, not only
 /// which economy won, because that is the part a reader is about to act on.
 pub fn describe(economy: &Economy) -> String {
@@ -274,5 +370,100 @@ mod tests {
             }
             .is_metered()
         );
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    /// The event exactly as measured on 2026-08-17, from a headless
+    /// `--output-format stream-json --verbose` run on a subscription.
+    const OBSERVED: &str = r#"{"type":"system","subtype":"init","model":"claude-opus-5"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1786983000,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false},"uuid":"7cde8dec","session_id":"dd7de845"}
+{"type":"assistant","message":{}}
+{"type":"result","subtype":"success","total_cost_usd":0.01}"#;
+
+    #[test]
+    fn a_stream_run_reports_which_window_is_governing_and_when_it_resets() {
+        let window = plan_window_in(OBSERVED).expect("the observed run reports a window");
+        assert_eq!(window.window, "five_hour");
+        assert_eq!(window.resets_at, 1_786_983_000);
+        assert_eq!(window.health, PlanHealth::Allowed);
+    }
+
+    /// The adapter's own taxonomy, read rather than interpreted. `blocked` and
+    /// `rejected` are what a plan running out looks like — which is why
+    /// exhaustion can be recognised exactly here, and could not be recognised
+    /// at all from the prose of a failed `-p json` run.
+    #[test]
+    fn the_status_vocabulary_is_the_adapters_and_not_ours() {
+        assert_eq!(PlanHealth::read("allowed"), Some(PlanHealth::Allowed));
+        assert_eq!(
+            PlanHealth::read("allowed_warning"),
+            Some(PlanHealth::Warning)
+        );
+        assert_eq!(PlanHealth::read("blocked"), Some(PlanHealth::Exhausted));
+        assert_eq!(PlanHealth::read("rejected"), Some(PlanHealth::Exhausted));
+        // A value the CLI grows after us is not silently sorted onto a side.
+        assert_eq!(PlanHealth::read("something_new"), None);
+    }
+
+    /// A long run can report more than once, and the newest is the one still
+    /// true.
+    #[test]
+    fn the_last_report_wins() {
+        let two = format!(
+            "{}\n{}",
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1,"rateLimitType":"five_hour"}}"#,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":2,"rateLimitType":"seven_day"}}"#
+        );
+        let window = plan_window_in(&two).expect("a window");
+        assert_eq!(window.window, "seven_day");
+        assert_eq!(window.resets_at, 2);
+        assert_eq!(window.health, PlanHealth::Warning);
+    }
+
+    /// Under an API key there is no such event at all, and the absence must
+    /// read as "no plan window" rather than as a parse failure.
+    #[test]
+    fn a_run_that_says_nothing_about_a_plan_reports_no_window() {
+        assert_eq!(
+            plan_window_in(r#"{"type":"result","subtype":"success","total_cost_usd":0.01}"#),
+            None
+        );
+        assert_eq!(plan_window_in(""), None);
+    }
+
+    /// An event missing the fields we need is not half a window.
+    #[test]
+    fn an_incomplete_report_is_no_report() {
+        assert_eq!(
+            plan_window_in(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_window_reaches_a_client_with_its_health_named() {
+        let json = window_as_json(&PlanWindow {
+            window: "five_hour".into(),
+            resets_at: 1_786_983_000,
+            health: PlanHealth::Exhausted,
+        });
+        assert_eq!(json["window"], "five_hour");
+        assert_eq!(json["resets_at"], 1_786_983_000_i64);
+        assert_eq!(json["health"], "exhausted");
+    }
+
+    #[test]
+    fn the_observed_event_is_json_we_can_actually_parse() {
+        // Guards the fixture itself: a typo here would make every test above
+        // pass against a string that is not the thing we measured.
+        let lines: Vec<&str> = OBSERVED.lines().collect();
+        assert_eq!(lines.len(), 4);
+        for line in lines {
+            serde_json::from_str::<Value>(line).expect("every observed line is json");
+        }
     }
 }

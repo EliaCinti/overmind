@@ -265,13 +265,25 @@ export const en = {
     subscription: "Covered by a subscription",
     subscriptionWithPlan: "Covered by a {plan} subscription",
     subscriptionMeaning:
-      "Amounts are equivalents, not charges — and your plan's own remaining quota is not visible from here.",
+      "Amounts are equivalents, not charges. Of the plan itself we can see the window, not how much of it is left.",
     unknown: "Overmind cannot tell how it is paying",
     unknownMeaning: "The cap still brakes a looping agent, but do not read it as a promise.",
     left: "{pct}% left",
     ofCap: "{used} of {cap}",
     approxOfCap: "≈{used} of {cap}",
     spentNoCap: "{used} spent",
+    usedThisMonth: "Overmind has used {amount} this month.",
+    monthNotPlanWindow:
+      "Counted over a calendar month. Your plan measures its own windows, which Overmind cannot see from here.",
+    windowFiveHour: "5-hour window",
+    windowSevenDay: "7-day window",
+    windowOther: "plan window",
+    windowResets: "resets {when}",
+    planWarning: "close to the limit",
+    planExhausted: "the plan has run out for this window",
+    planAllowed: "fine",
+    windowUnreported: "not reported yet",
+    planLifeline: "Your plan",
   },
   org: {
     you: "You",
@@ -686,13 +698,25 @@ export const it: Dictionary = {
     subscription: "Coperto da un abbonamento",
     subscriptionWithPlan: "Coperto da un abbonamento {plan}",
     subscriptionMeaning:
-      "Gli importi sono equivalenti, non addebiti — e la quota residua del tuo piano non è visibile da qui.",
+      "Gli importi sono equivalenti, non addebiti. Del piano vediamo la finestra, non quanto ne resta.",
     unknown: "Overmind non riesce a capire come sta pagando",
     unknownMeaning: "Il tetto frena comunque un agente in loop, ma non leggerlo come una promessa.",
     left: "{pct}% rimasto",
     ofCap: "{used} di {cap}",
     approxOfCap: "≈{used} di {cap}",
     spentNoCap: "{used} spesi",
+    usedThisMonth: "Overmind ha usato {amount} questo mese.",
+    monthNotPlanWindow:
+      "Contato su un mese di calendario. Il tuo piano misura le proprie finestre, che Overmind da qui non vede.",
+    windowFiveHour: "Finestra di 5 ore",
+    windowSevenDay: "Finestra di 7 giorni",
+    windowOther: "Finestra del piano",
+    windowResets: "si ricarica {when}",
+    planWarning: "vicino al limite",
+    planExhausted: "il piano è esaurito per questa finestra",
+    planAllowed: "ok",
+    windowUnreported: "non ancora riportata",
+    planLifeline: "Il tuo piano",
   },
   org: {
     you: "Tu",
@@ -1091,6 +1115,21 @@ export function useFormats() {
       const hours = Math.round(mins / 60);
       if (hours < 24) return relative.format(-hours, "hour");
       return relative.format(-Math.round(hours / 24), "day");
+    },
+    /**
+     * The same idea pointed forward, for a plan window that has not reset yet
+     * (ADR-0030). `Intl` words it: "tra 2 ore" and "in 2 hours" differ in more
+     * than vocabulary, and a table of "{n}h" strings gets that wrong per
+     * language.
+     */
+    timeUntil: (epochSeconds: number) => {
+      const secs = Math.round(epochSeconds - Date.now() / 1000);
+      if (secs <= 0) return relative.format(0, "second");
+      const mins = Math.round(secs / 60);
+      if (mins < 60) return relative.format(mins, "minute");
+      const hours = Math.round(mins / 60);
+      if (hours < 24) return relative.format(hours, "hour");
+      return relative.format(Math.round(hours / 24), "day");
     },
   };
 }
