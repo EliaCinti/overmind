@@ -12,6 +12,8 @@ import type {
   ProjectDetail,
   Task,
   View,
+  Economy,
+  PlanWindow,
 } from "./lib/api";
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
@@ -48,6 +50,16 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectDetail[]>([]);
   const [budgets, setBudgets] = useState<AgentBudget[]>([]);
   const [proposals, setProposals] = useState<OrgProposal[]>([]);
+  /**
+   * How the server pays (ADR-0030). A property of the machine, not of a
+   * company, so it is fetched once beside the catalogs rather than on every
+   * company switch. `null` until it answers, and the interface simply says
+   * nothing about the meaning of a cap until then — better than flashing the
+   * wrong meaning and correcting it.
+   */
+  const [economy, setEconomy] = useState<Economy | null>(null);
+  /** Where each plan window stands; refreshed on every live change. */
+  const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("chat");
@@ -95,6 +107,27 @@ export default function App() {
   useEffect(() => {
     if (companyId) localStorage.setItem(LAST_COMPANY, companyId);
   }, [companyId]);
+
+  /**
+   * How we pay, and where the plan stands. The economy is fixed for the life of
+   * the server; the plan window is not — it is learned from each run, so it is
+   * refetched on every live change alongside the rest.
+   */
+  const refreshHealth = useCallback(() => {
+    // Not knowing how we pay must never stop the app; the interface has words
+    // for `unknown` and none for a failed boot.
+    api
+      .health()
+      .then((h) => {
+        setEconomy(h.economy);
+        setPlanWindows(h.plan_windows);
+      })
+      .catch(() => setEconomy(null));
+  }, []);
+
+  useEffect(() => {
+    refreshHealth();
+  }, [refreshHealth, tick]);
 
   // Load everything for the selected company.
   const loadCompany = useCallback(async (id: string) => {
@@ -252,6 +285,8 @@ export default function App() {
               <OrgChart
                 agents={agents}
                 budgets={budgets}
+                economy={economy}
+                planWindows={planWindows}
                 proposal={proposals.find((p) => p.status === "proposed") ?? null}
                 onChanged={bump}
                 onHireUnder={openHire}

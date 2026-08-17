@@ -636,13 +636,54 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-pub(crate) fn agent_command(state: &AppState, caged: bool, mcp_config: Option<&Path>) -> String {
+pub(crate) fn agent_command(
+    state: &AppState,
+    caged: bool,
+    mcp_config: Option<&Path>,
+    ceiling_cents: Option<i64>,
+) -> String {
     if let Some(configured) = state.config.agent_cmd.clone() {
         return configured;
     }
+    // `stream-json` rather than `json`, and the reason is not the streaming.
+    //
+    // A stream run emits a `rate_limit_event` carrying the subscription's
+    // current window, when it resets, and whether we are still allowed inside
+    // it (ADR-0030). A `-p json` run does not, and the status line that would
+    // otherwise carry it is never invoked headless — measured, not assumed. So
+    // this is how the plan's state **rides along with work already being done**
+    // instead of costing a call of its own, the same bargain ADR-0026 made for
+    // memory watermarks.
+    //
+    // The final `result` event is the identical envelope `json` produced, so
+    // cost parsing and failure reporting read exactly what they always did.
+    // `--verbose` is not optional here: the CLI refuses `stream-json` under
+    // `--print` without it.
     let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
-                   --output-format json"
+                   --output-format stream-json --verbose"
         .to_string();
+    // The cap, handed to the adapter itself (ADR-0030). Since M6 the gate has
+    // been *around* the run: check, reserve, spawn, record. What it could not do
+    // is stop a run already under way, so an agent could overrun by the whole
+    // difference between the flat estimate and one turn's true cost — M18 said
+    // exactly that and left it open.
+    //
+    // This narrows it rather than closing it, and the difference matters:
+    // measured, a $0.05 ceiling recorded $0.080729, because the flag stops
+    // *after* exceeding rather than pre-authorising. So the gate stays the
+    // primary control and this is the second layer, which is also why it is
+    // passed in every economy: under a subscription the cap is not money, but a
+    // looping agent burns quota just the same and the brake is the same brake.
+    //
+    // Only when there is something to promise: an uncapped agent gets no
+    // ceiling, and a zero one would refuse the run at the first token — the
+    // gate has already decided whether it may start.
+    if let Some(cents) = ceiling_cents.filter(|c| *c > 0) {
+        cmd.push_str(&format!(
+            " --max-budget-usd {}",
+            crate::governance::dollars(cents)
+        ));
+    }
     // `--strict-mcp-config` matters as much as the config itself: without it the
     // CLI merges whatever MCP servers the machine's own configuration happens to
     // hold, and a caged agent would quietly inherit tools nobody granted it.
@@ -1015,10 +1056,31 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             release: false,
         };
     }
+    // What is left under the agent's cap, this run's own reservation excluded —
+    // it reserved at checkout, and counting that against itself would hand the
+    // adapter a ceiling of nothing (ADR-0030).
+    let ceiling = {
+        let cap = trait_budget_cents(&ctx.agent_traits);
+        match ctx.state.pool.acquire().await {
+            Ok(mut conn) => crate::governance::headroom_cents(
+                &mut conn,
+                &ctx.agent_id,
+                cap,
+                Some(&ctx.session_id),
+            )
+            .await
+            .unwrap_or(None),
+            // A ceiling we cannot compute is one we do not impose. The gate
+            // already let this run start, and inventing a limit from a failed
+            // query would stop work for a reason nobody could explain.
+            Err(_) => None,
+        }
+    };
     let agent_cmd = agent_command(
         &ctx.state,
         crate::sandbox::caged(&ctx.state.config, &cage),
         mcp.as_ref().map(|m| m.path.as_path()),
+        ceiling,
     );
     // Load what *this company* remembers about this kind of work, and put it
     // in front of the agent (and in an env var). A no-op when memory is off.
@@ -1179,6 +1241,12 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
                 output.push_str("\n--- stderr ---\n");
                 output.push_str(stderr.trim());
             }
+            // What the run learned about the plan on its way past (ADR-0030).
+            // Read from success and failure alike: a run that was *refused* for
+            // running out is exactly the one whose report matters most.
+            if let Some(window) = crate::economy::plan_window_in(&output) {
+                ctx.state.set_plan_window(window);
+            }
             let exit_code = out.status.code().unwrap_or(-1);
             if exit_code == 0 {
                 Outcome::Success { output }
@@ -1204,10 +1272,40 @@ fn adapter_failure(output: &str) -> Option<String> {
     if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
         return None;
     }
-    let said = envelope.get("result").and_then(Value::as_str)?.trim();
-    if said.is_empty() {
-        return None;
+    // The ceiling we handed it (ADR-0030). Worth naming rather than passing
+    // through, because this failure is *ours*: the agent did not break, it
+    // reached the cap this Overmind gave it, and the person reading has a
+    // specific thing they can do about that. The envelope carries no `result`
+    // in this case, so without this the whole event would read "agent exited
+    // with code 1".
+    if envelope.get("subtype").and_then(Value::as_str) == Some("error_max_budget_usd") {
+        let said = envelope
+            .get("errors")
+            .and_then(Value::as_array)
+            .and_then(|e| e.first())
+            .and_then(Value::as_str)
+            .unwrap_or("the run reached its budget ceiling");
+        return Some(format!(
+            "stopped at this agent's budget cap — {said}. Raise the cap to let it continue."
+        ));
     }
+    // Otherwise whatever the adapter said, preferring its prose and falling
+    // back to its error list — `Credit balance is too low` arrived in the first
+    // and a ceiling arrives in the second, and both beat an exit code.
+    let said = envelope
+        .get("result")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            envelope
+                .get("errors")
+                .and_then(Value::as_array)
+                .and_then(|e| e.first())
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })?;
     Some(crate::ceo::clamp_agent_text(said))
 }
 
@@ -1862,11 +1960,11 @@ mod adapter_command_tests {
     async fn the_permission_flag_never_travels_without_the_cage() {
         let state = state_with(None).await;
         assert!(
-            agent_command(&state, true, None).contains("--dangerously-skip-permissions"),
+            agent_command(&state, true, None, None).contains("--dangerously-skip-permissions"),
             "a caged agent that cannot write is a read-only agent"
         );
         assert!(
-            !agent_command(&state, false, None).contains("--dangerously-skip-permissions"),
+            !agent_command(&state, false, None, None).contains("--dangerously-skip-permissions"),
             "uncaged, the CLI's own prompt is the only boundary left"
         );
     }
@@ -1876,7 +1974,137 @@ mod adapter_command_tests {
     #[tokio::test]
     async fn a_configured_command_is_left_exactly_as_written() {
         let state = state_with(Some("sh /my/stub.sh".into())).await;
-        assert_eq!(agent_command(&state, true, None), "sh /my/stub.sh");
-        assert_eq!(agent_command(&state, false, None), "sh /my/stub.sh");
+        assert_eq!(agent_command(&state, true, None, None), "sh /my/stub.sh");
+        assert_eq!(agent_command(&state, false, None, None), "sh /my/stub.sh");
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::{adapter_failure, agent_command};
+    use crate::db::AppState;
+    use crate::governance::{BudgetCheck, dollars};
+
+    async fn default_state() -> AppState {
+        crate::db::init_with("sqlite::memory:", crate::Config::default())
+            .await
+            .expect("in-memory db")
+    }
+
+    /// Cents are Overmind's unit and dollars are the flag's. The join between
+    /// them is one place, and it has to survive the awkward numbers.
+    #[test]
+    fn cents_become_the_dollars_the_flag_expects() {
+        assert_eq!(dollars(4981), "49.81");
+        assert_eq!(dollars(5000), "50.00");
+        assert_eq!(dollars(7), "0.07");
+        assert_eq!(dollars(70), "0.70");
+        assert_eq!(dollars(100), "1.00");
+    }
+
+    /// A run's own reservation is what it is about to spend. Counting it against
+    /// itself would hand the adapter a ceiling of roughly nothing, which is the
+    /// mistake that turns a second layer into a broken product.
+    #[test]
+    fn a_runs_own_estimate_is_not_subtracted_from_its_ceiling() {
+        let check = BudgetCheck {
+            fits: true,
+            spent: 1000,
+            reserved: 500,
+            estimate: 50,
+            cap: 5000,
+        };
+        assert_eq!(check.headroom(), Some(3500));
+    }
+
+    /// An uncapped agent gets no ceiling: there is nothing to promise, and a
+    /// number invented here would be a limit nobody asked for.
+    #[test]
+    fn an_uncapped_agent_gets_no_ceiling() {
+        let check = BudgetCheck {
+            fits: true,
+            spent: 0,
+            reserved: 0,
+            estimate: 50,
+            cap: 0,
+        };
+        assert_eq!(check.headroom(), None);
+    }
+
+    /// Already over is zero, not negative — and zero must not reach the flag,
+    /// which is checked separately below.
+    #[test]
+    fn an_agent_already_at_its_cap_has_no_headroom() {
+        let check = BudgetCheck {
+            fits: false,
+            spent: 6000,
+            reserved: 0,
+            estimate: 50,
+            cap: 5000,
+        };
+        assert_eq!(check.headroom(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn the_ceiling_reaches_the_adapter_only_when_there_is_one() {
+        let state = default_state().await;
+        let with = agent_command(&state, true, None, Some(4981));
+        assert!(with.contains("--max-budget-usd 49.81"), "{with}");
+
+        // Uncapped: no flag at all.
+        let without = agent_command(&state, true, None, None);
+        assert!(!without.contains("--max-budget-usd"), "{without}");
+
+        // Zero would refuse the run at its first token, and whether it may run
+        // at all is the gate's decision, already made before we got here.
+        let zero = agent_command(&state, true, None, Some(0));
+        assert!(!zero.contains("--max-budget-usd"), "{zero}");
+    }
+
+    /// A configured adapter is left exactly as written — a stub is not a CLI
+    /// that has ever heard of this flag.
+    #[tokio::test]
+    async fn a_configured_command_gets_no_ceiling_bolted_on() {
+        let state = crate::db::init_with(
+            "sqlite::memory:",
+            crate::Config {
+                agent_cmd: Some("sh /my/stub.sh".into()),
+                ..crate::Config::default()
+            },
+        )
+        .await
+        .expect("in-memory db");
+        assert_eq!(
+            agent_command(&state, true, None, Some(4981)),
+            "sh /my/stub.sh"
+        );
+    }
+
+    /// The envelope for a ceiling stop carries no `result`, so without
+    /// recognising it the whole event reads "agent exited with code 1". This is
+    /// the real payload, as measured on 2026-08-17.
+    #[test]
+    fn a_run_stopped_by_its_ceiling_says_so_and_says_what_to_do() {
+        let observed = r#"{"is_error":true,"subtype":"error_max_budget_usd","terminal_reason":"budget_exhausted","errors":["Reached maximum budget ($0.05)"],"type":"result"}"#;
+        let said = adapter_failure(observed).expect("a ceiling stop is a reportable failure");
+        assert!(said.contains("budget cap"), "{said}");
+        assert!(said.contains("Reached maximum budget"), "{said}");
+        assert!(said.contains("Raise the cap"), "{said}");
+    }
+
+    /// The pre-existing path still wins where the adapter wrote prose.
+    #[test]
+    fn an_adapters_own_words_are_preferred_when_it_has_any() {
+        let said = adapter_failure(r#"{"is_error":true,"result":"Credit balance is too low"}"#)
+            .expect("prose is a reportable failure");
+        assert_eq!(said, "Credit balance is too low");
+    }
+
+    /// And an error list is better than an exit code when there is no prose.
+    #[test]
+    fn an_error_list_beats_an_exit_code() {
+        let said = adapter_failure(r#"{"is_error":true,"errors":["the model refused"]}"#)
+            .expect("an error list is a reportable failure");
+        assert_eq!(said, "the model refused");
     }
 }

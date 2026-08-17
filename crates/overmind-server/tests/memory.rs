@@ -390,7 +390,13 @@ async fn concurrent_tasks_use_memory_in_parallel() {
         .collect();
 
     for session in &sessions {
-        for _ in 0..100 {
+        // Patience, not a race. Six agents and six memory servers are real
+        // processes, and on a machine already running the rest of the suite the
+        // old ten seconds was occasionally not enough — one failure in three
+        // full runs here. Raising a *timeout* is fair game; what is not is
+        // racing a clock to construct the state under test, which is a
+        // different defect and was fixed differently (see `brain.rs`).
+        for _ in 0..300 {
             let (_, sv) = send(&env.app, "GET", &format!("/api/sessions/{session}"), None).await;
             if sv["status"] == "completed" {
                 break;

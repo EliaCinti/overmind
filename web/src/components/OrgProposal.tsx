@@ -297,8 +297,7 @@ export function TwoRoads({
         <div className="min-w-0">
           <h2 className="text-base font-semibold">{t("org.twoRoadsTitle", { ceo: ceoName })}</h2>
           <p className="mt-1.5 max-w-[64ch] text-sm leading-relaxed text-muted-foreground">
-            Tell {ceoName} what you want to build and it will design the team — who to hire, in what
-            role, reporting to whom — and put the chart in front of you before anyone is hired.
+            {t("org.twoRoadsBody", { ceo: ceoName })}
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
             <Button variant="primary" onClick={onTalkToCeo}>

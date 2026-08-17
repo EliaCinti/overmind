@@ -402,3 +402,100 @@ async fn wait_for_status(env: &TestEnv, meeting_id: &str, want: &str) -> Value {
     .await;
     panic!("meeting never reached `{want}`: {m}");
 }
+
+/// A stub whose plan has run out — the adapter's own signal, not prose.
+///
+/// The `rate_limit_event` is the shape measured from a real headless run on
+/// 2026-08-17; only `status` differs, because a real exhaustion cannot be
+/// produced on demand without exhausting somebody's plan.
+const EXHAUSTED_PLAN_STUB: &str = r#"#!/bin/sh
+echo '{"say":"I have a view but no conclusion yet."}'
+echo '{"type":"rate_limit_event","rate_limit_info":{"status":"blocked","resetsAt":4102444800,"rateLimitType":"seven_day"}}'
+echo '{"total_cost_usd":0.30,"model":"stub","usage":{"input_tokens":10,"output_tokens":5}}'
+"#;
+
+/// A room whose *subscription* runs out waits too — and says a different thing.
+///
+/// The distinction is the point (ADR-0030). Running out of budget and running
+/// out of plan look identical from outside: a room stopped, a person told, a
+/// `resume` waiting. Their remedies are opposite. One is "raise the cap"; here
+/// there is no cap, and telling somebody to raise a limit that is not theirs is
+/// worse than saying nothing.
+#[tokio::test]
+async fn a_room_whose_plan_ran_out_waits_and_says_it_is_not_the_budget() {
+    let env = setup(EXHAUSTED_PLAN_STUB).await;
+
+    let hire = |name: &'static str| {
+        let app = env.app.clone();
+        let company_id = env.company_id.clone();
+        let ceo = env.ceo_id.clone();
+        async move {
+            let (status, agent) = send(
+                &app,
+                "POST",
+                &format!("/api/companies/{company_id}/agents"),
+                Some(json!({ "name": name, "archetype": "researcher", "reports_to": ceo })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "hire {name}: {agent}");
+            agent["id"].as_str().expect("id").to_string()
+        }
+    };
+    let vera = hire("Vera").await;
+    let bo = hire("Bo").await;
+    // Deliberately rich: whatever stops this room, it is not money.
+    set_budget(&env, &vera, 100_000).await;
+    set_budget(&env, &bo, 100_000).await;
+
+    let (status, convened) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/meetings", env.company_id),
+        Some(json!({
+            "topic": "Which projector",
+            "participants": [vera, bo],
+            "turn_cap": 8,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "convene: {convened}");
+    let meeting_id = convened["id"].as_str().expect("meeting id").to_string();
+
+    let meeting = wait_for_status(&env, &meeting_id, "paused").await;
+    let note = meeting["meeting"]["paused_note"].as_str().unwrap_or("");
+    assert!(
+        note.contains("subscription"),
+        "it must name the plan, not the budget: {note}"
+    );
+    assert!(
+        note.contains("seven-day"),
+        "and say which window is limiting: {note}"
+    );
+    assert!(
+        !note.to_lowercase().contains("raise"),
+        "there is no cap to raise here, and saying so would send someone to \
+         change a setting that cannot help: {note}"
+    );
+
+    // Told, with the fix that actually applies rather than the one that does not.
+    let (_, inbox) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/notifications", env.company_id),
+        None,
+    )
+    .await;
+    let notes = inbox["notifications"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let paused = notes
+        .iter()
+        .find(|n| n["kind"] == "meeting.pausedPlan")
+        .unwrap_or_else(|| panic!("a plan pause has its own kind: {inbox}"));
+    assert_eq!(paused["params"]["window"], "seven_day", "{paused}");
+    assert!(
+        paused["params"]["resetsAt"].as_i64().unwrap_or(0) > 0,
+        "the client needs the reset moment to word a countdown: {paused}"
+    );
+}

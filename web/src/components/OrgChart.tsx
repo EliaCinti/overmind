@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
-import type { Agent, AgentBudget, OrgProposal } from "../lib/api";
+import type { Agent, AgentBudget, Economy, OrgProposal, PlanWindow } from "../lib/api";
+import { PLAN_WINDOWS } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
@@ -13,6 +14,8 @@ import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
 export function OrgChart({
   agents,
   budgets,
+  economy,
+  planWindows,
   proposal,
   onChanged,
   onHireUnder,
@@ -20,6 +23,10 @@ export function OrgChart({
 }: {
   agents: Agent[];
   budgets: AgentBudget[];
+  /** How the server pays, so a cap is read as what it is (ADR-0030). */
+  economy: Economy | null;
+  /** Where each of the plan's windows stands, as last reported. */
+  planWindows: Record<string, PlanWindow>;
   /** A team the CEO drew up and you have not answered yet (M15). */
   proposal: OrgProposal | null;
   onChanged: () => void;
@@ -46,6 +53,8 @@ export function OrgChart({
         )}
         {proposal && <OrgProposalPanel proposal={proposal} onChanged={onChanged} />}
 
+        {active.length > 0 && <EconomyNote economy={economy} planWindows={planWindows} />}
+
         {/* The human owner is the root of the chart. */}
         <div className="mb-2 flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 shadow-soft">
           <span className="flex h-9 w-9 items-center justify-center rounded-md bg-primary text-primary-foreground">
@@ -66,6 +75,7 @@ export function OrgChart({
           childrenOf={childrenOf}
           agents={active}
           budgetOf={budgetOf}
+          economy={economy}
           depth={0}
           onChanged={onChanged}
           onHireUnder={onHireUnder}
@@ -83,6 +93,7 @@ function Tree({
   childrenOf,
   agents,
   budgetOf,
+  economy,
   depth,
   onChanged,
   onHireUnder,
@@ -91,6 +102,7 @@ function Tree({
   childrenOf: (id: string) => Agent[];
   agents: Agent[];
   budgetOf: (id: string) => AgentBudget | undefined;
+  economy: Economy | null;
   depth: number;
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
@@ -103,6 +115,7 @@ function Tree({
             agent={agent}
             agents={agents}
             budget={budgetOf(agent.id)}
+            economy={economy}
             onChanged={onChanged}
             onHireUnder={onHireUnder}
           />
@@ -111,6 +124,7 @@ function Tree({
             childrenOf={childrenOf}
             agents={agents}
             budgetOf={budgetOf}
+            economy={economy}
             depth={depth + 1}
             onChanged={onChanged}
             onHireUnder={onHireUnder}
@@ -125,12 +139,14 @@ function Node({
   agent,
   agents,
   budget,
+  economy,
   onChanged,
   onHireUnder,
 }: {
   agent: Agent;
   agents: Agent[];
   budget: AgentBudget | undefined;
+  economy: Economy | null;
   onChanged: () => void;
   onHireUnder: (managerId: string | null) => void;
 }) {
@@ -197,7 +213,7 @@ function Node({
         </div>
       </div>
 
-      {budget && budget.budget_cents > 0 && <BudgetBar budget={budget} />}
+      {budget && budget.budget_cents > 0 && <BudgetBar budget={budget} economy={economy} />}
 
       {editing && (
         <EditRow
@@ -211,19 +227,36 @@ function Node({
   );
 }
 
-/** Month-to-date spend (+ in-flight reservation) against the cap. */
-function BudgetBar({ budget }: { budget: AgentBudget }) {
+/**
+ * Month-to-date spend (+ in-flight reservation) against the cap — and how much
+ * of it is left, which is the number a person actually steers by.
+ *
+ * What it says depends on how the work is paid for (ADR-0030). Under an API key
+ * these are charges and the cap is a ceiling in money. Under a subscription they
+ * are equivalents nobody will be billed for, so the amounts wear a `≈` and the
+ * remaining percentage is of *Overmind's own cap* — never of the plan, whose
+ * quota is not visible from here. Presenting one as the other would be the lie
+ * this milestone exists to avoid.
+ */
+function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy | null }) {
+  const t = useT();
   const { formatCents } = useFormats();
   const used = budget.spent_cents + budget.reserved_cents;
   const pct = Math.min(100, (used / budget.budget_cents) * 100);
+  const left = Math.max(0, 100 - Math.round(pct));
   const tone =
     pct >= 100
       ? "var(--color-status-blocked)"
       : pct >= 80
         ? "var(--color-status-in_review)"
         : "var(--color-status-done)";
+  const equivalent = economy?.kind === "subscription";
+  const amounts = t(equivalent ? "economy.approxOfCap" : "economy.ofCap", {
+    used: formatCents(used),
+    cap: formatCents(budget.budget_cents),
+  });
   return (
-    <div className="mt-2.5 flex items-center gap-2">
+    <div className="mt-2.5 flex items-center gap-2" title={amounts}>
       <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
         <div
           className="h-full rounded-full transition-all"
@@ -231,8 +264,115 @@ function BudgetBar({ budget }: { budget: AgentBudget }) {
         />
       </div>
       <span className="mono shrink-0 text-[11px] text-muted-foreground">
-        {formatCents(used)}/{formatCents(budget.budget_cents)}
+        {t("economy.left", { pct: left })}
       </span>
+    </div>
+  );
+}
+
+/**
+ * Said once, above the chart, rather than on every agent card.
+ *
+ * The meaning of a cap is a property of the whole server, so repeating it beside
+ * each bar would be noise — and leaving it out entirely is how a number gets
+ * read as a promise nobody made.
+ */
+function EconomyNote({
+  economy,
+  planWindows,
+}: {
+  economy: Economy | null;
+  planWindows: Record<string, PlanWindow>;
+}) {
+  const t = useT();
+  if (!economy) return null;
+  const what =
+    economy.kind === "key"
+      ? t("economy.key")
+      : economy.kind === "subscription"
+        ? economy.plan
+          ? t("economy.subscriptionWithPlan", { plan: economy.plan })
+          : t("economy.subscription")
+        : t("economy.unknown");
+  const means =
+    economy.kind === "key"
+      ? t("economy.keyMeaning")
+      : economy.kind === "subscription"
+        ? t("economy.subscriptionMeaning")
+        : t("economy.unknownMeaning");
+  return (
+    <div className="mb-2.5 space-y-1">
+      <p className="text-[11px] text-muted-foreground">
+        <span className="font-medium">{what}</span> · {means}
+      </p>
+      {economy.kind === "subscription" && <PlanLifeline windows={planWindows} />}
+      {economy.kind === "key" && economy.overrides_login && (
+        // Nothing is broken here, which is exactly why it goes unnoticed: the
+        // work runs, the plan sits unused, and the bill arrives later. The CLI
+        // warns in a log line; a log line is not being told.
+        <p className="text-[11px] text-[var(--color-status-in_review)]">
+          <span className="font-medium">{t("economy.keyOverridesLogin")}</span>{" "}
+          {t("economy.keyOverridesLoginFix")}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The plan's own life-line: **both** windows, side by side (ADR-0030).
+ *
+ * A plan limits on two clocks at once — five hours and seven days — and they
+ * run out at different moments, so collapsing them into "the plan" hides the
+ * thing you are about to hit. Each is learned separately, because a run reports
+ * whichever is governing it right then; one nobody has reported yet says so
+ * rather than borrowing the other's state.
+ *
+ * No percentage, and that is not an oversight: `used_percentage` exists only in
+ * the status line, which a headless run never invokes. What a run does report is
+ * the window, when it resets, and whether we are still allowed inside it —
+ * which is what a person waiting on it is actually asking.
+ */
+function PlanLifeline({ windows }: { windows: Record<string, PlanWindow> }) {
+  const t = useT();
+  const { timeUntil } = useFormats();
+  const name = (w: string) =>
+    w === "five_hour"
+      ? t("economy.windowFiveHour")
+      : w === "seven_day"
+        ? t("economy.windowSevenDay")
+        : t("economy.windowOther");
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
+      <span className="text-muted-foreground">{t("economy.planLifeline")}</span>
+      {PLAN_WINDOWS.map((key) => {
+        const w = windows[key];
+        if (!w) {
+          return (
+            <span key={key} className="text-muted-foreground/60">
+              {name(key)} · {t("economy.windowUnreported")}
+            </span>
+          );
+        }
+        const tone =
+          w.health === "exhausted"
+            ? "font-medium text-[var(--color-status-blocked)]"
+            : w.health === "warning"
+              ? "text-[var(--color-status-in_review)]"
+              : "text-muted-foreground";
+        const state =
+          w.health === "exhausted"
+            ? t("economy.planExhausted")
+            : w.health === "warning"
+              ? t("economy.planWarning")
+              : t("economy.planAllowed");
+        return (
+          <span key={key} className={tone}>
+            <span className="font-medium">{name(key)}</span> · {state} ·{" "}
+            {t("economy.windowResets", { when: timeUntil(w.resets_at) })}
+          </span>
+        );
+      })}
     </div>
   );
 }

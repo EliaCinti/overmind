@@ -84,6 +84,60 @@ impl BudgetCheck {
     pub fn observed(&self) -> i64 {
         self.spent + self.reserved + self.estimate
     }
+
+    /// The most this run may spend before the cap is reached — everything under
+    /// it that is neither already spent nor spoken for by something *else*.
+    ///
+    /// `None` when the agent is uncapped, because there is then no ceiling to
+    /// hand the adapter and inventing one would be a limit nobody asked for.
+    ///
+    /// Note what is *not* subtracted: this run's own estimate. The estimate is
+    /// a placeholder held at the gate so concurrent runs cannot overcommit, not
+    /// a budget for the run — subtracting it here would cap every run at the
+    /// difference between the flat estimate and the truth, which is the very
+    /// quantity M18 named as the open gap.
+    pub fn headroom(&self) -> Option<i64> {
+        (self.cap > 0).then(|| (self.cap - self.spent - self.reserved).max(0))
+    }
+}
+
+/// [`BudgetCheck::headroom`] for a run that has *already* reserved.
+///
+/// A task run reserves at checkout and spawns later, so by spawn time its own
+/// reservation is in the total — and counting it against itself would hand the
+/// adapter a ceiling of roughly nothing. `excluding_session` takes it back out.
+pub async fn headroom_cents(
+    conn: &mut SqliteConnection,
+    agent_id: &str,
+    cap: i64,
+    excluding_session: Option<&str>,
+) -> Result<Option<i64>, sqlx::Error> {
+    if cap <= 0 {
+        return Ok(None);
+    }
+    let window = month_window_start();
+    let spent = spent_cents(&mut *conn, agent_id, &window).await?;
+    let sessions: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_task_sessions
+         WHERE agent_id = ? AND status IN ('queued', 'running') AND id IS NOT ?",
+    )
+    .bind(agent_id)
+    .bind(excluding_session)
+    .fetch_one(&mut *conn)
+    .await?;
+    let turns: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(reserved_cents), 0) FROM agent_turn_reservations
+         WHERE agent_id = ? AND released_at IS NULL",
+    )
+    .bind(agent_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(Some((cap - spent - sessions.0 - turns.0).max(0)))
+}
+
+/// Cents as the adapter's `--max-budget-usd` wants them: plain dollars.
+pub fn dollars(cents: i64) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
 }
 
 /// Does one more run of `estimate` cents fit under `cap`?

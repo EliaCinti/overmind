@@ -3,6 +3,7 @@ pub mod audit;
 pub mod ceo;
 pub mod db;
 pub mod domain;
+pub mod economy;
 pub mod files;
 pub mod governance;
 pub mod i18n;

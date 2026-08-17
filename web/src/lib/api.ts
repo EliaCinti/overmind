@@ -397,7 +397,55 @@ export interface HireAgentBody {
   reports_to?: string | null;
 }
 
+/**
+ * How this Overmind pays for the work it does (ADR-0030).
+ *
+ * A property of the *server*, not of a company: two companies on one machine
+ * cannot be paying different ways. `metered` is the one the interface acts on —
+ * it is the difference between a cap that is a ceiling in real money and a cap
+ * that is an equivalent nobody will ever be charged.
+ */
+/**
+ * Where a subscription stands in the window governing it (ADR-0030).
+ *
+ * Learned from the adapter's own `rate_limit_event`, so it is as fresh as the
+ * last run and absent until one has happened. Never present under an API key,
+ * where plan windows do not apply at all.
+ */
+/** The window names a plan has, in the order they bite. Mirrors `economy::PLAN_WINDOWS`. */
+export const PLAN_WINDOWS = ["five_hour", "seven_day"] as const;
+
+export interface PlanWindow {
+  /** `five_hour` or `seven_day` — which limit is doing the limiting. */
+  window: string;
+  /** Unix epoch seconds. */
+  resets_at: number;
+  health: "allowed" | "warning" | "exhausted";
+}
+
+export type Economy =
+  | {
+      kind: "key";
+      metered: true;
+      /** A claude.ai login exists and the key is winning — the state where
+       *  somebody believes their plan is paying and it is not. */
+      overrides_login: boolean;
+    }
+  | { kind: "subscription"; metered: false; plan: string | null }
+  | { kind: "unknown"; metered: false; reason: string };
+
 export const api = {
+  /** Server identity, and how it pays. */
+  health: () =>
+    req<{
+      status: string;
+      version: string;
+      economy: Economy;
+      /** Keyed by window name (`five_hour`, `seven_day`); a window nobody has
+       *  reported yet is simply absent. */
+      plan_windows: Record<string, PlanWindow>;
+    }>("GET", "/health"),
+
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
   createCompany: (name: string, language: LanguageCode) =>
     req<Company>("POST", "/companies", { name, language }),

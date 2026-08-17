@@ -34,6 +34,21 @@ pub struct AppState {
     /// connection pool every time it is called — binding per task would respawn
     /// memory servers forever instead of reusing warm ones.
     brains: Arc<Mutex<HashMap<String, crate::mcp::Memory>>>,
+    /// Which economy this Overmind pays in (ADR-0030).
+    ///
+    /// Behind a lock rather than fixed at construction, and detected by the
+    /// *binary* rather than by `init_with`: asking costs a subprocess, and a
+    /// library that shells out when you build it makes every test pay for a
+    /// fact none of them are about. It also leaves room for re-asking when
+    /// credentials change under a running server.
+    economy: Arc<std::sync::RwLock<crate::economy::Economy>>,
+    /// Where a subscription stands in its current window (ADR-0030).
+    ///
+    /// Learned from the adapter's own `rate_limit_event` on each run rather
+    /// than asked for, so it costs nothing and is as fresh as the last piece of
+    /// work. `None` under an API key, where plan windows do not apply at all,
+    /// and before the first run has reported one.
+    plan_windows: Arc<std::sync::RwLock<crate::economy::PlanWindows>>,
 }
 
 impl AppState {
@@ -155,6 +170,50 @@ impl AppState {
     pub fn push(&self, event: Value) {
         let _ = self.events.send(event.to_string());
     }
+
+    /// Which economy this Overmind pays in (ADR-0030).
+    ///
+    /// A poisoned lock answers `Unknown` rather than panicking: not knowing how
+    /// you pay is a survivable state that the interface already has words for,
+    /// and taking the server down over it would be a worse answer than saying
+    /// so.
+    pub fn economy(&self) -> crate::economy::Economy {
+        match self.economy.read() {
+            Ok(e) => e.clone(),
+            Err(_) => crate::economy::Economy::Unknown {
+                reason: "the economy could not be read".into(),
+            },
+        }
+    }
+
+    /// Record what the probe found. Called by the binary at startup, after
+    /// [`crate::economy::detect`].
+    pub fn set_economy(&self, economy: crate::economy::Economy) {
+        if let Ok(mut slot) = self.economy.write() {
+            *slot = economy;
+        }
+    }
+
+    /// What each of the plan's windows was last reported to be doing.
+    pub fn plan_windows(&self) -> crate::economy::PlanWindows {
+        self.plan_windows
+            .read()
+            .map(|w| w.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remember what an adapter run reported about the plan.
+    ///
+    /// Best-effort throughout: a lock we cannot take costs a stale reading, and
+    /// a stale reading of a *courtesy* number must never be allowed to affect
+    /// the work that produced it.
+    pub fn set_plan_window(&self, window: crate::economy::PlanWindow) {
+        if let Ok(mut slot) = self.plan_windows.write() {
+            // Keyed by which window it is, so a report about the five-hour
+            // limit never overwrites what we know about the seven-day one.
+            slot.insert(window.window.clone(), window);
+        }
+    }
 }
 
 /// Server configuration (env-driven; tests inject their own via `init_with`).
@@ -207,6 +266,15 @@ pub struct Config {
     /// credentials and session state there, and the server's home is not the
     /// agent's to use even when it could reach it.
     pub agent_home: Option<PathBuf>,
+    /// Declare the economy instead of detecting it (`OVERMIND_ECONOMY=key` or
+    /// `subscription`, ADR-0030).
+    ///
+    /// For the case where we read it wrong, and for an adapter that is not
+    /// Claude Code and so cannot be asked. Deliberately not the primary path: a
+    /// setting that can disagree with reality is a setting that will, and here
+    /// the disagreement is somebody's bill. Anything we do not recognise is
+    /// ignored rather than guessed at.
+    pub economy_override: Option<crate::economy::Economy>,
     /// Where host repositories are mounted (`OVERMIND_REPOS_DIR`, `/repos` in
     /// the image).
     ///
@@ -239,6 +307,7 @@ impl Default for Config {
             agent_uid: None,
             agent_gid: None,
             agent_home: None,
+            economy_override: None,
             repos_dir: None,
             managed_brain: true,
         }
@@ -303,6 +372,21 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            // Only the two names mean anything; a typo leaves detection in
+            // charge rather than silently picking one.
+            economy_override: match std::env::var("OVERMIND_ECONOMY")
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "key" => Some(crate::economy::Economy::Key {
+                    // A declaration says which economy, not what it is
+                    // shadowing; only the probe can see that.
+                    overrides_login: false,
+                }),
+                "subscription" => Some(crate::economy::Economy::Subscription { plan: None }),
+                _ => None,
+            },
             repos_dir: std::env::var("OVERMIND_REPOS_DIR")
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -399,6 +483,14 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         }
     }
 
+    // Whatever was declared; the binary probes and refines it at startup.
+    let economy =
+        config
+            .economy_override
+            .clone()
+            .unwrap_or_else(|| crate::economy::Economy::Unknown {
+                reason: "not detected yet".into(),
+            });
     let (events, _) = broadcast::channel(256);
     let memory = crate::mcp::Memory::from_config(config.memory_cmd.clone());
     Ok(AppState {
@@ -408,6 +500,8 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         events,
         memory,
         brains: Arc::new(Mutex::new(HashMap::new())),
+        economy: Arc::new(std::sync::RwLock::new(economy)),
+        plan_windows: Arc::new(std::sync::RwLock::new(Default::default())),
     })
 }
 

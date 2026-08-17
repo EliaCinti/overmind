@@ -254,6 +254,14 @@ impl From<crate::ceo::CeoError> for ApiError {
                 crate::governance::euros(check.spent + check.reserved),
                 crate::governance::euros(check.cap),
             )),
+            // Also a conflict with the world, and also transient — but with a
+            // different remedy, so it says which one it is rather than letting
+            // a reader assume there is a cap to raise (ADR-0030).
+            CeoError::PlanExhausted(window) => ApiError::Conflict(format!(
+                "the subscription has run out for its {} window; it resets at {}",
+                window.window.replace('_', "-"),
+                crate::economy::reset_time(&window),
+            )),
             CeoError::Db(e) => ApiError::Internal(Box::new(e)),
         }
     }
@@ -307,11 +315,26 @@ where
     Ok(Some(Option::deserialize(deserializer)?))
 }
 
-async fn health() -> Json<Value> {
+async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "name": env!("CARGO_PKG_NAME"),
         "version": env!("CARGO_PKG_VERSION"),
+        // How this Overmind pays (ADR-0030). A machine-level fact rather than a
+        // company one, so it belongs here and not on the budget: two companies
+        // on one server cannot be paying different ways. The client reads it
+        // once and words the budget accordingly — a cap in dollars promises
+        // something under a key that it cannot promise under a plan.
+        "economy": crate::economy::as_json(&state.economy()),
+        // Where each of the plan's windows stands, as last reported. Empty
+        // under an API key, where windows do not apply, and empty before the
+        // first run says anything — a window we have not heard about is absent
+        // rather than assumed healthy.
+        "plan_windows": state
+            .plan_windows()
+            .iter()
+            .map(|(k, w)| (k.clone(), crate::economy::window_as_json(w)))
+            .collect::<serde_json::Map<_, _>>(),
     }))
 }
 

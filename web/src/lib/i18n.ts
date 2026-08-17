@@ -256,8 +256,40 @@ export const en = {
     budgetExhaustedBody:
       "{spent} of {limit} spent this month, so {agent} could not take its turn. Raise its cap, or wait for the new month.",
     meetingPausedTitle: "Meeting paused: {topic}",
+    meetingPausedPlanTitle: "Meeting paused: {topic}",
+    meetingPausedPlanBody:
+      "The subscription has run out for the {window}. Nothing is over budget — {agent} can carry on once it resets {when}.",
     meetingPausedBody:
       "{agent} reached its monthly budget ({spent} of {limit}), so the room stopped mid-discussion. Nothing is lost — raise the cap or wait for the new month, then resume it.",
+  },
+  economy: {
+    key: "Billed to an API key",
+    keyMeaning: "The cap is a ceiling in real money.",
+    keyOverridesLogin: "You are signed in with a subscription, and it is not paying.",
+    keyOverridesLoginFix:
+      "An API key takes precedence over a claude.ai login. Unset ANTHROPIC_API_KEY to let the plan pay.",
+    subscription: "Covered by a subscription",
+    subscriptionWithPlan: "Covered by a {plan} subscription",
+    subscriptionMeaning:
+      "Amounts are equivalents, not charges. Of the plan itself we can see the window, not how much of it is left.",
+    unknown: "Overmind cannot tell how it is paying",
+    unknownMeaning: "The cap still brakes a looping agent, but do not read it as a promise.",
+    left: "{pct}% left",
+    ofCap: "{used} of {cap}",
+    approxOfCap: "≈{used} of {cap}",
+    spentNoCap: "{used} spent",
+    usedThisMonth: "Overmind has used {amount} this month.",
+    monthNotPlanWindow:
+      "Counted over a calendar month. Your plan measures its own windows, which Overmind cannot see from here.",
+    windowFiveHour: "5-hour window",
+    windowSevenDay: "7-day window",
+    windowOther: "plan window",
+    windowResets: "resets {when}",
+    planWarning: "close to the limit",
+    planExhausted: "the plan has run out for this window",
+    planAllowed: "fine",
+    windowUnreported: "not reported yet",
+    planLifeline: "Your plan",
   },
   org: {
     you: "You",
@@ -663,8 +695,40 @@ export const it: Dictionary = {
     budgetExhaustedBody:
       "{spent} di {limit} spesi questo mese, quindi {agent} non ha potuto fare il suo turno. Alza il suo tetto, o aspetta il mese nuovo.",
     meetingPausedTitle: "Riunione in pausa: {topic}",
+    meetingPausedPlanTitle: "Riunione in pausa: {topic}",
+    meetingPausedPlanBody:
+      "L'abbonamento è esaurito per la {window}. Nessuno ha sforato il budget — {agent} può riprendere quando si ricarica {when}.",
     meetingPausedBody:
       "{agent} ha raggiunto il budget mensile ({spent} di {limit}), quindi la stanza si è fermata a metà discussione. Non è andato perso niente — alza il tetto o aspetta il mese nuovo, poi riprendila.",
+  },
+  economy: {
+    key: "Addebitato su una chiave API",
+    keyMeaning: "Il tetto è un limite in denaro vero.",
+    keyOverridesLogin: "Hai l'accesso con un abbonamento, e non è lui che sta pagando.",
+    keyOverridesLoginFix:
+      "Una chiave API ha la precedenza su un login claude.ai. Togli ANTHROPIC_API_KEY per far pagare il piano.",
+    subscription: "Coperto da un abbonamento",
+    subscriptionWithPlan: "Coperto da un abbonamento {plan}",
+    subscriptionMeaning:
+      "Gli importi sono equivalenti, non addebiti. Del piano vediamo la finestra, non quanto ne resta.",
+    unknown: "Overmind non riesce a capire come sta pagando",
+    unknownMeaning: "Il tetto frena comunque un agente in loop, ma non leggerlo come una promessa.",
+    left: "{pct}% rimasto",
+    ofCap: "{used} di {cap}",
+    approxOfCap: "≈{used} di {cap}",
+    spentNoCap: "{used} spesi",
+    usedThisMonth: "Overmind ha usato {amount} questo mese.",
+    monthNotPlanWindow:
+      "Contato su un mese di calendario. Il tuo piano misura le proprie finestre, che Overmind da qui non vede.",
+    windowFiveHour: "Finestra di 5 ore",
+    windowSevenDay: "Finestra di 7 giorni",
+    windowOther: "Finestra del piano",
+    windowResets: "si ricarica {when}",
+    planWarning: "vicino al limite",
+    planExhausted: "il piano è esaurito per questa finestra",
+    planAllowed: "ok",
+    windowUnreported: "non ancora riportata",
+    planLifeline: "Il tuo piano",
   },
   org: {
     you: "Tu",
@@ -951,7 +1015,7 @@ export function useCatalogText(): (
  */
 export function useNotificationText(): (n: Notification) => { title: string; body: string } {
   const t = useT();
-  const { formatCents } = useFormats();
+  const { formatCents, timeUntil } = useFormats();
   return (n) => {
     const p = n.params;
     const fallback = { title: n.title, body: n.body };
@@ -1005,6 +1069,25 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
             limit: formatCents(Number(p.limitCents ?? 0)),
           }),
         };
+      case "meeting.pausedPlan": {
+        // A limit nobody chose, so the sentence must not imply one that can be
+        // raised (ADR-0030). The window is named in the reader's language and
+        // the countdown is worded by `Intl`, not by us.
+        const w = String(p.window ?? "");
+        return {
+          title: t("notif.meetingPausedPlanTitle", { topic: v("topic") }),
+          body: t("notif.meetingPausedPlanBody", {
+            agent: v("agent"),
+            window:
+              w === "five_hour"
+                ? t("economy.windowFiveHour")
+                : w === "seven_day"
+                  ? t("economy.windowSevenDay")
+                  : t("economy.windowOther"),
+            when: timeUntil(Number(p.resetsAt ?? 0)),
+          }),
+        };
+      }
       case "meeting.failed":
         return {
           title: t("notif.meetingFailedTitle", { topic: v("topic") }),
@@ -1063,6 +1146,21 @@ export function useFormats() {
       const hours = Math.round(mins / 60);
       if (hours < 24) return relative.format(-hours, "hour");
       return relative.format(-Math.round(hours / 24), "day");
+    },
+    /**
+     * The same idea pointed forward, for a plan window that has not reset yet
+     * (ADR-0030). `Intl` words it: "tra 2 ore" and "in 2 hours" differ in more
+     * than vocabulary, and a table of "{n}h" strings gets that wrong per
+     * language.
+     */
+    timeUntil: (epochSeconds: number) => {
+      const secs = Math.round(epochSeconds - Date.now() / 1000);
+      if (secs <= 0) return relative.format(0, "second");
+      const mins = Math.round(secs / 60);
+      if (mins < 60) return relative.format(mins, "minute");
+      const hours = Math.round(mins / 60);
+      if (hours < 24) return relative.format(hours, "hour");
+      return relative.format(Math.round(hours / 24), "day");
     },
   };
 }
