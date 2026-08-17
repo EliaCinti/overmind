@@ -306,6 +306,15 @@ function EconomyNote({
         <span className="font-medium">{what}</span> · {means}
       </p>
       {economy.kind === "subscription" && <PlanLifeline windows={planWindows} />}
+      {economy.kind === "key" && economy.overrides_login && (
+        // Nothing is broken here, which is exactly why it goes unnoticed: the
+        // work runs, the plan sits unused, and the bill arrives later. The CLI
+        // warns in a log line; a log line is not being told.
+        <p className="text-[11px] text-[var(--color-status-in_review)]">
+          <span className="font-medium">{t("economy.keyOverridesLogin")}</span>{" "}
+          {t("economy.keyOverridesLoginFix")}
+        </p>
+      )}
     </div>
   );
 }

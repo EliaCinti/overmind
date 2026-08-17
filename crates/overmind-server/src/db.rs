@@ -379,7 +379,11 @@ impl Config {
                 .to_ascii_lowercase()
                 .as_str()
             {
-                "key" => Some(crate::economy::Economy::Key),
+                "key" => Some(crate::economy::Economy::Key {
+                    // A declaration says which economy, not what it is
+                    // shadowing; only the probe can see that.
+                    overrides_login: false,
+                }),
                 "subscription" => Some(crate::economy::Economy::Subscription { plan: None }),
                 _ => None,
             },

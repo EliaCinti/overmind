@@ -424,7 +424,13 @@ export interface PlanWindow {
 }
 
 export type Economy =
-  | { kind: "key"; metered: true }
+  | {
+      kind: "key";
+      metered: true;
+      /** A claude.ai login exists and the key is winning — the state where
+       *  somebody believes their plan is paying and it is not. */
+      overrides_login: boolean;
+    }
   | { kind: "subscription"; metered: false; plan: string | null }
   | { kind: "unknown"; metered: false; reason: string };
 

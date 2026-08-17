@@ -1,7 +1,7 @@
 # ADR-0030: How you pay is a first-class fact, and the cap promises only what it can
 
 - **Date:** 2026-08-17
-- **Status:** proposed
+- **Status:** accepted
 
 ## Context
 
@@ -47,9 +47,9 @@ With claude 2.1.233, on 2026-08-17:
 - **Plan quota is not on the surface we consume** — which is a narrower claim
   than the one this ADR first made, and the correction is recorded below.
 
-That last one is the whole difficulty. The natural feature request — *"under a
-plan, show me what is left in the window"* — asks for a number that is not in
-anything Overmind reads.
+That last one looked like the whole difficulty, and it was the one this ADR got
+wrong — twice, in opposite directions. Both corrections are below, in the order
+they happened, because how the answer moved is more useful than where it landed.
 
 ### Correction (2026-08-17, same day): the quota exists, on a surface we do not use
 
@@ -71,16 +71,15 @@ A sibling field says plainly when it does not apply: `rate_limits_available` is
 *"False when plan rate limits do not apply (API key / 3P provider sessions)"* —
 which independently confirms the economy split this ADR is built on.
 
-**It changes the reason, not the decision.** A status line belongs to an
-interactive session, and Overmind invokes `-p`; the headless result envelope
-carries `usage`, `modelUsage`, `service_tier` and `total_cost_usd`, and no quota.
-So the life-line still shows no denominator under a plan — but because the
-number is absent from *the surface we consume*, which is a fact about our
-invocation and could change, rather than because it does not exist, which would
-have been a claim about the world that happened to be false.
+**At this point it changed the reason and not the decision.** A status line
+belongs to an interactive session, and Overmind invokes `-p` — verified directly,
+with a status-line command configured to capture its input, which never fired.
+So the number was absent from *the surface we consume*, which is a fact about
+our invocation and could change, rather than absent from the world, which would
+have been a claim that happened to be false. **Section 3b below is where the
+invocation changed and the decision moved with it.**
 
-Exhaustion has a shape too, and it is worth writing down now that it has been
-seen:
+Exhaustion has a shape too, and it is worth writing down as first seen:
 
 ```
 error: { message, status, formatted, is_network_down,
@@ -93,10 +92,10 @@ So a plan running out is a **quota 429 carrying a reset time**, not one of the
 adapter's `subtype` values — the closed set is `success`, `error_during_execution`,
 `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`,
 and none of them is this. That is why exhaustion cannot be recognised the way a
-budget ceiling can, and it is marked `@internal` on a retry event rather than
-present on the result. What reaches a headless run is whatever `formatted`
-became. **Still not matched on**, because the string has not been observed, and
-a matcher written from a schema is a matcher written from a guess.
+budget ceiling can from a `subtype`, and it is marked `@internal` on a retry
+event rather than present on the result. Matching the resulting prose would have
+been a matcher written from a guess — which is what 3b makes unnecessary, since
+the same information arrives on the stream as a plain status field.
 
 ## Decision
 
@@ -224,10 +223,27 @@ failure, and that limitation is documented rather than guessed at.
 
 ### 4. A key that outranks a plan is said out loud
 
-If a key is present, Overmind says so where the budget is shown, in one line.
-The CLI already warns; a warning in a log nobody reads is not the same as the
-interface telling you that the plan you signed into is not the thing paying.
-Half of this landed in M19, when the compose file stopped defining
+Not "a key is present" — that is ordinary and needs no warning. The state worth
+naming is the quiet one: a claude.ai login exists, the key is winning, and the
+person believes their plan is covering the work. Nothing breaks, which is
+exactly why it goes unnoticed until a bill.
+
+So it is a distinct field, `Key { overrides_login }`, and the interface says the
+fact *and* the fix — "unset `ANTHROPIC_API_KEY` to let the plan pay" — because
+telling somebody which economy they are in gives them nothing to do about it.
+
+`authMethod` is what distinguishes the two, and it is worth noting that this is
+the one question it can answer. Slice A established it cannot tell a key from a
+plan: it says `claude.ai` for both a key-beside-a-login and a login alone. But
+that is precisely the signal for *"is there a login behind this key"* — with a
+key alone the CLI answers `api_key`. The field is useless for the first question
+and exactly right for the second, which is a good reminder that "unreliable
+field" is usually shorthand for "answering a different question".
+
+A key with nothing behind it stays quiet. An override warning that fires when
+nothing is being overridden is how people learn to ignore warnings.
+
+The other half landed in M19, when the compose file stopped defining
 `ANTHROPIC_API_KEY` as empty-but-present in every container.
 
 ## Alternatives considered

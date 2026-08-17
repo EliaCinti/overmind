@@ -262,6 +262,9 @@ export const en = {
   economy: {
     key: "Billed to an API key",
     keyMeaning: "The cap is a ceiling in real money.",
+    keyOverridesLogin: "You are signed in with a subscription, and it is not paying.",
+    keyOverridesLoginFix:
+      "An API key takes precedence over a claude.ai login. Unset ANTHROPIC_API_KEY to let the plan pay.",
     subscription: "Covered by a subscription",
     subscriptionWithPlan: "Covered by a {plan} subscription",
     subscriptionMeaning:
@@ -695,6 +698,9 @@ export const it: Dictionary = {
   economy: {
     key: "Addebitato su una chiave API",
     keyMeaning: "Il tetto è un limite in denaro vero.",
+    keyOverridesLogin: "Hai l'accesso con un abbonamento, e non è lui che sta pagando.",
+    keyOverridesLoginFix:
+      "Una chiave API ha la precedenza su un login claude.ai. Togli ANTHROPIC_API_KEY per far pagare il piano.",
     subscription: "Coperto da un abbonamento",
     subscriptionWithPlan: "Coperto da un abbonamento {plan}",
     subscriptionMeaning:

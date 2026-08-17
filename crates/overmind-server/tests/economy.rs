@@ -59,7 +59,9 @@ async fn before_anything_is_detected_the_api_says_it_does_not_know() {
 #[tokio::test]
 async fn a_declared_economy_is_reported_and_carries_its_meaning() {
     let body = health(overmind_server::Config {
-        economy_override: Some(overmind_server::economy::Economy::Key),
+        economy_override: Some(overmind_server::economy::Economy::Key {
+            overrides_login: false,
+        }),
         ..overmind_server::Config::default()
     })
     .await;
@@ -67,6 +69,10 @@ async fn a_declared_economy_is_reported_and_carries_its_meaning() {
     assert_eq!(
         body["economy"]["metered"], true,
         "a key is the only economy where the cap is money: {body}"
+    );
+    assert_eq!(
+        body["economy"]["overrides_login"], false,
+        "a declaration says which economy, not what it is shadowing: {body}"
     );
 
     let body = health(overmind_server::Config {

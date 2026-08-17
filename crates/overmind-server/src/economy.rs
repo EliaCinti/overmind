@@ -44,7 +44,15 @@ use crate::db::Config;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Economy {
     /// An API key pays. Spend is money, and the cap is a ceiling in dollars.
-    Key,
+    Key {
+        /// There is a claude.ai login here too, and the key is winning.
+        ///
+        /// Worth its own field rather than a footnote: this is the state where
+        /// somebody signed in, believes their plan is covering the work, and is
+        /// being billed instead. The CLI warns about it in a log line nobody
+        /// reads, which is not the same as being told.
+        overrides_login: bool,
+    },
     /// A subscription pays. Spend is quota inside a window we cannot see; the
     /// plan's name is reported when the CLI gives one, because "max" is more
     /// use to a person than "subscription".
@@ -58,7 +66,7 @@ pub enum Economy {
 impl Economy {
     /// Does the cap correspond to money that will actually be charged?
     pub fn is_metered(&self) -> bool {
-        matches!(self, Economy::Key)
+        matches!(self, Economy::Key { .. })
     }
 }
 
@@ -75,7 +83,12 @@ pub fn read(status: &Value) -> Economy {
     // Presence, not truthiness: the field is absent when no key is in play, and
     // its value names *where* the key came from rather than what it is.
     if status.get("apiKeySource").is_some_and(|v| !v.is_null()) {
-        return Economy::Key;
+        // Here `authMethod` earns its keep — not for telling a key from a plan,
+        // which it cannot do, but for telling whether there is a login *behind*
+        // the key. With a key alone the CLI answers `api_key`; with a key over a
+        // login it answers `claude.ai`, naming the thing it is overriding.
+        let overrides_login = status.get("authMethod").and_then(Value::as_str) == Some("claude.ai");
+        return Economy::Key { overrides_login };
     }
     if let Some(plan) = status.get("subscriptionType").and_then(Value::as_str) {
         return Economy::Subscription {
@@ -246,9 +259,14 @@ pub fn window_as_json(window: &PlanWindow) -> Value {
 /// which economy won, because that is the part a reader is about to act on.
 pub fn describe(economy: &Economy) -> String {
     match economy {
-        Economy::Key => "an API key — the budget cap is a ceiling in real money".into(),
+        Economy::Key {
+            overrides_login: true,
+        } => "an API key — which is overriding a claude.ai login you are signed into. Unset ANTHROPIC_API_KEY to let the plan pay. The budget cap is a ceiling in real money".into(),
+        Economy::Key {
+            overrides_login: false,
+        } => "an API key — the budget cap is a ceiling in real money".into(),
         Economy::Subscription { plan } => format!(
-            "a subscription{} — the budget cap is an equivalent, not a charge, and the plan's own quota is not visible from here",
+            "a subscription{} — the budget cap is an equivalent, not a charge. Of the plan itself, runs report which window is limiting and when it resets, not how much is left",
             plan.as_deref()
                 .map(|p| format!(" ({p})"))
                 .unwrap_or_default()
@@ -269,7 +287,9 @@ pub fn describe(economy: &Economy) -> String {
 /// asked.
 pub fn as_json(economy: &Economy) -> Value {
     match economy {
-        Economy::Key => serde_json::json!({ "kind": "key", "metered": true }),
+        Economy::Key { overrides_login } => serde_json::json!({
+            "kind": "key", "metered": true, "overrides_login": overrides_login
+        }),
         Economy::Subscription { plan } => serde_json::json!({
             "kind": "subscription", "metered": false, "plan": plan
         }),
@@ -293,7 +313,13 @@ mod tests {
             "apiKeySource": "ANTHROPIC_API_KEY", "email": null, "orgId": null,
             "orgName": null, "subscriptionType": null
         });
-        assert_eq!(read(&observed), Economy::Key);
+        assert_eq!(
+            read(&observed),
+            Economy::Key {
+                overrides_login: true
+            },
+            "a login is being overridden here, and the person deserves to know"
+        );
     }
 
     /// The same machine with the key unset. `authMethod` has not moved — which
@@ -320,7 +346,13 @@ mod tests {
             "loggedIn": true, "authMethod": "api_key", "apiProvider": "firstParty",
             "apiKeySource": "ANTHROPIC_API_KEY"
         });
-        assert_eq!(read(&observed), Economy::Key);
+        assert_eq!(
+            read(&observed),
+            Economy::Key {
+                overrides_login: false
+            },
+            "no login to override in the image — only a key"
+        );
     }
 
     /// `authMethod` answers `claude.ai` for both a key-and-login and a login
@@ -362,7 +394,12 @@ mod tests {
     /// asks before promising a dollar ceiling.
     #[test]
     fn only_a_key_is_metered() {
-        assert!(Economy::Key.is_metered());
+        assert!(
+            Economy::Key {
+                overrides_login: false
+            }
+            .is_metered()
+        );
         assert!(!Economy::Subscription { plan: None }.is_metered());
         assert!(
             !Economy::Unknown {
@@ -465,5 +502,85 @@ mod plan_tests {
         for line in lines {
             serde_json::from_str::<Value>(line).expect("every observed line is json");
         }
+    }
+}
+
+#[cfg(test)]
+mod override_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The one state this slice exists for: signed in with a plan, billed to a
+    /// key. Nothing is broken, which is precisely why it goes unnoticed.
+    #[test]
+    fn a_key_over_a_login_is_reported_as_overriding_it() {
+        let both = json!({
+            "loggedIn": true, "authMethod": "claude.ai",
+            "apiKeySource": "ANTHROPIC_API_KEY", "subscriptionType": null
+        });
+        assert_eq!(
+            read(&both),
+            Economy::Key {
+                overrides_login: true
+            }
+        );
+    }
+
+    /// A key with nothing behind it — the image — is not overriding anything,
+    /// and saying it were would be a warning that trains people to ignore
+    /// warnings.
+    #[test]
+    fn a_key_alone_is_not_overriding_anything() {
+        let alone = json!({
+            "loggedIn": true, "authMethod": "api_key",
+            "apiKeySource": "ANTHROPIC_API_KEY"
+        });
+        assert_eq!(
+            read(&alone),
+            Economy::Key {
+                overrides_login: false
+            }
+        );
+    }
+
+    /// Both are metered — what is shadowed changes the sentence, never the
+    /// arithmetic.
+    #[test]
+    fn overriding_or_not_a_key_still_means_money() {
+        for overrides_login in [true, false] {
+            assert!(Economy::Key { overrides_login }.is_metered());
+        }
+    }
+
+    /// The startup line names the fix, not just the fact. "You are on a key"
+    /// tells someone nothing they can do; "unset ANTHROPIC_API_KEY" does.
+    #[test]
+    fn the_startup_line_says_how_to_get_the_plan_back() {
+        let said = describe(&Economy::Key {
+            overrides_login: true,
+        });
+        assert!(said.contains("ANTHROPIC_API_KEY"), "{said}");
+        assert!(said.contains("overriding"), "{said}");
+
+        let quiet = describe(&Economy::Key {
+            overrides_login: false,
+        });
+        assert!(
+            !quiet.contains("overriding"),
+            "a key with nothing behind it must not cry wolf: {quiet}"
+        );
+    }
+
+    #[test]
+    fn the_client_is_told_which_of_the_two_it_is() {
+        let loud = as_json(&Economy::Key {
+            overrides_login: true,
+        });
+        assert_eq!(loud["overrides_login"], true);
+        assert_eq!(loud["metered"], true);
+        let quiet = as_json(&Economy::Key {
+            overrides_login: false,
+        });
+        assert_eq!(quiet["overrides_login"], false);
     }
 }
