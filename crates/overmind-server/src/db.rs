@@ -63,6 +63,27 @@ impl AppState {
             .join("brain")
     }
 
+    /// How a prompt names the company: "«Rossi Vini», an AI company" — or
+    /// just "an AI company" when the row cannot be read, because a persona
+    /// line must never be silently blank (M21).
+    ///
+    /// Every agent prompt used to say "an AI company" and stop there. That
+    /// read as harmless until M19's acceptance run, where an agent asked to
+    /// write about the company wrote about somebody else's product of the
+    /// same name: with an empty brain and no name in the prompt, world
+    /// knowledge was all it had. Naming the company is the cheap half of the
+    /// fix; the founding memory is the other.
+    pub async fn company_descriptor(&self, company_id: &str) -> String {
+        sqlx::query_as::<_, (String,)>("SELECT name FROM companies WHERE id = ?")
+            .bind(company_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|(name,)| format!("«{name}», an AI company"))
+            .unwrap_or_else(|| "an AI company".to_string())
+    }
+
     /// The memory handle to use for work done on `company_id`'s behalf.
     ///
     /// Provisioning is the directory: a memory server pointed at an empty one

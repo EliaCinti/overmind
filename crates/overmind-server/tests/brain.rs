@@ -542,6 +542,49 @@ async fn founding_a_company_provisions_its_brain() {
     );
 }
 
+/// A brain is born knowing who the company is (M21). Before this, a fresh
+/// brain was empty and an agent asked to write about the company reached for
+/// world knowledge — M19's acceptance run got a confident document about
+/// somebody else's product of the same name.
+#[tokio::test]
+async fn a_brain_is_born_knowing_who_the_company_is() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let env = setup(true, true).await;
+    let (company, _) = found_company(&env, "Aurora").await;
+
+    // On disk: the brain's first memory states the identity.
+    let stored =
+        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).expect("store");
+    assert!(
+        stored.contains("Who Aurora is"),
+        "no founding memory in the brain: {stored}"
+    );
+    assert!(
+        stored.contains("This company is Aurora"),
+        "the founding memory does not state the identity: {stored}"
+    );
+
+    // Through the browse: present, and honestly without a subject — it was
+    // produced by founding the company, not by a task or a meeting.
+    let (s, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/memory/memories"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let items = body["items"].as_array().expect("items");
+    let item = items
+        .iter()
+        .find(|i| i["title"] == json!("Who Aurora is"))
+        .unwrap_or_else(|| panic!("founding memory not browsable: {body}"));
+    assert_eq!(item["subject"], Value::Null, "item: {item}");
+}
+
 /// Switching a company's brain off must leave the organization fully
 /// functional — the graceful-degradation rule, and an M8 acceptance criterion.
 #[tokio::test]
@@ -568,8 +611,14 @@ async fn a_company_with_its_brain_off_works_and_remembers_nothing() {
         !saw.contains("BRAIN["),
         "a switched-off brain still answered: {saw}"
     );
-    // …and nothing was written into its brain.
-    assert!(!env.brain_dir(&company).join("memories.txt").exists());
+    // …and nothing new was written into its brain: the founding memory (M21)
+    // is all it holds, stored at creation while the brain was still on.
+    let stored =
+        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).expect("store");
+    assert!(
+        !stored.contains("Work without memory"),
+        "a switched-off brain still stored the task: {stored}"
+    );
 
     // The audit chain records the switch and still verifies.
     let (_, events) = send(&env.app, "GET", "/api/audit/events", None).await;
@@ -682,16 +731,21 @@ async fn a_memory_names_the_task_that_produced_it() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["state"], json!("ok"), "browse: {body}");
     let items = body["items"].as_array().expect("items");
-    assert_eq!(items.len(), 1, "expected one memory: {body}");
+    // Two memories: the founding one (M21) and the task's. The one under test
+    // is found by title, not by position — a browse order is not a contract.
+    assert_eq!(items.len(), 2, "expected founding + task memory: {body}");
+    let item = items
+        .iter()
+        .find(|i| i["title"] == json!("Rewrite the deploy script"))
+        .unwrap_or_else(|| panic!("task memory not in browse: {body}"));
 
-    let subject = &items[0]["subject"];
+    let subject = &item["subject"];
     assert_eq!(subject["type"], json!("task"));
     assert_eq!(subject["title"], json!("Rewrite the deploy script"));
     assert!(
         subject["id"].as_str().is_some_and(|s| !s.is_empty()),
         "subject has no task id: {subject}"
     );
-    assert_eq!(items[0]["title"], json!("Rewrite the deploy script"));
 }
 
 /// The provenance also goes into the brain as a tag, so a vault opened outside
@@ -734,7 +788,9 @@ async fn an_empty_browse_says_why_it_is_empty() {
     .await;
     assert_eq!(body["state"], json!("no_provider"));
 
-    // 2. Provider present, nothing stored yet — genuinely empty.
+    // 2. Provider present. A fresh company is no longer genuinely empty —
+    //    its brain is born holding the founding memory (M21) — so the state
+    //    is a working browse with one item, not an empty one.
     let env = setup(true, true).await;
     let (company, _) = found_company(&env, "Fresh").await;
     let (_, body) = send(
@@ -745,7 +801,13 @@ async fn an_empty_browse_says_why_it_is_empty() {
     )
     .await;
     assert_eq!(body["state"], json!("ok"));
-    assert_eq!(body["items"].as_array().map(Vec::len), Some(0));
+    let items = body["items"].as_array().expect("items");
+    assert_eq!(
+        items.len(),
+        1,
+        "a fresh brain holds its founding memory: {body}"
+    );
+    assert_eq!(items[0]["title"], json!("Who Fresh is"));
 
     // 3. This company's brain switched off.
     send(
@@ -800,7 +862,8 @@ async fn searching_recalls_instead_of_filtering_a_list() {
         None,
     )
     .await;
-    assert_eq!(listed["items"].as_array().map(Vec::len), Some(2));
+    // Founding memory + two tasks (M21).
+    assert_eq!(listed["items"].as_array().map(Vec::len), Some(3));
 
     let (_, found) = send(
         &env.app,
@@ -849,10 +912,12 @@ async fn a_memory_with_no_identifier_is_shown_without_a_subject() {
     // The memory is there — the work was still remembered…
     assert_eq!(body["state"], json!("ok"));
     let items = body["items"].as_array().expect("items");
-    assert_eq!(items.len(), 1, "the memory should still be stored: {body}");
-    assert_eq!(items[0]["title"], json!("Unattributable work"));
+    let item = items
+        .iter()
+        .find(|i| i["title"] == json!("Unattributable work"))
+        .unwrap_or_else(|| panic!("the memory should still be stored: {body}"));
     // …and its provenance is honestly absent rather than invented.
-    assert_eq!(items[0]["subject"], Value::Null, "item: {}", items[0]);
+    assert_eq!(item["subject"], Value::Null, "item: {item}");
 
     // Nothing was written to the link table either: a link with no ref to key
     // it on would be a row that can never be matched back.
@@ -863,7 +928,14 @@ async fn a_memory_with_no_identifier_is_shown_without_a_subject() {
         None,
     )
     .await;
-    assert_eq!(second["items"][0]["subject"], Value::Null);
+    let second_item = second["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|i| i["title"] == json!("Unattributable work"))
+        .cloned()
+        .expect("still stored");
+    assert_eq!(second_item["subject"], Value::Null);
 }
 
 // ── M8 slice 4: change awareness across concurrent agents (ADR-0026) ────────

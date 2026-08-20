@@ -142,6 +142,28 @@ scenario() { # label [extra docker -e args…]
     company_id=$(echo "$company" | json '["id"]')
     agent_id=$(echo "$company" | json '["ceo"]["id"]')
 
+    # The founding memory, read back through the image's own memory provider
+    # (M21, ADR-0031). No stub stands in here: the browse only answers `ok`
+    # with an item if the real in-image Wadachi was spawned, stored the memory
+    # at founding, and listed it back. This is the check that would have
+    # caught "the image ships no memory provider" — the M19 acceptance run's
+    # confident document about the wrong company.
+    echo "[$label] asking the brain who the company is…"
+    api GET "/companies/${company_id}/memory/memories" > "$WORK/brain-${label}.json"
+    python3 - "$WORK/brain-${label}.json" <<'CHECK'
+import json, sys
+body = json.load(open(sys.argv[1]))
+if body.get("state") != "ok":
+    print("FAIL: the browse did not answer ok — the image's memory provider is not working:")
+    print("     ", body)
+    sys.exit(1)
+titles = [i.get("title", "") for i in body.get("items", [])]
+if "Who CI is" not in titles:
+    print("FAIL: no founding memory in the brain — a fresh company starts empty again:", titles)
+    sys.exit(1)
+print("  the in-image brain holds the founding memory.")
+CHECK
+
     echo "[$label] opening a task…"
     task=$(api POST "/companies/${company_id}/tasks" \
         '{"title":"Leave something behind","description":"Write ARTIFACT.md.","execution_kind":"knowledge"}')

@@ -60,11 +60,15 @@ services:
       # - OVERMIND_AGENT_UID=1000
       # - OVERMIND_AGENT_GID=1000
       #
-      # Optional organizational memory (Wadachi or any MCP memory server).
-      # Leave BRAIN_DIR out of the command: Overmind sets it per company
-      # (ADR-0024), and a shell assignment here would override it and put every
-      # company back in one brain.
-      # - OVERMIND_MEMORY_CMD=wadachi
+      # Organizational memory is ON by default: the image bakes in Wadachi
+      # (semantic search, model included — ADR-0031) and each company gets its
+      # own brain under /data (ADR-0024). To swap in another MCP memory
+      # server, name it here; leave BRAIN_DIR out of the command — Overmind
+      # sets it per company, and a shell assignment here would override it and
+      # put every company back in one brain.
+      # - OVERMIND_MEMORY_CMD=my-memory-server
+      # Disable memory deliberately (empty means none):
+      # - OVERMIND_MEMORY_CMD=
       # - OVERMIND_MEMORY_POOL=4
       # Deliberately share one brain instead of one per company:
       # - OVERMIND_MANAGED_BRAIN=off

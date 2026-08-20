@@ -96,9 +96,11 @@ pub(crate) struct Persona {
 
 impl Persona {
     /// The "who you are" block that opens a task prompt. Empty only if the
-    /// agent could not be loaded — never silently role-blind.
-    fn block(&self) -> String {
-        let mut s = format!("You are {}, the {} of an AI company.", self.name, self.role);
+    /// agent could not be loaded — never silently role-blind. `company` is
+    /// [`crate::db::AppState::company_descriptor`]: an agent that knows whose
+    /// writer it is does not reach for world knowledge about the name (M21).
+    fn block(&self, company: &str) -> String {
+        let mut s = format!("You are {}, the {} at {company}.", self.name, self.role);
         if !self.focus_areas.is_empty() {
             s.push_str(&format!(
                 " What you are relied on for: {}.",
@@ -1156,10 +1158,11 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let meeting_hint = "\n\nIf finishing this needs a decision you should not take alone — it affects teammates' work, or you are blocked on a call above your role — write a file named MEETING_REQUEST.json in this directory: {\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}. It reaches the human for approval; do not wait for it, finish what you can.\nAsk sparingly: you may have only ONE request waiting on the human at a time, and every request costs them an interruption. If you can take the call yourself, take it.";
     // Who is doing the work (ADR-0005 / M14). Without this the prompt is
     // role-blind: every agent gets identical instructions for the same task.
+    let company = ctx.state.company_descriptor(&ctx.company_id).await;
     let persona_block = ctx
         .persona
         .as_ref()
-        .map(|p| format!("{}\n\n", p.block()))
+        .map(|p| format!("{}\n\n", p.block(&company)))
         .unwrap_or_default();
 
     let prompt = if resume {

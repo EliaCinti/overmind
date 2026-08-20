@@ -196,15 +196,17 @@ cargo run                          # → http://127.0.0.1:7070
 cd web && npm run dev
 ```
 
-### Organizational memory (optional)
+### Organizational memory
 
-Point Overmind at any MCP memory server exposing `get_context` / `store_memory` / `store_decision` — [Wadachi](https://github.com/EliaCinti/wadachi) is the reference:
+**In the Docker image, memory is on by default** ([ADR-0031](docs/adr/0031-memory-on-by-default-in-the-image.md)): Wadachi ships inside it, semantic search included, model baked in — a fresh `docker compose up` produces companies whose agents remember, offline. Set `OVERMIND_MEMORY_CMD=` (empty) to switch it off deliberately.
+
+On a host, point Overmind at any MCP memory server exposing `get_context` / `store_memory` / `store_decision` — [Wadachi](https://github.com/EliaCinti/wadachi) is the reference:
 
 ```sh
 OVERMIND_MEMORY_CMD="wadachi" cargo run
 ```
 
-Agents then load org context before working and record what they learned. Unset it and Overmind runs identically, memoryless.
+Agents then load org context before working and record what they learned; a brain is born already knowing who its company is (M21). Unset it and Overmind runs identically, memoryless.
 
 **Each company gets its own brain** ([ADR-0024](docs/adr/0024-managed-per-company-brain.md)), at `<data-dir>/companies/<company-id>/brain/`. Overmind creates the directory and passes it to the memory server as `BRAIN_DIR`; your personal brain is never touched.
 
@@ -242,7 +244,7 @@ You get `create_task`, `list_tasks`, `get_task`, `verify_audit` and `list_events
 | `OVERMIND_DB` | SQLite URL (default `sqlite://overmind.sqlite`) |
 | `OVERMIND_DATA_DIR` | Worktrees & runtime data (default `./overmind-data`) |
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: Claude Code CLI) |
-| `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory) |
+| `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory; the image sets `wadachi`) |
 | `OVERMIND_MEMORY_POOL` | Concurrent memory connections (default `4`) |
 | `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |
 | `OVERMIND_HEARTBEAT_SECS` | Scheduler tick (default `30`) |

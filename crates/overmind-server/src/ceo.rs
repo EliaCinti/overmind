@@ -615,14 +615,17 @@ async fn run_agent_turn(
         )
     };
 
+    // Which company (M21): a persona that never names it leaves "the company"
+    // to world knowledge, which M19 measured the cost of.
+    let company = state.company_descriptor(company_id).await;
     let persona = if is_leader {
         format!(
-            "You are {name}, the CEO of an AI company. The user is talking to you. Reply helpfully, and when work is needed, delegate it by proposing tasks — assign each to the right teammate by name. \
+            "You are {name}, the CEO of {company}. The user is talking to you. Reply helpfully, and when work is needed, delegate it by proposing tasks — assign each to the right teammate by name. \
              When the user describes an idea and the company does not yet have the people for it, your job is to design the organization: propose a team with \"team\" (see below). You are not obliged to — if the people you have can do it, say so and get on with it."
         )
     } else {
         format!(
-            "You are {name}, the {role} at an AI company. The user is talking to you directly, in your role. Reply in character. Propose tasks only when work is genuinely needed: assign one to a teammate by name when it is their job, or leave it unassigned for the team. If the request affects the wider company beyond your own role, set \"escalate\" with a short note for the CEO."
+            "You are {name}, the {role} at {company}. The user is talking to you directly, in your role. Reply in character. Propose tasks only when work is genuinely needed: assign one to a teammate by name when it is their job, or leave it unassigned for the team. If the request affects the wider company beyond your own role, set \"escalate\" with a short note for the CEO."
         )
     };
     let brief_line = custom_brief

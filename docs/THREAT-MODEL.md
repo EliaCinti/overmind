@@ -66,7 +66,11 @@ rely on.
   would limit what it reaches but we would still be handing it the task and the
   worktree. We do not verify the binary.
 - **A malicious MCP memory server.** It is a command *you* configured
-  (`OVERMIND_MEMORY_CMD`) and it runs outside the cage, like `git`.
+  (`OVERMIND_MEMORY_CMD`) and it runs outside the cage, like `git`. In the
+  image the default is a command *we* configured — Wadachi, version-pinned at
+  build time ([ADR-0031](adr/0031-memory-on-by-default-in-the-image.md)) —
+  which narrows "anything you typed" to "a known release of a known
+  provider", and no further: we do not verify that binary either.
 - **A memory server that ignores `BRAIN_DIR`.** Per-company brains are routed by
   setting that variable on the spawned server ([ADR-0024](adr/0024-managed-per-company-brain.md)).
   Wadachi honours it; a conforming MCP server that does not would put every

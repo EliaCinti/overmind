@@ -294,6 +294,13 @@ async fn a_media_and_av_agent_is_hired_without_writing_a_word() {
         prompt.contains("picture and sound"),
         "the field speaks for itself in the prompt: {prompt}"
     );
+    // …and which company it works at (M21): with an empty brain and no name
+    // in the prompt, "the company" is left to world knowledge, which is how
+    // M19's acceptance run wrote about somebody else's product.
+    assert!(
+        prompt.contains("at «Sala Grande», an AI company"),
+        "the prompt never names the company: {prompt}"
+    );
 
     // And the model reached the adapter, which is what makes any of the above
     // more than a value in a database.
