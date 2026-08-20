@@ -177,11 +177,23 @@ The result: an organization of agents that doesn't start from zero every morning
 
 ### Docker (recommended)
 
+The image is self-contained: the agent CLI (Claude Code, pinned) and the memory engine (Wadachi, semantic model included) are already inside. The one thing it cannot bring is a way to pay — **give the agent credentials first**, or your first conversation will fail instead of answering:
+
 ```sh
+git clone https://github.com/EliaCinti/overmind.git && cd overmind
+
+# EITHER: pay with an API key — export it before starting
+export ANTHROPIC_API_KEY=sk-ant-…
+
 docker compose up --build          # → http://localhost:7070
+
+# OR: pay with a Claude subscription — sign in once, the volume keeps it
+docker compose exec --user agent overmind claude setup-token
 ```
 
-Persists the DB, worktrees and brains on a named volume. Mount your repos and set `OVERMIND_AGENT_CMD` to your agent CLI — see [`docker-compose.yml`](docker-compose.yml).
+That is the whole setup. Found a company in the browser and talk to its CEO; every company gets its own brain, on by default, that already knows who the company is. The DB, worktrees and brains persist on a named volume across restarts.
+
+To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover swapping the agent CLI (`OVERMIND_AGENT_CMD`) or the memory server (`OVERMIND_MEMORY_CMD`) for your own. Neither is required: the defaults are the working path.
 
 ### From source
 
@@ -256,7 +268,7 @@ You get `create_task`, `list_tasks`, `get_task`, `verify_audit` and `list_events
 
 ## Status
 
-Pre-alpha, built in the open. The core is done and tested: company & org chart, tasks & board, agent execution in worktrees, heartbeats & recovery, budgets & governance, hash-chained audit, and organizational memory over MCP. Next on the [roadmap](docs/ROADMAP.md): Linux sandboxing to match the macOS cage, and inline diff review.
+Pre-alpha, built in the open. The core is done and tested: company & org chart, tasks & board, agent execution in worktrees (caged on macOS and Linux alike), heartbeats & recovery, budgets & governance in both economies (API key and subscription), hash-chained audit, a self-contained Docker image, and organizational memory over MCP — on by default in the image, with each brain born knowing who its company is. What's next lives in the [roadmap](docs/ROADMAP.md).
 
 The design is documented before the code: see [VISION](docs/VISION.md), [ARCHITECTURE](docs/ARCHITECTURE.md), the [UX principles](docs/UX.md), and the [Architecture Decision Records](docs/adr/).
 
