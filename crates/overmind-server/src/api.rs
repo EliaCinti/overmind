@@ -426,6 +426,39 @@ async fn create_company(
         }
     }
 
+    // The brain's first memory: who this company is (M21). Before this, a
+    // fresh brain was empty and `get_context` had nothing true to say — so an
+    // agent asked to "write about the company" reached for world knowledge,
+    // and M19's acceptance run got a confident document about somebody else's
+    // product of the same name. Best-effort like every memory call, and a
+    // no-op when memory is off.
+    if state.memory.is_enabled() {
+        let name = req.name.trim();
+        let language_name = crate::i18n::SUPPORTED
+            .iter()
+            .find(|(code, _)| *code == language)
+            .map(|(_, n)| *n)
+            .unwrap_or(language);
+        let ceo_name = ceo.get("name").and_then(Value::as_str).unwrap_or("the CEO");
+        state
+            .memory_for(&id)
+            .await
+            .store_memory(
+                &format!("Who {name} is"),
+                &format!(
+                    "This company is {name}, founded on {created_at}. It works in \
+                     {language_name}. Its CEO is {ceo_name}. When a task or a \
+                     conversation says \"the company\", it means {name} — not any \
+                     other organization or product with a similar name."
+                ),
+                &id,
+                &["founding", "identity"],
+                "context",
+                None,
+            )
+            .await;
+    }
+
     state.notify(&id);
     Ok((
         StatusCode::CREATED,

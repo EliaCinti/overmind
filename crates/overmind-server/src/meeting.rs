@@ -750,12 +750,14 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot create meeting dir: {e}")))?;
 
+    let company = state.company_descriptor(company_id).await;
     let agenda = Agenda {
         language: &language,
         topic: &topic,
         reason: &reason,
         speakers: &speakers,
         memory_context: memory_context.as_deref(),
+        company: &company,
     };
     // Whatever the room already said. Empty on a first run; populated when a
     // paused meeting is resumed (ADR-0022), which is what makes resuming exact
@@ -917,6 +919,9 @@ struct Agenda<'a> {
     reason: &'a str,
     speakers: &'a [Speaker],
     memory_context: Option<&'a str>,
+    /// [`crate::db::AppState::company_descriptor`] — the room knows whose
+    /// meeting it is (M21).
+    company: &'a str,
 }
 
 fn turn_prompt(
@@ -931,6 +936,7 @@ fn turn_prompt(
         reason,
         speakers,
         memory_context,
+        company,
     } = *agenda;
     let room = speakers
         .iter()
@@ -982,7 +988,7 @@ fn turn_prompt(
     };
 
     format!(
-        "You are {name}, the {role} at an AI company, in a meeting with your colleagues.{brief_line}\n\n\
+        "You are {name}, the {role} at {company}, in a meeting with your colleagues.{brief_line}\n\n\
          Meeting topic: {topic}{why_line}\n\n\
          In the room:\n{room}\n\n\
          The meeting so far:\n{so_far}{memory_block}\n\n\
