@@ -38,7 +38,7 @@ so an image without any provider remembers nothing.
 | | cost | what it buys |
 |---|---|---|
 | `wadachi` (core) | 27 MB of wheels (numpy-dominated) | keyword search — a deliberate fallback, and the reply says so: `"search_mode": "keyword (…)"` |
-| `[semantic]` extra | +35 MB of wheels (onnxruntime 23.1, tokenizers 3.3, pillow 6.9), ~100 MB installed | semantic recall — the thing "memory" means in practice |
+| `[semantic]` extra | +35 MB of wheels; **292 MB as an installed layer** (onnxruntime 58, numpy 71 with its bundled libs, pillow 16 — measured in the built image, where wheels roughly double on install) | semantic recall — the thing "memory" means in practice |
 | the model | +67 MB, `qdrant/bge-small-en-v1.5-onnx-q` | downloaded lazily on first embed |
 
 Two facts weigh more than the megabytes:
@@ -80,7 +80,7 @@ Two facts weigh more than the megabytes:
 ## Alternatives considered
 
 - **Core only, `[semantic]` as a build arg** — a 27 MB image bump instead of
-  ~170 MB. Rejected: the default experience would be the degraded one, and
+  ~360 MB. Rejected: the default experience would be the degraded one, and
   this milestone exists because the default experience is the product. The
   megabytes sit in an image that already carries node, python, gh and the
   agent CLI.
@@ -98,8 +98,9 @@ Two facts weigh more than the megabytes:
 
 - `docker compose up` produces a company whose agents remember — the M19
   acceptance defect cannot recur in the default configuration.
-- The image grows by ~170 MB (wheels + model). Accepted and worded in the
-  Dockerfile.
+- The image grows by **~360 MB of layers** (venv 292 MB + model 67 MB,
+  measured on the built image — the wheel sizes above roughly double once
+  installed). Accepted and worded in the Dockerfile.
 - The threat model's "a malicious MCP memory server is a command *you*
   configured" weakens honestly to: in the image, the default is a command
   *we* pinned. The pin is the mitigation, and the sentence is updated rather
