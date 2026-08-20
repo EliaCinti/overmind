@@ -54,6 +54,30 @@ ARG CLAUDE_CODE_VERSION=2.1.233
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
+# The memory provider (ADR-0031), for the same reason as the CLI above: the
+# server's memory contract is MCP over stdio, so an image with no provider to
+# name in OVERMIND_MEMORY_CMD remembers nothing — and M19's acceptance run
+# showed what that costs: a confident document about the wrong company.
+#
+# Its own venv because bookworm's Python is externally managed (PEP 668), and
+# the semantic extra because keyword search is the fallback, not the product.
+# Pinned like the CLI; Overmind still never imports Wadachi — the coupling is
+# the protocol, and OVERMIND_MEMORY_CMD remains the way to swap providers.
+ARG WADACHI_VERSION=0.15.0
+RUN python3 -m venv /opt/wadachi \
+    && /opt/wadachi/bin/pip install --no-cache-dir "wadachi[semantic]==${WADACHI_VERSION}" \
+    && ln -s /opt/wadachi/bin/wadachi /usr/local/bin/wadachi
+
+# The embedding model, baked at build time. fastembed's default cache is
+# $TMPDIR/fastembed_cache — ephemeral here, so left alone the first recall of
+# every fresh container would reach the network silently and re-download 67 MB
+# after every restart, and an offline machine would degrade to keyword search
+# without saying so. Baking is what pinning the CLI version was: no first run
+# changes behaviour based on what the network happened to answer.
+ENV FASTEMBED_CACHE_PATH=/opt/fastembed
+RUN /opt/wadachi/bin/python -c \
+    "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
+
 COPY --from=server /app/target/release/overmind-server /usr/local/bin/overmind-server
 COPY --from=web /web/dist /app/web/dist
 
@@ -76,11 +100,17 @@ ENV OVERMIND_AGENT_UID=10001 \
     OVERMIND_AGENT_HOME=/home/agent
 
 # Sensible container defaults; override any via the environment.
+#
+# OVERMIND_MEMORY_CMD is the image's environment, not the code's default
+# (ADR-0031): on a host, Overmind configures no memory it was not asked for.
+# Here the provider is baked in, so unset would only mean "forget by default".
+# Set it empty to disable memory deliberately.
 ENV OVERMIND_WEB_DIR=/app/web/dist \
     OVERMIND_DB=sqlite:///data/overmind.sqlite \
     OVERMIND_DATA_DIR=/data \
     OVERMIND_ADDR=0.0.0.0:7070 \
-    OVERMIND_REPOS_DIR=/repos
+    OVERMIND_REPOS_DIR=/repos \
+    OVERMIND_MEMORY_CMD=wadachi
 
 WORKDIR /app
 # Modes and ownership are the server's to set at startup — it knows which of
