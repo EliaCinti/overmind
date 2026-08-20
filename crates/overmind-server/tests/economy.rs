@@ -102,8 +102,10 @@ async fn a_custom_adapter_is_not_interrogated() {
     })
     .await;
     match economy {
-        overmind_server::economy::Economy::Unknown { reason } => {
+        overmind_server::economy::Economy::Unknown { kind, reason } => {
             assert!(reason.contains("OVERMIND_AGENT_CMD"), "{reason}");
+            // Deliberate, so the interface must stay quiet about it (M22).
+            assert_eq!(kind, overmind_server::economy::UnknownKind::CustomAdapter);
         }
         other => panic!("a custom adapter must not be assumed into an economy: {other:?}"),
     }

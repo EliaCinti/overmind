@@ -32,6 +32,7 @@ import { HireAgentDialog } from "./components/HireAgentDialog";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { ConnectRepoDialog } from "./components/ConnectRepoDialog";
 import { Onboarding } from "./components/Onboarding";
+import { SignInNotice } from "./components/SignInNotice";
 import { Spinner } from "./components/ui/primitives";
 
 const LAST_COMPANY = "overmind-last-company";
@@ -257,6 +258,7 @@ export default function App() {
           onToggleTheme={toggle}
         />
 
+        <SignInNotice economy={economy} />
         {!companyId ? (
           <Onboarding defaultLanguage={language} onDone={afterCompanyCreated} />
         ) : (

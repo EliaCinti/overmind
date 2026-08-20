@@ -60,7 +60,35 @@ pub enum Economy {
     /// We could not tell — said rather than assumed. Assuming the wrong one
     /// either bills someone who thought they were on a plan, or promises a
     /// dollar ceiling that is not enforcing anything.
-    Unknown { reason: String },
+    Unknown { kind: UnknownKind, reason: String },
+}
+
+/// Why the economy is unknown — machine-readable, because the interface acts
+/// on the difference (M22). "Not signed in" has a remedy the UI can name;
+/// "custom adapter" is deliberate and must stay quiet; everything else is a
+/// probe that failed. A UI string-matching the English `reason` would break
+/// the day the sentence improves, which is exactly the defect this avoids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnknownKind {
+    /// The default adapter answered: nobody is signed in. Remediable, and the
+    /// interface should say how before a first turn burns on discovering it.
+    NotSignedIn,
+    /// A custom `OVERMIND_AGENT_CMD` is configured and was deliberately never
+    /// interrogated. Not a problem to warn about.
+    CustomAdapter,
+    /// The probe ran and could not be read: a failure, a timeout, an
+    /// unrecognised shape, or simply not asked yet.
+    Unreadable,
+}
+
+impl UnknownKind {
+    pub fn slug(&self) -> &'static str {
+        match self {
+            UnknownKind::NotSignedIn => "not_signed_in",
+            UnknownKind::CustomAdapter => "custom_adapter",
+            UnknownKind::Unreadable => "unreadable",
+        }
+    }
 }
 
 impl Economy {
@@ -77,6 +105,7 @@ impl Economy {
 pub fn read(status: &Value) -> Economy {
     if status.get("loggedIn").and_then(Value::as_bool) != Some(true) {
         return Economy::Unknown {
+            kind: UnknownKind::NotSignedIn,
             reason: "the agent CLI is not signed in".into(),
         };
     }
@@ -98,6 +127,7 @@ pub fn read(status: &Value) -> Economy {
     // Signed in, no key, no plan named. A shape we have not seen; saying so
     // beats picking the branch that happens to be cheaper to implement.
     Economy::Unknown {
+        kind: UnknownKind::Unreadable,
         reason: "signed in, but the CLI named neither an API key nor a plan".into(),
     }
 }
@@ -121,6 +151,7 @@ pub async fn detect(config: &Config) -> Economy {
     // else's binary with arguments we invented.
     if config.agent_cmd.is_some() {
         return Economy::Unknown {
+            kind: UnknownKind::CustomAdapter,
             reason:
                 "a custom OVERMIND_AGENT_CMD is configured, so Overmind cannot ask it how it pays"
                     .into(),
@@ -142,11 +173,13 @@ pub async fn detect(config: &Config) -> Economy {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             return Economy::Unknown {
+                kind: UnknownKind::Unreadable,
                 reason: format!("could not run the agent CLI: {e}"),
             };
         }
         Err(_) => {
             return Economy::Unknown {
+                kind: UnknownKind::Unreadable,
                 reason: "the agent CLI did not answer within 20s".into(),
             };
         }
@@ -154,6 +187,7 @@ pub async fn detect(config: &Config) -> Economy {
     match serde_json::from_slice::<Value>(&out.stdout) {
         Ok(status) => read(&status),
         Err(e) => Economy::Unknown {
+            kind: UnknownKind::Unreadable,
             reason: format!("the agent CLI's answer was not JSON: {e}"),
         },
     }
@@ -283,7 +317,7 @@ pub fn describe(economy: &Economy) -> String {
                 .map(|p| format!(" ({p})"))
                 .unwrap_or_default()
         ),
-        Economy::Unknown { reason } => {
+        Economy::Unknown { reason, .. } => {
             format!(
                 "unknown — {reason}. The budget cap still brakes a looping agent, but do not read it as a promise"
             )
@@ -305,8 +339,9 @@ pub fn as_json(economy: &Economy) -> Value {
         Economy::Subscription { plan } => serde_json::json!({
             "kind": "subscription", "metered": false, "plan": plan
         }),
-        Economy::Unknown { reason } => serde_json::json!({
-            "kind": "unknown", "metered": false, "reason": reason
+        Economy::Unknown { kind, reason } => serde_json::json!({
+            "kind": "unknown", "metered": false, "reason": reason,
+            "unknown_kind": kind.slug()
         }),
     }
 }
@@ -387,10 +422,31 @@ mod tests {
         assert_ne!(read(&with_key), read(&without));
     }
 
+    /// The browser acts on `unknown_kind`, so it is a wire contract, not a
+    /// debug detail: if the field vanished, the sign-in notice would silently
+    /// never show again (M22).
+    #[test]
+    fn the_unknown_kind_reaches_the_wire() {
+        let v = as_json(&read(&json!({ "loggedIn": false })));
+        assert_eq!(v["kind"], "unknown");
+        assert_eq!(v["unknown_kind"], "not_signed_in");
+    }
+
     #[test]
     fn not_signed_in_is_not_a_guess() {
         let out = read(&json!({ "loggedIn": false }));
-        assert!(matches!(out, Economy::Unknown { .. }), "{out:?}");
+        // The kind is what lets the interface offer the remedy (M22) — and
+        // only here: every other unknown must NOT invite a sign-in.
+        assert!(
+            matches!(
+                out,
+                Economy::Unknown {
+                    kind: UnknownKind::NotSignedIn,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
         assert!(!out.is_metered());
     }
 
@@ -399,7 +455,16 @@ mod tests {
     #[test]
     fn a_shape_we_do_not_recognise_is_unknown() {
         let out = read(&json!({ "loggedIn": true, "authMethod": "something-new" }));
-        assert!(matches!(out, Economy::Unknown { .. }), "{out:?}");
+        assert!(
+            matches!(
+                out,
+                Economy::Unknown {
+                    kind: UnknownKind::Unreadable,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
     }
 
     /// Only a key means money, and `is_metered` is what the rest of the system
@@ -415,6 +480,7 @@ mod tests {
         assert!(!Economy::Subscription { plan: None }.is_metered());
         assert!(
             !Economy::Unknown {
+                kind: UnknownKind::Unreadable,
                 reason: String::new()
             }
             .is_metered()

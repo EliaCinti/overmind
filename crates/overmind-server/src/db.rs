@@ -202,6 +202,7 @@ impl AppState {
         match self.economy.read() {
             Ok(e) => e.clone(),
             Err(_) => crate::economy::Economy::Unknown {
+                kind: crate::economy::UnknownKind::Unreadable,
                 reason: "the economy could not be read".into(),
             },
         }
@@ -510,6 +511,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
             .economy_override
             .clone()
             .unwrap_or_else(|| crate::economy::Economy::Unknown {
+                kind: crate::economy::UnknownKind::Unreadable,
                 reason: "not detected yet".into(),
             });
     let (events, _) = broadcast::channel(256);
