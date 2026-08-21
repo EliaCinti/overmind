@@ -448,8 +448,10 @@ export const api = {
   claudeAuthStart: () => req<void>("POST", "/claude-auth/start"),
   claudeAuthStatus: () =>
     req<
-      | { state: "idle" | "starting" | "exchanging" }
-      | { state: "url_ready"; url: string }
+      | { state: "idle" }
+      | { state: "starting"; tail?: string }
+      | { state: "exchanging"; tail?: string }
+      | { state: "url_ready"; url: string; tail?: string }
       | { state: "done"; economy: Economy }
       | { state: "failed"; tail: string }
     >("GET", "/claude-auth"),

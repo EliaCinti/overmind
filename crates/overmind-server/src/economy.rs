@@ -124,6 +124,14 @@ pub fn read(status: &Value) -> Economy {
             plan: Some(plan.to_string()),
         };
     }
+    // A long-lived token minted by `claude setup-token` (M23). The CLI's
+    // answer names no plan -- measured: {"loggedIn":true,"authMethod":
+    // "oauth_token","apiProvider":"firstParty"} and nothing else -- but
+    // setup-token itself requires a subscription, so the economy is the
+    // plan's, with its name unknown rather than invented.
+    if status.get("authMethod").and_then(Value::as_str) == Some("oauth_token") {
+        return Economy::Subscription { plan: None };
+    }
     // Signed in, no key, no plan named. A shape we have not seen; saying so
     // beats picking the branch that happens to be cheaper to implement.
     Economy::Unknown {
@@ -430,6 +438,19 @@ mod tests {
         let v = as_json(&read(&json!({ "loggedIn": false })));
         assert_eq!(v["kind"], "unknown");
         assert_eq!(v["unknown_kind"], "not_signed_in");
+    }
+
+    /// The payload a `setup-token` sign-in actually answers with (measured
+    /// 21 Aug 2026, the day the first person completed the in-product flow
+    /// and the success message never came): no key source, no plan name,
+    /// `authMethod: "oauth_token"`. The token is minted only for
+    /// subscribers, so this is the subscription economy, plan unnamed.
+    #[test]
+    fn an_oauth_token_is_a_subscription_with_no_named_plan() {
+        let out = read(&json!({
+            "loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"
+        }));
+        assert_eq!(out, Economy::Subscription { plan: None }, "{out:?}");
     }
 
     #[test]

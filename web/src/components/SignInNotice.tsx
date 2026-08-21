@@ -27,7 +27,7 @@ export function SignInNotice({
     | { step: "idle" }
     | { step: "starting" }
     | { step: "url"; url: string }
-    | { step: "exchanging" }
+    | { step: "exchanging"; tail?: string }
     | { step: "done" }
     | { step: "failed"; tail: string }
   >({ step: "idle" });
@@ -44,7 +44,7 @@ export function SignInNotice({
       try {
         const s = await api.claudeAuthStatus();
         if (s.state === "url_ready") setFlow({ step: "url", url: s.url });
-        else if (s.state === "exchanging") setFlow({ step: "exchanging" });
+        else if (s.state === "exchanging") setFlow({ step: "exchanging", tail: s.tail });
         else if (s.state === "done") {
           setFlow({ step: "done" });
           onSignedIn();
@@ -58,6 +58,19 @@ export function SignInNotice({
     };
   }, [active, onSignedIn]);
 
+  // Success must outlive its own cause: the moment the sign-in lands, the
+  // economy stops being "not signed in" and this card would unmount before
+  // the person ever reads the good news -- measured, the first time someone
+  // completed the flow and asked where the success message went.
+  if (flow.step === "done") {
+    return (
+      <div className="mx-auto w-full max-w-2xl px-4 pt-4">
+        <div className="rounded-lg border border-border bg-card p-4 shadow-soft">
+          <p className="text-sm font-medium text-primary">{t("economy.connectPlanDone")}</p>
+        </div>
+      </div>
+    );
+  }
   if (
     !economy ||
     economy.kind !== "unknown" ||
@@ -143,15 +156,17 @@ export function SignInNotice({
               </div>
             )}
             {flow.step === "exchanging" && (
-              <p className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                {t("economy.connectPlanExchanging")}
-              </p>
-            )}
-            {flow.step === "done" && (
-              <p className="text-xs font-medium text-primary">
-                {t("economy.connectPlanDone")}
-              </p>
+              <div className="space-y-1.5">
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {t("economy.connectPlanExchanging")}
+                </p>
+                {flow.tail && (
+                  <pre className="max-h-24 overflow-auto rounded bg-muted px-2 py-1 font-mono text-[10.5px] text-muted-foreground">
+                    {flow.tail}
+                  </pre>
+                )}
+              </div>
             )}
             {flow.step === "failed" && (
               <div className="space-y-1.5">

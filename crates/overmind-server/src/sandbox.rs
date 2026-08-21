@@ -423,6 +423,36 @@ pub fn caged(config: &Config, cage: &Cage<'_>) -> bool {
 /// Falls back to a bare `sh -c` when sandboxing is off, unavailable, or the
 /// profile cannot be expressed — and those are the only three cases, each of
 /// them a decision rather than an accident.
+/// A subscription's long-lived token rides the environment, like a key.
+///
+/// Injected wherever the adapter runs (caged work, probes): the CLI reads
+/// `CLAUDE_CODE_OAUTH_TOKEN`, and the file it comes from is the server's,
+/// 0600 under the data dir (M23). An explicit variable already in the
+/// environment wins -- the operator outranks the stored token.
+fn inject_oauth_token<C: CommandEnv>(config: &Config, cmd: &mut C) {
+    if std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none()
+        && let Some(tok) = crate::claude_auth::stored_token(config)
+    {
+        cmd.set_env("CLAUDE_CODE_OAUTH_TOKEN", &tok);
+    }
+}
+
+/// The two Command types, one env call. A trait beats duplicating the
+/// injection rule until the copies disagree.
+trait CommandEnv {
+    fn set_env(&mut self, k: &str, v: &str);
+}
+impl CommandEnv for Command {
+    fn set_env(&mut self, k: &str, v: &str) {
+        self.env(k, v);
+    }
+}
+impl CommandEnv for std::process::Command {
+    fn set_env(&mut self, k: &str, v: &str) {
+        self.env(k, v);
+    }
+}
+
 pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
     let held = confinement(config, cage);
     let mut cmd = match &held.profile {
@@ -454,6 +484,7 @@ pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
             cmd.pre_exec(move || crate::landlock::restrict(rules.as_raw_fd()));
         }
     }
+    inject_oauth_token(config, &mut cmd);
     cmd
 }
 
@@ -501,6 +532,7 @@ pub fn as_agent(config: &Config, program: &str) -> Command {
     if let Some(user) = agent_user(config) {
         drop_to(&mut cmd, config, user);
     }
+    inject_oauth_token(config, &mut cmd);
     cmd
 }
 
@@ -519,6 +551,7 @@ pub fn as_agent_std(config: &Config, program: &str) -> std::process::Command {
             cmd.env("HOME", home);
         }
     }
+    inject_oauth_token(config, &mut cmd);
     cmd
 }
 

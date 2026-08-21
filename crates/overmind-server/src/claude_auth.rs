@@ -45,6 +45,11 @@ pub struct Flow {
     /// Everything the CLI printed, ANSI stripped -- the failure tail comes
     /// from here, and the URL is scraped out of it.
     output: String,
+    /// The same bytes, unstripped. The token is scraped from HERE: the ANSI
+    /// stripper ate exactly one character of the first stored token (the `o`
+    /// of `oat01`, lost to a TUI redraw sequence), and a credential is the
+    /// one string that must never pass through a lossy cleaner.
+    raw: String,
     /// Write end of the pty: where the pasted code goes.
     master: Option<std::fs::File>,
     child: Option<std::process::Child>,
@@ -98,7 +103,86 @@ fn strip_ansi(raw: &str) -> String {
     out
 }
 
+/// Where the long-lived token lives once a sign-in has produced one.
+///
+/// `setup-token` does not store a credential: it **prints** one, meant for
+/// the `CLAUDE_CODE_OAUTH_TOKEN` environment variable -- measured live, the
+/// day the first person completed the flow and the economy still answered
+/// "not signed in". So Overmind keeps the token itself: one file under the
+/// data dir, 0600, injected into every agent spawn the way an API key rides
+/// the environment.
+pub fn token_path(config: &crate::db::Config) -> std::path::PathBuf {
+    config.data_dir.join("claude-oauth-token")
+}
+
+/// The stored token, if any. Read per spawn: spawns are rare, and a cached
+/// copy would survive a revocation the file did not.
+pub fn stored_token(config: &crate::db::Config) -> Option<String> {
+    let t = std::fs::read_to_string(token_path(config)).ok()?;
+    let t = t.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// Scrape the token out of the CLI's **raw** output.
+///
+/// Anchored at the token's own prefix (`sk-ant-oat`), longest run wins, and
+/// escape sequences are skipped *inside* the run rather than stripped first:
+/// the lossy cleaner ate exactly one character of the first stored token.
+fn find_token(raw: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    for (i, _) in raw.match_indices("sk-ant-oat") {
+        let mut tok = String::new();
+        let mut chars = raw[i..].chars().peekable();
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                tok.push(c);
+                chars.next();
+            } else if c == '\u{1b}' {
+                // A redraw in the middle of the token: skip the sequence,
+                // keep collecting.
+                chars.next();
+                match chars.peek() {
+                    Some('[') => {
+                        chars.next();
+                        for d in chars.by_ref() {
+                            if ('@'..='~').contains(&d) {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        chars.next();
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        if best.as_ref().map(|b| tok.len() > b.len()).unwrap_or(true) {
+            best = Some(tok);
+        }
+    }
+    best.filter(|t| t.len() > 40)
+}
+
 /// The first `https://` URL in the output that looks like the OAuth page.
+/// The last lines of output, for the interface: what the CLI is saying
+/// *right now*. Spinner leftovers and blank lines trimmed. Measured need:
+/// the first person to use the flow sat on "Exchanging…" while the CLI was
+/// saying something nobody could see.
+fn tail(text: &str, max_chars: usize) -> String {
+    let cleaned: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| l.trim().len() > 1)
+        .collect();
+    let joined = cleaned.join("\n");
+    match joined.char_indices().rev().nth(max_chars.saturating_sub(1)) {
+        Some((i, _)) => joined[i..].to_string(),
+        None => joined,
+    }
+}
+
 fn find_url(text: &str) -> Option<String> {
     for start in text.match_indices("https://").map(|(i, _)| i) {
         let url: String = text[start..]
@@ -119,13 +203,20 @@ fn find_url(text: &str) -> Option<String> {
 /// fails; the caller turns that into an HTTP status.
 pub fn start(state: &AppState) -> Result<(), String> {
     let mut slot = FLOW.lock().map_err(|_| "flow state poisoned".to_string())?;
-    if let Some(f) = slot.as_ref() {
+    if let Some(f) = slot.as_mut() {
         let stale = f.started.elapsed() > Duration::from_secs(600)
             || matches!(f.state, FlowState::Done | FlowState::Failed(_));
         if !stale {
             // Idempotent: the second click adopts the flow the first one
             // started, instead of being told off for it.
             return Ok(());
+        }
+        // A stale flow's CLI must die with it: measured live, a replaced
+        // flow left its `setup-token` running for an hour, ignoring the
+        // pty it had lost.
+        if let Some(mut c) = f.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
         }
     }
 
@@ -183,10 +274,12 @@ pub fn start(state: &AppState) -> Result<(), String> {
 
     let master_file = std::fs::File::from(master);
     let reader = master_file.try_clone().map_err(|e| e.to_string())?;
+    let token_file = token_path(&state.config);
 
     *slot = Some(Flow {
         state: FlowState::Starting,
         output: String::new(),
+        raw: String::new(),
         master: Some(master_file),
         child: Some(child),
         started: Instant::now(),
@@ -208,6 +301,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
                     if let Ok(mut slot) = FLOW.lock()
                         && let Some(f) = slot.as_mut()
                     {
+                        f.raw.push_str(&chunk);
                         f.output.push_str(&strip_ansi(&chunk));
                         if matches!(f.state, FlowState::Starting)
                             && let Some(url) = find_url(&f.output)
@@ -230,7 +324,21 @@ pub fn start(state: &AppState) -> Result<(), String> {
                 .unwrap_or(false);
             f.master = None;
             f.state = if ok {
-                FlowState::Done
+                // The flow's whole point: keep the token the CLI printed.
+                match find_token(&f.raw) {
+                    Some(tok) => {
+                        if let Err(e) = write_token(&token_file, &tok) {
+                            FlowState::Failed(format!(
+                                "the sign-in succeeded but the token could not be stored: {e}"
+                            ))
+                        } else {
+                            FlowState::Done
+                        }
+                    }
+                    None => FlowState::Failed(
+                        "the CLI finished but no token appeared in its output".into(),
+                    ),
+                }
             } else {
                 let tail: String = f
                     .output
@@ -249,6 +357,21 @@ pub fn start(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+/// Write the token where only the server can read it.
+fn write_token(path: &std::path::Path, token: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(token.as_bytes())
+}
+
 /// Forward the pasted authorization code to the CLI.
 pub fn submit_code(code: &str) -> Result<(), String> {
     let mut slot = FLOW.lock().map_err(|_| "flow state poisoned".to_string())?;
@@ -258,10 +381,20 @@ pub fn submit_code(code: &str) -> Result<(), String> {
     let Some(master) = f.master.as_mut() else {
         return Err("the flow is no longer accepting input".into());
     };
+    // The code and the Enter travel separately, with a beat between them.
+    // The CLI's raw-mode input treats a rapid burst as one paste event, and a
+    // carriage return glued to the end of the burst is swallowed *into* the
+    // paste instead of registering as the Enter key -- measured live: the
+    // prompt showed a full line of asterisks and then sat there.
     master
-        .write_all(format!("{}\r", code.trim()).as_bytes())
+        .write_all(code.trim().as_bytes())
         .and_then(|_| master.flush())
         .map_err(|e| format!("could not hand the code to the CLI: {e}"))?;
+    std::thread::sleep(Duration::from_millis(300));
+    master
+        .write_all(b"\r")
+        .and_then(|_| master.flush())
+        .map_err(|e| format!("could not press Enter for the CLI: {e}"))?;
     f.state = FlowState::Exchanging;
     Ok(())
 }
@@ -271,20 +404,27 @@ pub async fn status(state: &AppState) -> serde_json::Value {
     let snapshot = {
         let slot = FLOW.lock().ok();
         slot.and_then(|s| {
-            s.as_ref()
-                .map(|f| (f.state.clone(), f.started.elapsed().as_secs()))
+            s.as_ref().map(|f| {
+                (
+                    f.state.clone(),
+                    f.started.elapsed().as_secs(),
+                    tail(&f.output, 400),
+                )
+            })
         })
     };
     match snapshot {
         None => serde_json::json!({ "state": "idle" }),
-        Some((FlowState::Starting, secs)) => {
-            serde_json::json!({ "state": "starting", "seconds": secs })
+        Some((FlowState::Starting, secs, t)) => {
+            serde_json::json!({ "state": "starting", "seconds": secs, "tail": t })
         }
-        Some((FlowState::UrlReady(url), _)) => {
-            serde_json::json!({ "state": "url_ready", "url": url })
+        Some((FlowState::UrlReady(url), _, t)) => {
+            serde_json::json!({ "state": "url_ready", "url": url, "tail": t })
         }
-        Some((FlowState::Exchanging, _)) => serde_json::json!({ "state": "exchanging" }),
-        Some((FlowState::Done, _)) => {
+        Some((FlowState::Exchanging, _, t)) => {
+            serde_json::json!({ "state": "exchanging", "tail": t })
+        }
+        Some((FlowState::Done, _, _)) => {
             // The proof is the economy, not the exit code: re-detect and let
             // the sign-in notice disappear because the CLI is now signed in.
             let economy = crate::economy::detect(&state.config).await;
@@ -294,8 +434,32 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                 "economy": crate::economy::as_json(&economy),
             })
         }
-        Some((FlowState::Failed(tail), _)) => {
-            serde_json::json!({ "state": "failed", "tail": tail })
+        Some((FlowState::Failed(t), _, _)) => {
+            serde_json::json!({ "state": "failed", "tail": t })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_token;
+
+    /// The shape that corrupted the first stored token, reconstructed: a CSI
+    /// sequence landing mid-token must be skipped, not allowed to end the
+    /// run or eat a character.
+    #[test]
+    fn a_redraw_inside_the_token_does_not_corrupt_it() {
+        let raw = "token: sk-ant-oat01-abc\u{1b}[2Kdef-ghi_jkl0123456789012345678901234567890 done";
+        assert_eq!(
+            find_token(raw).as_deref(),
+            Some("sk-ant-oat01-abcdef-ghi_jkl0123456789012345678901234567890")
+        );
+    }
+
+    /// Too-short matches (fragments of a wrapped echo) are refused rather
+    /// than stored as a credential that will 401 later.
+    #[test]
+    fn a_fragment_is_not_a_token() {
+        assert_eq!(find_token("sk-ant-oat01-tooshort"), None);
     }
 }
