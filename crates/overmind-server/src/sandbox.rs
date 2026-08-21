@@ -504,6 +504,24 @@ pub fn as_agent(config: &Config, program: &str) -> Command {
     cmd
 }
 
+/// [`as_agent`], but for `std::process::Command` (M23).
+///
+/// The sign-in flow needs a *blocking* child wired to a pty, which is
+/// `std::process` territory; everything `as_agent` promises -- same uid, same
+/// `HOME` -- holds here for the same reasons.
+pub fn as_agent_std(config: &Config, program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(unix)]
+    if let Some(user) = agent_user(config) {
+        use std::os::unix::process::CommandExt;
+        cmd.uid(user.uid).gid(user.gid);
+        if let Some(home) = &config.agent_home {
+            cmd.env("HOME", home);
+        }
+    }
+    cmd
+}
+
 /// Hand a path to the agent's uid, so the agent can work in it.
 ///
 /// A no-op when there is no agent uid, which is every platform but our image.

@@ -60,9 +60,7 @@ impl AppState {
     /// over a snapshot another writer has since moved past is refused on the
     /// spot (`SQLITE_BUSY_SNAPSHOT`), timeout or not. The burn-in measured
     /// it: twelve simultaneous task checkouts, eight answered 500.
-    pub async fn write_tx(
-        &self,
-    ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    pub async fn write_tx(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
         self.pool.begin_with("BEGIN IMMEDIATE").await
     }
 

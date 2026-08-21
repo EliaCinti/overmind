@@ -197,6 +197,34 @@ fn api_router() -> Router<AppState> {
         .route("/audit/events", get(list_events))
         .route("/audit/verify", get(verify_chain))
         .route("/memory/status", get(memory_status))
+        // Signing the agent CLI into a Claude subscription, from the product
+        // (M23). A setup surface: loopback-only like everything else today.
+        .route("/claude-auth", get(claude_auth_status))
+        .route("/claude-auth/start", post(claude_auth_start))
+        .route("/claude-auth/code", post(claude_auth_code))
+}
+
+/// Where the subscription sign-in stands (M23). Polled by the interface.
+async fn claude_auth_status(State(state): State<AppState>) -> Json<Value> {
+    Json(crate::claude_auth::status(&state).await)
+}
+
+async fn claude_auth_start(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    crate::claude_auth::start(&state).map_err(ApiError::Invalid)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(serde::Deserialize)]
+struct AuthCode {
+    code: String,
+}
+
+async fn claude_auth_code(Json(req): Json<AuthCode>) -> Result<StatusCode, ApiError> {
+    if req.code.trim().is_empty() {
+        return Err(ApiError::Invalid("the code must not be empty".into()));
+    }
+    crate::claude_auth::submit_code(&req.code).map_err(ApiError::Invalid)?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Whether organizational memory (Wadachi/MCP) is wired up at all — for the UI
