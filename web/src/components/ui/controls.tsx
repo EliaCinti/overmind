@@ -39,14 +39,14 @@ export function Segmented<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-border bg-muted/50 p-0.5">
+    <div className="inline-flex rounded-full border border-border bg-muted/50 p-0.5">
       {options.map((opt) => (
         <button
           key={opt.value}
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "rounded px-3 py-1.5 text-sm transition cursor-pointer",
+            "rounded-full px-3 py-1.5 text-sm transition cursor-pointer",
             value === opt.value
               ? "bg-card text-foreground shadow-soft font-medium"
               : "text-muted-foreground hover:text-foreground",
