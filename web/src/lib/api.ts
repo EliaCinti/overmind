@@ -444,6 +444,15 @@ export type Economy =
 
 export const api = {
   /** Server identity, and how it pays. */
+  /** The door (M24): where it stands, and the three ways through it. */
+  authState: () =>
+    req<{ state: "unclaimed" | "locked" | "in"; name?: string }>("GET", "/auth"),
+  authClaim: (name: string, password: string) =>
+    req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password }),
+  authLogin: (name: string, password: string) =>
+    req<{ state: "in"; name: string }>("POST", "/auth/login", { name, password }),
+  authLogout: () => req<{ state: "locked" }>("POST", "/auth/logout"),
+
   /** The subscription sign-in flow, orchestrated by the server (M23). */
   claudeAuthStart: () => req<void>("POST", "/claude-auth/start"),
   claudeAuthStatus: () =>

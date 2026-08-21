@@ -262,6 +262,20 @@ export const en = {
     meetingPausedBody:
       "{agent} reached its monthly budget ({spent} of {limit}), so the room stopped mid-discussion. Nothing is lost — raise the cap or wait for the new month, then resume it.",
   },
+  door: {
+    claimTitle: "Claim this Overmind",
+    claimBody: "No owner exists yet. Choose a name and a password: whoever claims it first owns it.",
+    loginTitle: "Welcome back",
+    loginBody: "This Overmind is locked. Sign in to continue.",
+    name: "Name",
+    password: "Password",
+    passwordHint: "At least 8 characters.",
+    claim: "Claim and enter",
+    login: "Enter",
+    failed: "That is not the right name and password.",
+    limited: "Too many attempts. Wait a minute.",
+    logout: "Sign out",
+  },
   economy: {
     key: "Billed to an API key",
     keyMeaning: "The cap is a ceiling in real money.",
@@ -715,6 +729,20 @@ export const it: Dictionary = {
       "L'abbonamento è esaurito per la {window}. Nessuno ha sforato il budget — {agent} può riprendere quando si ricarica {when}.",
     meetingPausedBody:
       "{agent} ha raggiunto il budget mensile ({spent} di {limit}), quindi la stanza si è fermata a metà discussione. Non è andato perso niente — alza il tetto o aspetta il mese nuovo, poi riprendila.",
+  },
+  door: {
+    claimTitle: "Reclama questo Overmind",
+    claimBody: "Non esiste ancora un proprietario. Scegli un nome e una password: chi lo reclama per primo ne è il proprietario.",
+    loginTitle: "Bentornato",
+    loginBody: "Questo Overmind è chiuso a chiave. Accedi per continuare.",
+    name: "Nome",
+    password: "Password",
+    passwordHint: "Almeno 8 caratteri.",
+    claim: "Reclama ed entra",
+    login: "Entra",
+    failed: "Nome e password non corrispondono.",
+    limited: "Troppi tentativi. Aspetta un minuto.",
+    logout: "Esci",
   },
   economy: {
     key: "Addebitato su una chiave API",
