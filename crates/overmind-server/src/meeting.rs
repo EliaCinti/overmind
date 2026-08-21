@@ -181,7 +181,7 @@ pub async fn request(
 
     let meeting_id = new_id();
     let approval_id = new_id();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     // The approval first: the meeting row points at it, and SQLite checks
     // foreign keys as each statement runs, not at commit.
     sqlx::query(
@@ -307,7 +307,7 @@ pub async fn convene(
     let turn_cap = turn_cap.clamp(1, MAX_TURN_CAP);
 
     let meeting_id = new_id();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO meetings (id, company_id, topic, turn_cap, status, created_at)
          VALUES (?, ?, ?, ?, 'open', ?)",
@@ -362,7 +362,7 @@ pub async fn approve(state: &AppState, meeting_id: &str) -> Result<(), CeoError>
     if status != "requested" {
         return Err(CeoError::Invalid(format!("meeting is already {status}")));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query("UPDATE meetings SET status = 'open' WHERE id = ? AND status = 'requested'")
         .bind(meeting_id)
         .execute(&mut *tx)
@@ -400,7 +400,7 @@ pub async fn decline(
     if status != "requested" {
         return Err(CeoError::Invalid(format!("meeting is already {status}")));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     // The note is stored on the meeting, not only in the notification: it has
     // to reach the agent that asked (see `decisions_block`), or the same
     // request comes straight back on its next turn.
@@ -574,7 +574,7 @@ async fn pause_meeting(
         crate::governance::euros(check.spent + check.reserved),
         crate::governance::euros(check.cap),
     );
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE meetings SET status = 'paused', paused_agent_id = ?, paused_note = ?
          WHERE id = ? AND status = 'open'",
@@ -641,7 +641,7 @@ async fn pause_for_plan(
     let pretty = window.window.replace('_', "-");
     let note =
         format!("The subscription has run out for its {pretty} window; it resets at {resets}.");
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE meetings SET status = 'paused', paused_agent_id = ?, paused_note = ?
          WHERE id = ? AND status = 'open'",
@@ -1149,7 +1149,7 @@ async fn conclude(
             .await?;
     let convener = convener.and_then(|(c,)| c);
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE meetings SET status = 'decided', decision = ?, decided_at = ?
          WHERE id = ? AND status = 'open'",
@@ -1236,7 +1236,7 @@ async fn drop_meeting(
             .await?;
     let convener = convener.and_then(|(c,)| c);
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE meetings SET status = 'dropped', decline_note = ?, decided_at = ?
          WHERE id = ? AND status = 'open'",
@@ -1289,7 +1289,7 @@ async fn fail_meeting(
             .await?;
     let (topic, convener) = row.unwrap_or_else(|| ("the meeting".to_string(), None));
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE meetings SET status = 'failed', decided_at = ? WHERE id = ? AND status = 'open'",
     )

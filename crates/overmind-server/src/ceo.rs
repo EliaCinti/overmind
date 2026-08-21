@@ -77,7 +77,7 @@ async fn get_or_create_conversation(
         return Err(CeoError::Invalid(format!("agent is {status}")));
     }
     let id = new_id();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO conversations (id, company_id, agent_id, title, created_at)
          VALUES (?, ?, ?, ?, ?)",
@@ -277,7 +277,7 @@ pub async fn post_user_message(
     let agent = agent_id.to_string();
 
     let message_id = new_id();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, created_at)
          VALUES (?, ?, 'user', ?, ?)",
@@ -355,7 +355,7 @@ pub(crate) async fn budget_exhausted_notice(
     agent_name: &str,
     check: &crate::governance::BudgetCheck,
 ) -> Result<(), CeoError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let pushed = crate::notify::post(
         &mut tx,
         company_id,
@@ -405,7 +405,7 @@ async fn post_message(
     role: &str,
     content: &str,
 ) -> Result<(), CeoError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, created_at)
          VALUES (?, ?, ?, ?, ?)",
@@ -746,7 +746,7 @@ async fn run_agent_turn(
         crate::runner::default_goal(state, company_id).await
     };
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let message_id = new_id();
     sqlx::query(
         "INSERT INTO messages (id, conversation_id, role, content, created_at)
@@ -884,7 +884,7 @@ pub(crate) async fn run_adapter(
     let cap = crate::runner::trait_budget_cents(traits);
     let estimate = state.config.start_estimate_cents;
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let check = crate::governance::check(&mut tx, turn.agent_id, cap, estimate).await?;
     if !check.fits {
         // Record the overrun and commit that alone — the same durable incident

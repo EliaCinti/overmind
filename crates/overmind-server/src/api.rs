@@ -369,7 +369,7 @@ async fn create_company(
         )));
     }
     let (id, created_at) = (new_id(), now());
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query("INSERT INTO companies (id, name, language, created_at) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(req.name.trim())
@@ -593,7 +593,7 @@ async fn hire_agent(
     Path(company_id): Path<String>,
     Json(req): Json<HireAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
         .fetch_optional(&mut *tx)
@@ -823,7 +823,7 @@ async fn reassign_agent(
     Path(agent_id): Path<String>,
     Json(req): Json<ReassignAgent>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let Some((company_id, before)) = agent_snapshot_by_id(&mut tx, &agent_id).await? else {
         return Err(ApiError::NotFound("agent"));
     };
@@ -917,7 +917,7 @@ async fn create_project(
     if req.title.trim().is_empty() {
         return Err(ApiError::Invalid("project title must not be empty".into()));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
         .fetch_optional(&mut *tx)
@@ -1006,7 +1006,7 @@ async fn create_goal(
     if req.title.trim().is_empty() {
         return Err(ApiError::Invalid("goal title must not be empty".into()));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let project: Option<(String,)> = sqlx::query_as("SELECT company_id FROM projects WHERE id = ?")
         .bind(&project_id)
         .fetch_optional(&mut *tx)
@@ -1093,7 +1093,7 @@ pub(crate) async fn open_task(
             "unknown execution_kind '{execution_kind}'"
         )));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
         .fetch_optional(&mut *tx)
@@ -1210,7 +1210,7 @@ async fn transition_task(
         return Err(ApiError::Invalid(format!("unknown status '{}'", req.to)));
     };
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let task: Option<(String, String, Option<String>)> =
         sqlx::query_as("SELECT company_id, status, assignee_agent_id FROM tasks WHERE id = ?")
             .bind(&task_id)
@@ -1354,7 +1354,7 @@ async fn create_workspace(
         )));
     }
     let is_primary = req.is_primary.unwrap_or(true);
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let project: Option<(String,)> = sqlx::query_as("SELECT company_id FROM projects WHERE id = ?")
         .bind(&project_id)
         .fetch_optional(&mut *tx)
@@ -1472,7 +1472,7 @@ async fn request_wakeup(
     payload: Option<Json<RequestWakeup>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let req = payload.map(|Json(r)| r).unwrap_or_default();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let agent: Option<(String,)> = sqlx::query_as("SELECT company_id FROM agents WHERE id = ?")
         .bind(&agent_id)
         .fetch_optional(&mut *tx)
@@ -1878,7 +1878,7 @@ async fn upload_task_attachment(
         .await
         .map_err(|e| ApiError::Invalid(format!("cannot write attachment: {e}")))?;
     let size = bytes.len() as i64;
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO attachments
          (id, conversation_id, task_id, message_id, origin, filename, mime, size_bytes, path, created_at)
@@ -2302,7 +2302,7 @@ async fn create_company_token(
     // secret should not be predictable in any dimension (ADR-0027).
     let token = uuid::Uuid::new_v4().to_string();
     let (id, created_at) = (new_id(), now());
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO company_tokens (id, company_id, label, token, created_at)
          VALUES (?, ?, ?, ?, ?)",
@@ -2385,7 +2385,7 @@ async fn revoke_company_token(
         return Ok(Json(json!({ "id": token_id, "revoked_at": at })));
     }
     let at = now();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query("UPDATE company_tokens SET revoked_at = ? WHERE id = ?")
         .bind(&at)
         .bind(&token_id)
@@ -2445,7 +2445,7 @@ async fn set_brain_enabled(
     Path(company_id): Path<String>,
     Json(req): Json<SetBrainEnabled>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let done = sqlx::query("UPDATE companies SET brain_enabled = ? WHERE id = ?")
         .bind(i64::from(req.enabled))
         .bind(&company_id)
@@ -2946,7 +2946,7 @@ async fn set_agent_status(
     to: &str,
     event: &'static str,
 ) -> Result<Json<Value>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let row: Option<(String, String)> =
         sqlx::query_as("SELECT company_id, status FROM agents WHERE id = ?")
             .bind(agent_id)
@@ -3015,7 +3015,7 @@ async fn set_requires_approval(
     Path(agent_id): Path<String>,
     Json(req): Json<SetApproval>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let agent: Option<(String,)> = sqlx::query_as("SELECT company_id FROM agents WHERE id = ?")
         .bind(&agent_id)
         .fetch_optional(&mut *tx)
@@ -3065,7 +3065,7 @@ async fn set_agent_budget(
     if req.monthly_budget_cents < 0 {
         return Err(ApiError::Invalid("a budget cannot be negative".into()));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let agent: Option<BudgetAgentRow> = sqlx::query_as(
         "SELECT company_id, name, traits, title, custom_brief, requires_approval
          FROM agents WHERE id = ?",
@@ -3195,7 +3195,7 @@ async fn decide_approval(
         return Err(ApiError::Conflict(format!("approval already {status}")));
     }
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query("UPDATE approvals SET status = ?, decision_note = ?, decided_at = ? WHERE id = ?")
         .bind(if approve { "approved" } else { "rejected" })
         .bind(&req.note)
@@ -3296,7 +3296,7 @@ async fn rollback_agent(
     Path(agent_id): Path<String>,
     Json(req): Json<Rollback>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let target: Option<(String, String)> = sqlx::query_as(
         "SELECT company_id, after_config FROM agent_config_revisions WHERE id = ? AND agent_id = ?",
     )

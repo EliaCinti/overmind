@@ -96,7 +96,7 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
         .bind(&request_id)
         .execute(&state.pool)
         .await?;
-        let mut tx = state.pool.begin().await?;
+        let mut tx = state.write_tx().await?;
         audit::append(
             &mut tx,
             company_id.as_deref(),

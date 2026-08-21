@@ -185,7 +185,7 @@ pub async fn propose(
 
     let proposal_id = new_id();
     let approval_id = new_id();
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
          VALUES (?, ?, 'org_proposal', 'pending', ?, ?, ?)",
@@ -312,7 +312,7 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
         ));
     }
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     let mut by_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut hired: Vec<String> = Vec::new();
     let mut pending: Vec<&MemberRow> = members.iter().collect();
@@ -436,7 +436,7 @@ pub async fn reject(
     if status != "proposed" {
         return Err(CeoError::Invalid(format!("proposal is already {status}")));
     }
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE org_proposals SET status = 'rejected', decline_note = ?, decided_at = ?
          WHERE id = ? AND status = 'proposed'",
