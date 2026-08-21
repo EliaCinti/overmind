@@ -11,6 +11,7 @@ import {
   BrainCircuit,
   Plug,
   LogOut,
+  UserRoundPlus,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -43,6 +44,7 @@ export function TopBar({
   theme,
   onToggleTheme,
   onLogout,
+  onInvite,
 }: {
   companies: Company[];
   companyId: string | null;
@@ -65,6 +67,8 @@ export function TopBar({
   onToggleTheme: () => void;
   /** Absent while the instance is unclaimed: no session, nothing to end. */
   onLogout?: () => void;
+  /** The invite surface (M25): present only for the owner. */
+  onInvite?: () => void;
 }) {
   const t = useT();
   return (
@@ -143,6 +147,11 @@ export function TopBar({
         >
           {theme === "dark" ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
         </Button>
+        {onInvite && (
+          <Button variant="ghost" size="icon" onClick={onInvite} aria-label={t("door.inviteMint")}>
+            <UserRoundPlus className="h-4.5 w-4.5" />
+          </Button>
+        )}
         {onLogout && (
           <Button variant="ghost" size="icon" onClick={onLogout} aria-label={t("door.logout")}>
             <LogOut className="h-4.5 w-4.5" />

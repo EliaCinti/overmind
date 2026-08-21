@@ -451,12 +451,17 @@ export const api = {
   /** Server identity, and how it pays. */
   /** The door (M24): where it stands, and the three ways through it. */
   authState: () =>
-    req<{ state: "unclaimed" | "locked" | "in"; name?: string }>("GET", "/auth"),
-  authSignup: (name: string, password: string) =>
+    req<{ state: "unclaimed" | "locked" | "in"; name?: string; role?: "owner" | "member" }>(
+      "GET",
+      "/auth",
+    ),
+  authSignup: (name: string, password: string, invite?: string) =>
     req<{ state: "in"; name: string; role: "owner" | "member" }>("POST", "/auth/signup", {
       name,
       password,
+      invite: invite || undefined,
     }),
+  authMintInvite: () => req<{ invite: string; expires_days: number }>("POST", "/auth/invites"),
   authClaim: (name: string, password: string) =>
     req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password }),
   authLogin: (name: string, password: string) =>

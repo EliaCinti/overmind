@@ -29,6 +29,7 @@ export function Door({
   const [screen, setScreen] = useState<"landing" | "login" | "signup">("landing");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
+  const [invite, setInvite] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -44,7 +45,7 @@ export function Door({
     setBusy(true);
     setError(null);
     try {
-      if (screen === "signup") await api.authSignup(name.trim(), password);
+      if (screen === "signup") await api.authSignup(name.trim(), password, invite.trim());
       else await api.authLogin(name.trim(), password);
       onEntered();
     } catch (err) {
@@ -134,6 +135,16 @@ export function Door({
                   <p className="mt-1 text-xs text-muted-foreground">{t("door.passwordHint")}</p>
                 )}
               </Field>
+              {screen === "signup" && mode === "locked" && (
+                <Field label={t("door.inviteCode")}>
+                  <Input
+                    value={invite}
+                    onChange={(e) => setInvite(e.target.value)}
+                    className="font-mono"
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">{t("door.inviteHint")}</p>
+                </Field>
+              )}
               {error && <p className="text-sm text-destructive">{error}</p>}
               <Button
                 type="submit"

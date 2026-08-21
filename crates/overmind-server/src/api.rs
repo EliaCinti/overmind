@@ -102,6 +102,8 @@ fn api_router() -> Router<AppState> {
         .route("/domains", get(list_domains))
         .route("/models", get(list_models))
         .route("/companies/{company_id}/language", post(set_language))
+        // Membership (M25): any member brings in a colleague by name.
+        .route("/companies/{company_id}/members", post(add_member))
         .route(
             "/companies/{company_id}/brain",
             get(brain_status).post(set_brain_enabled),
@@ -220,6 +222,7 @@ fn api_router() -> Router<AppState> {
         .route("/auth", get(auth_state))
         .route("/auth/claim", post(auth_claim))
         .route("/auth/signup", post(auth_signup))
+        .route("/auth/invites", post(auth_mint_invite))
         .route("/auth/login", post(auth_login))
         .route("/auth/logout", post(auth_logout))
         // Signing the agent CLI into a Claude subscription, from the product
@@ -227,6 +230,48 @@ fn api_router() -> Router<AppState> {
         .route("/claude-auth", get(claude_auth_status))
         .route("/claude-auth/start", post(claude_auth_start))
         .route("/claude-auth/code", post(claude_auth_code))
+}
+
+#[derive(serde::Deserialize)]
+struct AddMember {
+    name: String,
+}
+
+/// Add a registered user to a company (M25). Any member can: a team invites
+/// a colleague, and the owner is not a bottleneck. The wall has already
+/// established the caller is a member (or the owner) of this company.
+async fn add_member(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+    Json(req): Json<AddMember>,
+) -> Result<StatusCode, ApiError> {
+    let user: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE name = ?")
+        .bind(req.name.trim())
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((user_id,)) = user else {
+        return Err(ApiError::NotFound("user"));
+    };
+    let mut tx = state.write_tx().await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO company_members (company_id, user_id, added_at) VALUES (?, ?, ?)",
+    )
+    .bind(&company_id)
+    .bind(&user_id)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    crate::audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        "company.member_added",
+        &json!({ "user": req.name.trim() }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(StatusCode::CREATED)
 }
 
 /// Where the door stands (M24): unclaimed, locked, or in.
@@ -246,6 +291,13 @@ async fn auth_signup(
     Json(req): Json<crate::auth::Credentials>,
 ) -> Result<axum::response::Response, ApiError> {
     crate::auth::signup(&state, &req).await
+}
+
+async fn auth_mint_invite(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(crate::auth::mint_invite(&state, &headers).await?))
 }
 
 async fn auth_login(
@@ -464,11 +516,17 @@ struct CreateCompany {
 
 async fn create_company(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<CreateCompany>,
 ) -> Result<impl IntoResponse, ApiError> {
     if req.name.trim().is_empty() {
         return Err(ApiError::Invalid("company name must not be empty".into()));
     }
+    // Who is founding, asked BEFORE the write transaction opens: the session
+    // lookup slides the expiry with a write of its own, on another pool
+    // connection -- inside our IMMEDIATE transaction that write would wait on
+    // the very lock we hold (measured: every founding took the full wait).
+    let founder = crate::auth::session_identity(&state, &headers).await;
     let language = req.language.as_deref().unwrap_or(crate::i18n::DEFAULT);
     if !crate::i18n::is_supported(language) {
         return Err(ApiError::Invalid(format!(
@@ -514,6 +572,19 @@ async fn create_company(
     )
     .await?;
 
+    // Whoever founds a company is inside it (M25). Before any user exists
+    // (an unclaimed instance) there is nobody to enrol, and the migration's
+    // backfill rule applies when accounts arrive.
+    if let Some((user_id, _, _)) = founder {
+        sqlx::query(
+            "INSERT OR IGNORE INTO company_members (company_id, user_id, added_at) VALUES (?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&user_id)
+        .bind(&created_at)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     // "One click and a company has a brain" (ADR-0004), and the click is this
@@ -580,12 +651,43 @@ async fn create_company(
     ))
 }
 
-async fn list_companies(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
-        "SELECT id, name, language, created_at, brain_enabled FROM companies ORDER BY created_at",
-    )
-    .fetch_all(&state.pool)
-    .await?;
+async fn list_companies(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    // Membership is the filter (M25, ADR-0033): you see your companies.
+    // The instance owner sees all -- the owner is the administrator, and
+    // pretending otherwise on a machine they control would be theater. An
+    // unclaimed instance has nobody to filter for.
+    let rows: Vec<(String, String, String, String, i64)> =
+        match crate::auth::session_identity(&state, &headers).await {
+            Some((_, _, role)) if role == "owner" => {
+                sqlx::query_as(
+                    "SELECT id, name, language, created_at, brain_enabled \
+                     FROM companies ORDER BY created_at",
+                )
+                .fetch_all(&state.pool)
+                .await?
+            }
+            Some((user_id, _, _)) => {
+                sqlx::query_as(
+                    "SELECT c.id, c.name, c.language, c.created_at, c.brain_enabled \
+                     FROM companies c JOIN company_members m ON m.company_id = c.id \
+                     WHERE m.user_id = ? ORDER BY c.created_at",
+                )
+                .bind(&user_id)
+                .fetch_all(&state.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT id, name, language, created_at, brain_enabled \
+                     FROM companies ORDER BY created_at",
+                )
+                .fetch_all(&state.pool)
+                .await?
+            }
+        };
     let companies: Vec<Value> = rows
         .into_iter()
         .map(|(id, name, language, created_at, brain)| {
