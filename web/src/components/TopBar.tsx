@@ -10,6 +10,7 @@ import {
   WifiOff,
   BrainCircuit,
   Plug,
+  LogOut,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -41,6 +42,7 @@ export function TopBar({
   onChangeLanguage,
   theme,
   onToggleTheme,
+  onLogout,
 }: {
   companies: Company[];
   companyId: string | null;
@@ -61,6 +63,8 @@ export function TopBar({
   onChangeLanguage: (code: LanguageCode) => void;
   theme: string;
   onToggleTheme: () => void;
+  /** Absent while the instance is unclaimed: no session, nothing to end. */
+  onLogout?: () => void;
 }) {
   const t = useT();
   return (
@@ -139,6 +143,11 @@ export function TopBar({
         >
           {theme === "dark" ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
         </Button>
+        {onLogout && (
+          <Button variant="ghost" size="icon" onClick={onLogout} aria-label={t("door.logout")}>
+            <LogOut className="h-4.5 w-4.5" />
+          </Button>
+        )}
       </div>
     </header>
   );

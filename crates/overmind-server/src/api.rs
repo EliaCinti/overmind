@@ -14,7 +14,18 @@ use crate::domain::{AgentTraits, DomainPatch, TaskStatus, TraitsPatch, event_kin
 /// `/ws`, and (when built) the SPA served at the root with history fallback.
 pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
-        .nest("/api", api_router())
+        .nest(
+            "/api",
+            api_router()
+                // The wall (M24): every /api route requires a session except
+                // the door itself and a redacted health. Layered here so /mcp
+                // (its own bearer tokens), /ws (guarded below by session too)
+                // and the SPA's static files stay outside it.
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth::wall,
+                )),
+        )
         // Overmind's own MCP surface, for the agents it runs (ADR-0027). Not
         // under /api: it is a protocol endpoint, not part of the JSON API the
         // UI speaks, and its caller authenticates with a per-run bearer token
@@ -22,7 +33,15 @@ pub fn app(state: AppState) -> Router {
         .merge(crate::mcp_server::router())
         .route(
             "/ws",
-            get(crate::ws::handler).layer(axum::middleware::from_fn(crate::ws::guard_origin)),
+            get(crate::ws::handler)
+                .layer(axum::middleware::from_fn(crate::ws::guard_origin))
+                // The socket authenticates like everything else (M24): the
+                // cookie rides the upgrade request. Same wall, same
+                // exception for an unclaimed instance.
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth::ws_wall,
+                )),
         );
 
     // Serve the built frontend if present; unknown paths fall back to
@@ -197,6 +216,12 @@ fn api_router() -> Router<AppState> {
         .route("/audit/events", get(list_events))
         .route("/audit/verify", get(verify_chain))
         .route("/memory/status", get(memory_status))
+        // The door (M24, ADR-0032).
+        .route("/auth", get(auth_state))
+        .route("/auth/claim", post(auth_claim))
+        .route("/auth/signup", post(auth_signup))
+        .route("/auth/login", post(auth_login))
+        .route("/auth/logout", post(auth_logout))
         // Signing the agent CLI into a Claude subscription, from the product
         // (M23). A setup surface: loopback-only like everything else today.
         .route("/claude-auth", get(claude_auth_status))
@@ -204,12 +229,51 @@ fn api_router() -> Router<AppState> {
         .route("/claude-auth/code", post(claude_auth_code))
 }
 
+/// Where the door stands (M24): unclaimed, locked, or in.
+async fn auth_state(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Json<Value> {
+    Json(crate::auth::state_of(&state, &headers).await)
+}
+
+async fn auth_claim(
+    State(state): State<AppState>,
+    Json(req): Json<crate::auth::Credentials>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::auth::claim(&state, &req).await
+}
+
+async fn auth_signup(
+    State(state): State<AppState>,
+    Json(req): Json<crate::auth::Credentials>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::auth::signup(&state, &req).await
+}
+
+async fn auth_login(
+    State(state): State<AppState>,
+    Json(req): Json<crate::auth::Credentials>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::auth::login(&state, &req).await
+}
+
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    crate::auth::logout(&state, &headers).await
+}
+
 /// Where the subscription sign-in stands (M23). Polled by the interface.
 async fn claude_auth_status(State(state): State<AppState>) -> Json<Value> {
     Json(crate::claude_auth::status(&state).await)
 }
 
-async fn claude_auth_start(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn claude_auth_start(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    // Billing is the owner's: connecting or replacing the subscription
+    // changes who pays, and that is not a member's call (M24 roles).
+    crate::auth::require_owner(&state, &headers).await?;
     crate::claude_auth::start(&state).map_err(ApiError::Invalid)?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -219,7 +283,12 @@ struct AuthCode {
     code: String,
 }
 
-async fn claude_auth_code(Json(req): Json<AuthCode>) -> Result<StatusCode, ApiError> {
+async fn claude_auth_code(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AuthCode>,
+) -> Result<StatusCode, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
     if req.code.trim().is_empty() {
         return Err(ApiError::Invalid("the code must not be empty".into()));
     }
@@ -248,6 +317,14 @@ pub enum ApiError {
     /// Refused by a governance policy (e.g. over budget). Maps to 402.
     #[error("{0}")]
     Blocked(String),
+    /// No valid session (M24). Deliberately wordless beyond the status:
+    /// which part of the credential was wrong is not the caller's to learn.
+    #[error("unauthorized")]
+    Unauthorized,
+    /// A valid session without the standing (M24): today, a member touching
+    /// billing. 403, not 401 -- who you are was never in question.
+    #[error("this action is the owner's")]
+    Forbidden,
     #[error("internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -314,6 +391,8 @@ impl IntoResponse for ApiError {
             ApiError::Invalid(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Blocked(_) => StatusCode::PAYMENT_REQUIRED,
+            ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::Internal(source) => {
                 // The client gets an opaque error; the operator gets the cause.
                 eprintln!("internal error: {source}");

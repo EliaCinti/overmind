@@ -374,6 +374,11 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/auth")) {
+      // The door: a session died under the app (M24). One event, one
+      // listener, no per-call handling.
+      window.dispatchEvent(new Event("overmind:unauthorized"));
+    }
     let message = res.statusText;
     try {
       const data = await res.json();
@@ -444,6 +449,20 @@ export type Economy =
 
 export const api = {
   /** Server identity, and how it pays. */
+  /** The door (M24): where it stands, and the three ways through it. */
+  authState: () =>
+    req<{ state: "unclaimed" | "locked" | "in"; name?: string }>("GET", "/auth"),
+  authSignup: (name: string, password: string) =>
+    req<{ state: "in"; name: string; role: "owner" | "member" }>("POST", "/auth/signup", {
+      name,
+      password,
+    }),
+  authClaim: (name: string, password: string) =>
+    req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password }),
+  authLogin: (name: string, password: string) =>
+    req<{ state: "in"; name: string }>("POST", "/auth/login", { name, password }),
+  authLogout: () => req<{ state: "locked" }>("POST", "/auth/logout"),
+
   /** The subscription sign-in flow, orchestrated by the server (M23). */
   claudeAuthStart: () => req<void>("POST", "/claude-auth/start"),
   claudeAuthStatus: () =>

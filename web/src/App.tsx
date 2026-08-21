@@ -32,6 +32,7 @@ import { HireAgentDialog } from "./components/HireAgentDialog";
 import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { ConnectRepoDialog } from "./components/ConnectRepoDialog";
 import { Onboarding } from "./components/Onboarding";
+import { Door } from "./components/Door";
 import { SignInNotice } from "./components/SignInNotice";
 import { Spinner } from "./components/ui/primitives";
 
@@ -59,6 +60,8 @@ export default function App() {
    * wrong meaning and correcting it.
    */
   const [economy, setEconomy] = useState<Economy | null>(null);
+  /** The door (M24): nothing behind it is fetched before a session exists. */
+  const [gate, setGate] = useState<"checking" | "unclaimed" | "locked" | "in">("checking");
   /** Where each plan window stands; refreshed on every live change. */
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
@@ -86,8 +89,26 @@ export default function App() {
     setHireOpen(true);
   };
 
+  // A session that expires mid-use sends you back to the door instead of
+  // leaving a dead app: the API client announces every 401.
+  useEffect(() => {
+    const onUnauthorized = () => setGate("locked");
+    window.addEventListener("overmind:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("overmind:unauthorized", onUnauthorized);
+  }, []);
+
+  // The door first, everything else after: the boot fetches run only once a
+  // session exists (or no owner does).
+  useEffect(() => {
+    api
+      .authState()
+      .then((a) => setGate(a.state === "in" ? "in" : a.state))
+      .catch(() => setGate("in")); // an unreachable server shows its own errors
+  }, []);
+
   // Bootstrap: companies + both catalogs + the models we ship (ADR-0021).
   useEffect(() => {
+    if (gate !== "in") return;
     Promise.all([
       api.listCompanies(),
       api.listArchetypes(),
@@ -103,7 +124,7 @@ export default function App() {
         setCompanyId(cs.find((c) => c.id === last)?.id ?? cs[0]?.id ?? null);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [gate]);
 
   useEffect(() => {
     if (companyId) localStorage.setItem(LAST_COMPANY, companyId);
@@ -225,6 +246,22 @@ export default function App() {
     setCompanyId(id);
   };
 
+  if (gate === "checking") {
+    return (
+      <div className="flex h-screen items-center justify-center">
+        <Spinner className="h-6 w-6 text-muted-foreground" />
+      </div>
+    );
+  }
+  if (gate === "unclaimed" || gate === "locked") {
+    return (
+      <LanguageProvider language={language}>
+        <div className="flex h-screen flex-col">
+          <Door mode={gate} onEntered={() => setGate("in")} />
+        </div>
+      </LanguageProvider>
+    );
+  }
   if (loading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -256,6 +293,9 @@ export default function App() {
           onChangeLanguage={changeLanguage}
           theme={theme}
           onToggleTheme={toggle}
+          onLogout={() => {
+            api.authLogout().finally(() => setGate("locked"));
+          }}
         />
 
         <SignInNotice economy={economy} onSignedIn={refreshHealth} />

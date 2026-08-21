@@ -40,6 +40,19 @@ pub fn compute_hash(
     hex::encode(hasher.finalize())
 }
 
+tokio::task_local! {
+    /// Who is acting, for the events this task appends (M24, ADR-0032).
+    ///
+    /// Set by the wall around each authenticated request; absent in
+    /// background tasks (the scheduler, a finalizing run), whose events are
+    /// the system's own. The actor rides **inside the payload** rather than
+    /// in a column: the payload is hashed as stored, so the attribution is
+    /// tamper-evident like everything else -- a column would either sit
+    /// outside the chain or change the hash formula under every existing
+    /// chain.
+    pub static ACTOR: Option<String>;
+}
+
 /// Append one event. Must be called inside the same transaction as the domain
 /// write it describes, so state change and audit trail commit atomically.
 pub async fn append(
@@ -58,6 +71,22 @@ pub async fn append(
         None => (1, GENESIS_HASH.to_string()),
     };
     let created_at = chrono::Utc::now().to_rfc3339();
+    // The acting user, when this append happens inside a request the wall
+    // authenticated. Injected, not passed: forty call sites already agree on
+    // this signature, and the actor is a fact about the request, not about
+    // any one of them.
+    let actored;
+    let payload = match ACTOR.try_with(|a| a.clone()) {
+        Ok(Some(actor)) if payload.is_object() && payload.get("actor").is_none() => {
+            let mut p = payload.clone();
+            p.as_object_mut()
+                .expect("checked object")
+                .insert("actor".into(), Value::String(actor));
+            actored = p;
+            &actored
+        }
+        _ => payload,
+    };
     let payload_text = payload.to_string();
     let hash = compute_hash(
         seq,

@@ -323,6 +323,10 @@ pub struct Config {
     /// wherever `memory_cmd` points — for the user who deliberately wants their
     /// agents writing into a brain they chose.
     pub managed_brain: bool,
+    /// Mark the session cookie `Secure` (`OVERMIND_COOKIE_SECURE=on`).
+    /// Required behind TLS, wrong on plain-http localhost -- the browser
+    /// would drop the cookie and every login would silently not stick.
+    pub cookie_secure: bool,
 }
 
 impl Default for Config {
@@ -344,6 +348,7 @@ impl Default for Config {
             economy_override: None,
             repos_dir: None,
             managed_brain: true,
+            cookie_secure: false,
         }
     }
 }
@@ -428,6 +433,9 @@ impl Config {
             // Same shape as `sandbox` above, same reason: only an explicit
             // "off" opts out, so a typo does not silently put two companies
             // back in one brain.
+            cookie_secure: std::env::var("OVERMIND_COOKIE_SECURE")
+                .map(|v| v == "on")
+                .unwrap_or(defaults.cookie_secure),
             managed_brain: std::env::var("OVERMIND_MANAGED_BRAIN")
                 .map(|v| !v.eq_ignore_ascii_case("off"))
                 .unwrap_or(defaults.managed_brain),

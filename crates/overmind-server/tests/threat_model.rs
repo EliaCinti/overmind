@@ -105,7 +105,14 @@ fn the_threat_model_says_what_it_does_not_defend() {
         doc.contains("Who this does *not* defend against"),
         "a threat model without its limits is a sales page"
     );
-    for expected in ["no authentication", "malicious adapter", "tamper-evident"] {
+    // "no authentication" left this list deliberately: M24 built the door
+    // (ADR-0032). What replaced it is the limitation that never goes away --
+    // the door guards the port, and nothing guards a hostile host.
+    for expected in [
+        "nothing guards a hostile host",
+        "malicious adapter",
+        "tamper-evident",
+    ] {
         assert!(
             doc.to_lowercase().contains(&expected.to_lowercase()),
             "the threat model no longer mentions `{expected}` — if that stopped \
