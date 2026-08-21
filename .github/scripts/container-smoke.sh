@@ -37,7 +37,13 @@ cleanup() {
         docker logs "$NAME" 2>&1 | tail -40 || true
         docker rm -f "$NAME" >/dev/null 2>&1 || true
     fi
-    rm -rf "$WORK"
+    # The code-task leg leaves git objects in the mounted repo owned by the
+    # container's uids, which the runner's user cannot delete -- and a trap
+    # that exits 1 turns a green run red after everything passed (measured:
+    # the first CI run of the leg). Hand ownership back through the image,
+    # and never let the tidy-up outrank the verdict.
+    docker run --rm -v "$WORK:/w" --entrypoint chown "$IMAGE" -R "$(id -u):$(id -g)" /w         >/dev/null 2>&1 || true
+    rm -rf "$WORK" || true
 }
 trap cleanup EXIT
 
