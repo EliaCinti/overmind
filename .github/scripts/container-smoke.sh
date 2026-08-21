@@ -62,6 +62,15 @@ STUB
 # the boundary working and would be nothing of the kind.
 chmod 755 "$WORK/stub" "$WORK/stub/agent.sh"
 
+# A tiny real repository, for the code-task leg. Mounted read-write: a code
+# run's worktree lives under /data, but git needs to reach the main repo.
+mkdir -p "$WORK/repo"
+git -C "$WORK/repo" init -q -b main
+echo "# demo" > "$WORK/repo/README.md"
+git -C "$WORK/repo" add . 
+git -C "$WORK/repo" -c user.email=ci@ci -c user.name=CI commit -qm init
+chmod -R a+rwX "$WORK/repo"
+
 # Does the image ship an agent CLI, and can the agent actually run it?
 #
 # The first defect this milestone opens with is that it did not — the server's
@@ -120,6 +129,7 @@ scenario() { # label [extra docker -e args…]
     docker run -d --name "$NAME" \
         -p "127.0.0.1:${PORT}:7070" \
         -v "$WORK/stub:/stub:ro" \
+        -v "$WORK/repo:/repo" \
         -e OVERMIND_AGENT_CMD='sh /stub/agent.sh' \
         -e OVERMIND_SANDBOX_ALLOW=/stub \
         "$@" \
@@ -181,6 +191,34 @@ CHECK
     echo "[$label] session: ${status}"
 
     api GET "/tasks/${task_id}/artifacts" > "$WORK/${label}.json"
+
+    # The code-task leg (M23). The knowledge task above never touches git, so
+    # the smoke was green while every code task's diff in the image was
+    # broken: the agent commits as uid 10001, the server asks `git diff` as
+    # root, and git refuses a repository owned by another user. The check
+    # that would have caught it is exactly this: run a code task and demand
+    # the diff endpoint answers with the change in it.
+    echo "[$label] a code task, and its diff…"
+    local project_id workspace_ok code_task code_task_id code_started code_session code_status
+    project_id=$(api POST "/companies/${company_id}/projects" '{"title":"P"}' | json '["id"]')
+    api POST "/projects/${project_id}/workspaces" '{"name":"w","cwd":"/repo"}' >/dev/null
+    code_task=$(api POST "/companies/${company_id}/tasks" \
+        '{"title":"Change something","description":"Create NOTE.md with one line.","execution_kind":"code"}')
+    code_task_id=$(echo "$code_task" | json '["id"]')
+    api POST "/tasks/${code_task_id}/transition" '{"to":"todo"}' >/dev/null
+    code_started=$(api POST "/tasks/${code_task_id}/start" "{\"agent_id\":\"${agent_id}\"}")
+    code_session=$(echo "$code_started" | json '["session_id"]')
+    for _ in $(seq 1 60); do
+        code_status=$(api GET "/sessions/${code_session}" | json '.get("status","")')
+        case "$code_status" in completed|failed) break ;; esac
+        sleep 1
+    done
+    echo "[$label] code session: ${code_status}"
+    api GET "/sessions/${code_session}/diff" > "$WORK/diff-${label}.txt" \
+        || { echo "FAIL: the diff endpoint refused — a person cannot review the code task"; exit 1; }
+    grep -q "ARTIFACT.md" "$WORK/diff-${label}.txt" \
+        || { echo "FAIL: the diff came back without the run's change in it:"; head -5 "$WORK/diff-${label}.txt"; exit 1; }
+    echo "  the diff shows the change."
 
     echo "[$label] verifying the audit chain…"
     # Via a file, not a pipe: the heredoc below *is* this python's stdin.

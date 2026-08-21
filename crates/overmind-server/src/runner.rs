@@ -222,7 +222,17 @@ fn tag(id: &str) -> &str {
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
+    // The path is declared safe for this one invocation (M23). Since the uid
+    // split of ADR-0029 the agent commits as uid 10001 while the server asks
+    // git questions as root, and git refuses a repository owned by another
+    // user -- "dubious ownership" -- which broke every code task's diff in
+    // the image. The declaration is exact, not `*`: the server only ever
+    // points git at a worktree it created or a workspace the operator
+    // mounted, and this narrows the exception to precisely that path.
+    let safe = format!("safe.directory={}", cwd.display());
     let out = Command::new("git")
+        .arg("-c")
+        .arg(&safe)
         .args(args)
         .current_dir(cwd)
         .output()
