@@ -469,6 +469,15 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         .map_err(|e| InitError::Url(e.to_string()))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // Writers wait their turn instead of failing on the spot (M23).
+        // WAL lets readers run beside one writer, but two writers still
+        // collide -- and without a busy timeout SQLite answers the second
+        // one with "database is locked" immediately. Measured in the first
+        // minute of real use: a CEO turn was writing its messages, creating
+        // a project at the same moment got a 500. Five seconds is far above
+        // any transaction this server holds, so hitting it means a real
+        // deadlock, which deserves the error.
+        .busy_timeout(std::time::Duration::from_secs(5))
         .foreign_keys(true);
 
     // An in-memory database exists per-connection: the pool must never open
