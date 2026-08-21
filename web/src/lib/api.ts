@@ -452,6 +452,11 @@ export const api = {
   /** The door (M24): where it stands, and the three ways through it. */
   authState: () =>
     req<{ state: "unclaimed" | "locked" | "in"; name?: string }>("GET", "/auth"),
+  authSignup: (name: string, password: string) =>
+    req<{ state: "in"; name: string; role: "owner" | "member" }>("POST", "/auth/signup", {
+      name,
+      password,
+    }),
   authClaim: (name: string, password: string) =>
     req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password }),
   authLogin: (name: string, password: string) =>

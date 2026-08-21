@@ -219,6 +219,7 @@ fn api_router() -> Router<AppState> {
         // The door (M24, ADR-0032).
         .route("/auth", get(auth_state))
         .route("/auth/claim", post(auth_claim))
+        .route("/auth/signup", post(auth_signup))
         .route("/auth/login", post(auth_login))
         .route("/auth/logout", post(auth_logout))
         // Signing the agent CLI into a Claude subscription, from the product
@@ -240,6 +241,13 @@ async fn auth_claim(
     crate::auth::claim(&state, &req).await
 }
 
+async fn auth_signup(
+    State(state): State<AppState>,
+    Json(req): Json<crate::auth::Credentials>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::auth::signup(&state, &req).await
+}
+
 async fn auth_login(
     State(state): State<AppState>,
     Json(req): Json<crate::auth::Credentials>,
@@ -259,7 +267,13 @@ async fn claude_auth_status(State(state): State<AppState>) -> Json<Value> {
     Json(crate::claude_auth::status(&state).await)
 }
 
-async fn claude_auth_start(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+async fn claude_auth_start(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    // Billing is the owner's: connecting or replacing the subscription
+    // changes who pays, and that is not a member's call (M24 roles).
+    crate::auth::require_owner(&state, &headers).await?;
     crate::claude_auth::start(&state).map_err(ApiError::Invalid)?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -269,7 +283,12 @@ struct AuthCode {
     code: String,
 }
 
-async fn claude_auth_code(Json(req): Json<AuthCode>) -> Result<StatusCode, ApiError> {
+async fn claude_auth_code(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AuthCode>,
+) -> Result<StatusCode, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
     if req.code.trim().is_empty() {
         return Err(ApiError::Invalid("the code must not be empty".into()));
     }
@@ -302,6 +321,10 @@ pub enum ApiError {
     /// which part of the credential was wrong is not the caller's to learn.
     #[error("unauthorized")]
     Unauthorized,
+    /// A valid session without the standing (M24): today, a member touching
+    /// billing. 403, not 401 -- who you are was never in question.
+    #[error("this action is the owner's")]
+    Forbidden,
     #[error("internal error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -369,6 +392,7 @@ impl IntoResponse for ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::Blocked(_) => StatusCode::PAYMENT_REQUIRED,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
+            ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::Internal(source) => {
                 // The client gets an opaque error; the operator gets the cause.
                 eprintln!("internal error: {source}");

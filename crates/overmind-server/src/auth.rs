@@ -137,9 +137,42 @@ pub async fn state_of(state: &AppState, headers: &HeaderMap) -> Value {
     let Some((owner_name,)) = owner else {
         return json!({ "state": "unclaimed" });
     };
-    match session_user(state, headers).await {
-        Some(_) => json!({ "state": "in", "name": owner_name }),
-        None => json!({ "state": "locked" }),
+    match session_identity(state, headers).await {
+        Some((_, name, role)) => json!({ "state": "in", "name": name, "role": role }),
+        None => json!({ "state": "locked", "owner": owner_name }),
+    }
+}
+
+/// The full identity behind a session: (user id, name, role).
+pub async fn session_identity(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<(String, String, String)> {
+    let user_id = session_user(state, headers).await?;
+    sqlx::query_as("SELECT id, name, role FROM users WHERE id = ?")
+        .bind(&user_id)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The one thing a role changes today (M24): billing is the owner's.
+/// Everything else works identically for every user until M25's real
+/// permission model -- a decorative column would be worse than none.
+pub async fn require_owner(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    // An unclaimed instance has no owner to protect yet.
+    let anyone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+    if anyone == 0 {
+        return Ok(());
+    }
+    match session_identity(state, headers).await {
+        Some((_, _, role)) if role == "owner" => Ok(()),
+        Some(_) => Err(ApiError::Forbidden),
+        None => Err(ApiError::Unauthorized),
     }
 }
 
@@ -163,8 +196,8 @@ pub async fn claim(state: &AppState, req: &Credentials) -> Result<Response, ApiE
     }
     let hash = hash_password(&req.password)?;
     let done = sqlx::query(
-        "INSERT INTO users (id, name, password_hash, created_at)
-         SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
+        "INSERT INTO users (id, name, password_hash, created_at, role)
+         SELECT ?, ?, ?, ?, 'owner' WHERE NOT EXISTS (SELECT 1 FROM users)",
     )
     .bind(new_id())
     .bind(name)
@@ -176,6 +209,50 @@ pub async fn claim(state: &AppState, req: &Credentials) -> Result<Response, ApiE
         return Err(ApiError::Invalid("the owner is already claimed".into()));
     }
     audit_auth(state, "auth.claimed", name).await;
+    open_session(state, name).await
+}
+
+/// Sign up: one more user in the local store (M24, reaching toward M25).
+///
+/// The store is `overmind.sqlite` itself -- local, created once, reused,
+/// and holding argon2id hashes rather than passwords: the "protected file"
+/// the owner asked for is the database the server already guards, because a
+/// second credentials file beside it would be a second thing to leak.
+///
+/// Registration is open to whoever reaches the port, and the threat model
+/// says so out loud: until M25 brings roles, every user sees everything,
+/// and the port is loopback or a tunnel of your own machines.
+pub async fn signup(state: &AppState, req: &Credentials) -> Result<Response, ApiError> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::Invalid("a user needs a name".into()));
+    }
+    if req.password.len() < 8 {
+        return Err(ApiError::Invalid(
+            "the password needs at least 8 characters".into(),
+        ));
+    }
+    if over_limit(name) {
+        return Err(ApiError::Invalid("too many attempts; wait a minute".into()));
+    }
+    let hash = hash_password(&req.password)?;
+    let done = sqlx::query(
+        "INSERT OR IGNORE INTO users (id, name, password_hash, created_at, role)
+         VALUES (?, ?, ?, ?,
+                 CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'member' ELSE 'owner' END)",
+    )
+    .bind(new_id())
+    .bind(name)
+    .bind(&hash)
+    .bind(now().to_rfc3339())
+    .execute(&state.pool)
+    .await?;
+    if done.rows_affected() == 0 {
+        // The same wordless shape as a failed login: whether a name is taken
+        // is not for an anonymous caller to enumerate.
+        return Err(ApiError::Unauthorized);
+    }
+    audit_auth(state, "auth.signed_up", name).await;
     open_session(state, name).await
 }
 
@@ -212,11 +289,12 @@ pub async fn login(state: &AppState, req: &Credentials) -> Result<Response, ApiE
 
 /// Mint a session and hand the browser its cookie.
 async fn open_session(state: &AppState, user_name: &str) -> Result<Response, ApiError> {
-    let user: Option<(String,)> = sqlx::query_as("SELECT id FROM users WHERE name = ?")
-        .bind(user_name)
-        .fetch_optional(&state.pool)
-        .await?;
-    let Some((user_id,)) = user else {
+    let user: Option<(String, String)> =
+        sqlx::query_as("SELECT id, role FROM users WHERE name = ?")
+            .bind(user_name)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((user_id, role)) = user else {
         return Err(ApiError::Unauthorized);
     };
     let token = new_token()?;
@@ -244,7 +322,7 @@ async fn open_session(state: &AppState, user_name: &str) -> Result<Response, Api
     Ok((
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
-        Json(json!({ "state": "in", "name": user_name })),
+        Json(json!({ "state": "in", "name": user_name, "role": role })),
     )
         .into_response())
 }
@@ -340,7 +418,7 @@ pub async fn wall(State(state): State<AppState>, req: Request<Body>, next: Next)
     // by the door suite: matching "/api/auth" here let nobody log in.
     let open = matches!(
         path,
-        "/auth" | "/auth/claim" | "/auth/login" | "/auth/logout"
+        "/auth" | "/auth/claim" | "/auth/signup" | "/auth/login" | "/auth/logout"
     );
     if open {
         return next.run(req).await;

@@ -107,6 +107,7 @@ rely on.
 | Claim | Mechanism | Held by |
 |---|---|---|
 | A web page you visit cannot drive the API | CORS only in dev; explicit `Origin` guard on `/ws` | `browser_boundary.rs` — `a_hostile_page_cannot_reach_the_api`, `the_live_socket_refuses_a_foreign_origin` |
+| Sign-up is open to whoever reaches the port — said here so nobody discovers it | deliberate until M25's roles-and-invites: the port is loopback or a tunnel of your own machines, the first account owns the instance, and billing is already the owner's alone | `the_door.rs` — `the_first_user_owns_and_billing_is_the_owners`, `signup_adds_users_and_does_not_enumerate_names` |
 | A caller without a session gets nothing but a liveness ping, once an owner exists | the wall on every `/api` route; sessions stored hashed; the same wall on the socket upgrade ([ADR-0032](adr/0032-authentication-the-boundary-moves-off-the-machine.md)) | `the_door.rs` — `a_claimed_instance_refuses_the_sessionless`, `a_real_session_enters_and_a_forged_one_does_not` |
 | The owner is claimed exactly once, racing or not | the guard lives in the INSERT's `WHERE`, not in application logic | `the_door.rs` — `the_owner_is_claimed_exactly_once_even_racing` |
 | Guessing the password is rate-limited, and a wrong name refuses identically to a wrong password | per-name bucket + dummy-hash verify, so neither the answer nor its timing names users | `the_door.rs` — `wrong_credentials_are_refused_and_guessing_is_rate_limited` |

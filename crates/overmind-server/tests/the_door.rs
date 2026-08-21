@@ -339,3 +339,115 @@ async fn audit_events_carry_who_did_it() {
     let (_, report, _) = send_raw(&app, "GET", "/api/audit/verify", None, Some(&cookie)).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+/// Sign up: more than one user can hold the same local store, each with
+/// their own password -- and a taken name refuses in the same wordless
+/// shape as a failed login, because whether a name exists is not for an
+/// anonymous caller to enumerate.
+#[tokio::test]
+async fn signup_adds_users_and_does_not_enumerate_names() {
+    let app = setup().await;
+    let _owner = claim(&app, "elia", "correct-horse-battery").await;
+
+    let (s, _, cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "amico", "password": "another-long-pass" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "a second user signs up");
+    assert!(cookie.is_some(), "signup logs the new user in");
+
+    // Both can log in with their own credentials.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/login",
+        Some(json!({ "name": "amico", "password": "another-long-pass" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // A taken name answers exactly like a bad credential.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "elia", "password": "whatever-else-long" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+/// Roles are real from birth: the first account owns the instance, everyone
+/// after is a member -- and today the difference is exactly one thing,
+/// billing. A member touching the subscription gets 403: who they are was
+/// never in question, their standing was.
+#[tokio::test]
+async fn the_first_user_owns_and_billing_is_the_owners() {
+    let app = setup().await;
+
+    let (s, v, owner_cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "elia", "password": "correct-horse-battery" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["role"], json!("owner"), "the first account owns: {v}");
+    let owner_cookie = owner_cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let (s, v, member_cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "amico", "password": "another-long-pass" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(
+        v["role"],
+        json!("member"),
+        "everyone after is a member: {v}"
+    );
+    let member_cookie = member_cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/claude-auth/start",
+        None,
+        Some(&member_cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "billing is not a member's call");
+
+    // The owner is allowed through the role gate (the spawn itself may fail
+    // in a test environment; 403 is the only refusal under test).
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/claude-auth/start",
+        None,
+        Some(&owner_cookie),
+    )
+    .await;
+    assert_ne!(s, StatusCode::FORBIDDEN, "the owner's standing suffices");
+}

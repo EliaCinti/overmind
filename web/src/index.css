@@ -150,3 +150,61 @@ body {
   background: var(--color-muted-foreground);
   background-clip: content-box;
 }
+
+/* ── The door's living background (M24, owner's request): three soft blobs
+   of the app's own hues drifting endlessly behind the auth screens.
+   Transform-only, GPU-cheap, and still under prefers-reduced-motion. ── */
+.door-bg {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.door-blob {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(80px);
+  opacity: 0.5;
+  will-change: transform;
+}
+.door-blob-a {
+  width: 45vw;
+  height: 45vw;
+  left: -10vw;
+  top: -12vw;
+  background: radial-gradient(closest-side, var(--primary), transparent 70%);
+  animation: door-drift-a 21s ease-in-out infinite alternate;
+}
+.door-blob-b {
+  width: 38vw;
+  height: 38vw;
+  right: -8vw;
+  top: 20vh;
+  background: radial-gradient(closest-side, #ff2ec4, transparent 70%);
+  opacity: 0.22;
+  animation: door-drift-b 27s ease-in-out infinite alternate;
+}
+.door-blob-c {
+  width: 42vw;
+  height: 42vw;
+  left: 22vw;
+  bottom: -18vw;
+  background: radial-gradient(closest-side, var(--primary), transparent 70%);
+  opacity: 0.3;
+  animation: door-drift-c 34s ease-in-out infinite alternate;
+}
+@keyframes door-drift-a {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(12vw, 9vh, 0) scale(1.25); }
+}
+@keyframes door-drift-b {
+  from { transform: translate3d(0, 0, 0) scale(1.15); }
+  to   { transform: translate3d(-10vw, -8vh, 0) scale(0.9); }
+}
+@keyframes door-drift-c {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(-8vw, -10vh, 0) scale(1.2); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .door-blob { animation: none; }
+}
