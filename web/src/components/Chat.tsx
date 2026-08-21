@@ -236,7 +236,7 @@ export function Chat({
             onClick={() => fileRef.current?.click()}
             disabled={noAgents}
             aria-label={t("chat.attach")}
-            className="h-11 w-11 rounded-xl"
+            className="h-11 w-11 rounded-full"
           >
             <Paperclip className="h-4.5 w-4.5" />
           </Button>
@@ -257,8 +257,10 @@ export function Chat({
                 : t("chat.placeholder", { name: agent?.name ?? t("chat.theAgent") })
             }
             className={cn(
-              "max-h-40 min-h-11 flex-1 resize-none rounded-xl border border-input bg-background px-3.5 py-2.5 text-sm",
-              "placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "max-h-40 min-h-11 flex-1 resize-none rounded-3xl border border-input bg-background px-4 py-2.5 text-sm",
+              "placeholder:text-muted-foreground/60 transition-all duration-200",
+              "focus-visible:outline-none focus-visible:border-primary",
+              "focus-visible:shadow-[0_0_0_4px_var(--ring-soft,rgba(124,92,255,0.15))]",
               "disabled:opacity-60",
             )}
           />
@@ -268,7 +270,7 @@ export function Chat({
             onClick={() => void send()}
             disabled={!canSend}
             aria-label={t("chat.send")}
-            className="h-11 w-11 rounded-xl"
+            className="h-11 w-11 rounded-full shadow-[0_6px_18px_-8px_var(--ring-soft,rgba(124,92,255,0.7))]"
           >
             <SendHorizontal className="h-4.5 w-4.5" />
           </Button>
