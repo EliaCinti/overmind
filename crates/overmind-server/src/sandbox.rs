@@ -295,6 +295,25 @@ fn adapter_paths() -> Vec<PathBuf> {
     ]
 }
 
+/// Paths the adapter needs to *read* for its own sign-in, never to write (M23).
+///
+/// A subscription's OAuth token lives in the login Keychain on macOS --
+/// `~/Library/Keychains` -- not under `~/.claude`, which is why the cage
+/// passed every key-authenticated run (the key rides the environment) and
+/// silently killed every subscription one: exit 1, stderr empty, measured
+/// live the day the owner asked whether his plan works. Keychain items stay
+/// encrypted and per-item ACLs are enforced by securityd either way; this
+/// grants the file, not the secrets.
+fn adapter_read_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    vec![
+        home.join("Library/Keychains"),
+        home.join("Library/Preferences"),
+    ]
+}
+
 /// A path as the sandbox will match it: absolute, with symlinks and `..`
 /// resolved.
 ///
@@ -338,6 +357,15 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     // spelling of the other one, and belongs only here.
     writable.push(PathBuf::from("/private/tmp"));
 
+    let mut allow_read = String::new();
+    for p in adapter_read_paths() {
+        if let Some(rp) = real_path(&p)
+            && let Some(q) = quote(&rp)
+        {
+            allow_read.push_str(&format!("  (subpath \"{q}\")\n"));
+        }
+    }
+
     let mut allow_write = String::new();
     for p in &writable {
         // A path we cannot express is a path we do not grant. The run may fail
@@ -359,6 +387,12 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
   (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System")
   (subpath "/Library") (subpath "/opt") (subpath "/private/etc")
   (subpath "/private/var") (subpath "/dev") (subpath "/Applications"))
+
+; The adapter's own sign-in, readable and never writable: a subscription's
+; token lives in the login Keychain, and a cage that starves the adapter of
+; its credential kills the run before the first word (M23).
+(allow file-read*
+{allow_read})
 
 ; The run's own directory, temp, and whatever the adapter needs to exist.
 (allow file*
@@ -687,6 +721,22 @@ mod tests {
         // The home itself is never granted wholesale — only the adapter's own
         // corners of it, which is the difference between a cage and a gesture.
         assert!(!text.contains("(subpath \"/Users\")"), "{text}");
+        // The adapter's sign-in is readable and never writable (M23): the
+        // keychain grant must sit in the read-only stanza, and must never
+        // migrate into the `file*` one -- an agent that can rewrite the login
+        // keychain is a different threat model, not a wider grant.
+        let read_stanza = text
+            .split("(allow file-read*\n")
+            .nth(2)
+            .expect("the credential read stanza exists");
+        let write_stanza = text.split("(allow file*\n").nth(1).expect("write stanza");
+        if let Some(home) = std::env::var_os("HOME") {
+            let kc = format!("{}/Library/Keychains", home.to_string_lossy());
+            if std::path::Path::new(&kc).exists() {
+                assert!(read_stanza.contains("Library/Keychains"), "{text}");
+                assert!(!write_stanza.contains("Library/Keychains"), "{text}");
+            }
+        }
     }
 
     #[test]
