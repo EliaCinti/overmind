@@ -57,11 +57,18 @@ convenient: the same mechanisms cover both.
 Stated plainly, because a boundary you have not drawn is not a boundary you can
 rely on.
 
-- **Anyone with the machine.** There is no authentication of any kind. The
-  boundary is the physical machine: someone sitting at it can run the CLI
-  directly and does not need Overmind's API to do harm. This is the correct
-  trade for a single-user local tool and the wrong one the moment the port is
-  reachable by anyone else — which is why Compose publishes on loopback only.
+- **Anyone with the machine, still.** Since M24 the API answers to a
+  credential, not to mere reachability: one owner, claimed at first run,
+  argon2id, sessions the server stores only hashed
+  ([ADR-0032](adr/0032-authentication-the-boundary-moves-off-the-machine.md)).
+  What the door does **not** change: someone with the machine itself — a
+  shell, root, the Docker socket — owns the process and always will. The
+  door guards the port; nothing guards a hostile host. Compose still
+  publishes loopback-only by default, and reaching out (Tailscale, a
+  reverse proxy with TLS and `OVERMIND_COOKIE_SECURE=on`) is a decision,
+  never a surprise. An **unclaimed** instance is exactly as open as before
+  M24 — the boundary is the credential, and until one exists a fresh
+  install must be able to claim itself: claim early.
 - **A malicious adapter.** If the Claude Code CLI were hostile, the sandbox
   would limit what it reaches but we would still be handing it the task and the
   worktree. We do not verify the binary.
@@ -100,6 +107,12 @@ rely on.
 | Claim | Mechanism | Held by |
 |---|---|---|
 | A web page you visit cannot drive the API | CORS only in dev; explicit `Origin` guard on `/ws` | `browser_boundary.rs` — `a_hostile_page_cannot_reach_the_api`, `the_live_socket_refuses_a_foreign_origin` |
+| A caller without a session gets nothing but a liveness ping, once an owner exists | the wall on every `/api` route; sessions stored hashed; the same wall on the socket upgrade ([ADR-0032](adr/0032-authentication-the-boundary-moves-off-the-machine.md)) | `the_door.rs` — `a_claimed_instance_refuses_the_sessionless`, `a_real_session_enters_and_a_forged_one_does_not` |
+| The owner is claimed exactly once, racing or not | the guard lives in the INSERT's `WHERE`, not in application logic | `the_door.rs` — `the_owner_is_claimed_exactly_once_even_racing` |
+| Guessing the password is rate-limited, and a wrong name refuses identically to a wrong password | per-name bucket + dummy-hash verify, so neither the answer nor its timing names users | `the_door.rs` — `wrong_credentials_are_refused_and_guessing_is_rate_limited` |
+| A logged-out session is dead on the server, not only in the browser | logout deletes the stored hash | `the_door.rs` — `logout_revokes_the_session_not_just_the_cookie` |
+| A cross-site form's shapes are refused even with a body | `SameSite=Strict` plus the content-type contract | `the_door.rs` — `a_forms_content_type_is_refused_at_the_wall` |
+| Every event an authenticated request appends names its actor, tamper-evidently | the actor rides inside the hashed payload, injected by the wall | `the_door.rs` — `audit_events_carry_who_did_it` |
 | A non-browser client (curl, tests, MCP) still works | absent `Origin` is not a browser | `browser_boundary.rs` — `a_non_browser_client_still_works` |
 | An agent cannot read your home, other volumes, or Overmind's own source and database | **on macOS:** `sandbox-exec`, deny-by-default ([ADR-0023](adr/0023-os-level-sandboxing.md)) | `sandbox.rs` — `a_caged_agent_cannot_reach_the_machine_it_runs_on`, paired with `the_same_agent_uncaged_reaches_everything` |
 | An agent cannot write outside its own run directory | same | same |

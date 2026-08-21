@@ -89,6 +89,14 @@ export default function App() {
     setHireOpen(true);
   };
 
+  // A session that expires mid-use sends you back to the door instead of
+  // leaving a dead app: the API client announces every 401.
+  useEffect(() => {
+    const onUnauthorized = () => setGate("locked");
+    window.addEventListener("overmind:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("overmind:unauthorized", onUnauthorized);
+  }, []);
+
   // The door first, everything else after: the boot fetches run only once a
   // session exists (or no owner does).
   useEffect(() => {
@@ -285,6 +293,9 @@ export default function App() {
           onChangeLanguage={changeLanguage}
           theme={theme}
           onToggleTheme={toggle}
+          onLogout={() => {
+            api.authLogout().finally(() => setGate("locked"));
+          }}
         />
 
         <SignInNotice economy={economy} onSignedIn={refreshHealth} />

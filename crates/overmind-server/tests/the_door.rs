@@ -279,3 +279,63 @@ async fn a_short_password_is_refused_at_the_door() {
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+/// A cross-site form's shapes are refused: with a body, the content type
+/// must be one a forger cannot send with credentials attached.
+#[tokio::test]
+async fn a_forms_content_type_is_refused_at_the_wall() {
+    let app = setup().await;
+    let cookie = claim(&app, "elia", "correct-horse-battery").await;
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/companies")
+        .header(header::COOKIE, &cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(header::CONTENT_LENGTH, "9")
+        .body(Body::from("name=Evil"))
+        .expect("build");
+    let response = app.clone().oneshot(request).await.expect("responds");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Every event an authenticated request appends carries the actor -- the
+/// field M25's "who approved this" is made of. Injected into the payload,
+/// which is hashed as stored: the attribution is tamper-evident too.
+#[tokio::test]
+async fn audit_events_carry_who_did_it() {
+    let app = setup().await;
+    let cookie = claim(&app, "elia", "correct-horse-battery").await;
+
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Attribuita" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let (_, events, _) = send_raw(&app, "GET", "/api/audit/events", None, Some(&cookie)).await;
+    let created = events["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|e| e["kind"] == "company.created")
+        .expect("the founding event exists")
+        .clone();
+    // The endpoint may hand the payload parsed or as its stored string.
+    let payload: Value = match &created["payload"] {
+        Value::String(raw) => serde_json::from_str(raw).unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    assert!(
+        payload["actor"].as_str().is_some_and(|a| !a.is_empty()),
+        "the event must name its actor: {payload}"
+    );
+
+    // And the chain still verifies with the actor inside the hashed payload.
+    let (_, report, _) = send_raw(&app, "GET", "/api/audit/verify", None, Some(&cookie)).await;
+    assert_eq!(report["valid"], json!(true));
+}

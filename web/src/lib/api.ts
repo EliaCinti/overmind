@@ -374,6 +374,11 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/auth")) {
+      // The door: a session died under the app (M24). One event, one
+      // listener, no per-call handling.
+      window.dispatchEvent(new Event("overmind:unauthorized"));
+    }
     let message = res.statusText;
     try {
       const data = await res.json();

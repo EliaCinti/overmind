@@ -306,7 +306,10 @@ pub async fn session_user(state: &AppState, headers: &HeaderMap) -> Option<Strin
 /// which is the whole reason M25 can mean anything.
 async fn audit_auth(state: &AppState, kind: &str, who: &str) {
     if let Ok(mut tx) = state.write_tx().await {
-        let _ = crate::audit::append(&mut tx, None, None, kind, &json!({ "actor": who })).await;
+        // `who` is the *attempted* name -- on a failed login it names the
+        // target, not an authenticated actor, which is why the key differs
+        // from the injected `actor`.
+        let _ = crate::audit::append(&mut tx, None, None, kind, &json!({ "who": who })).await;
         let _ = tx.commit().await;
     }
 }
@@ -355,8 +358,37 @@ pub async fn wall(State(state): State<AppState>, req: Request<Body>, next: Next)
         return next.run(req).await;
     }
 
-    if session_user(&state, req.headers()).await.is_some() {
-        return next.run(req).await;
+    // The CSRF belt on top of SameSite=Strict (ADR-0032): a state-changing
+    // request that carries a body must declare it JSON or multipart --
+    // shapes a cross-site form cannot produce with credentials attached.
+    // Bodyless mutations are covered by the cookie's SameSite alone.
+    let mutating = matches!(req.method().as_str(), "POST" | "PUT" | "PATCH" | "DELETE");
+    if mutating {
+        let has_body = req
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if has_body {
+            let ct = req
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !ct.starts_with("application/json") && !ct.starts_with("multipart/form-data") {
+                return ApiError::Invalid("unexpected content type".into()).into_response();
+            }
+        }
+    }
+
+    if let Some(user_id) = session_user(&state, req.headers()).await {
+        // Every audit event this request appends carries who did it (M24):
+        // the field M25's "who approved this" is made of.
+        return crate::audit::ACTOR
+            .scope(Some(user_id), next.run(req))
+            .await;
     }
 
     // Redacted health: probes and orchestrators keep their liveness answer,
