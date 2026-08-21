@@ -405,7 +405,7 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
         .expect("cookie")
         .split(';')
         .next()
-        .unwrap()
+        .expect("cookie pair")
         .to_string();
 
     let (s, v, member_cookie) = send_raw(
@@ -426,7 +426,7 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
         .expect("cookie")
         .split(';')
         .next()
-        .unwrap()
+        .expect("cookie pair")
         .to_string();
 
     let (s, _, _) = send_raw(
