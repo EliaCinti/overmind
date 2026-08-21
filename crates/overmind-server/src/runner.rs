@@ -222,7 +222,17 @@ fn tag(id: &str) -> &str {
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
+    // The path is declared safe for this one invocation (M23). Since the uid
+    // split of ADR-0029 the agent commits as uid 10001 while the server asks
+    // git questions as root, and git refuses a repository owned by another
+    // user -- "dubious ownership" -- which broke every code task's diff in
+    // the image. The declaration is exact, not `*`: the server only ever
+    // points git at a worktree it created or a workspace the operator
+    // mounted, and this narrows the exception to precisely that path.
+    let safe = format!("safe.directory={}", cwd.display());
     let out = Command::new("git")
+        .arg("-c")
+        .arg(&safe)
         .args(args)
         .current_dir(cwd)
         .output()
@@ -408,7 +418,7 @@ pub async fn start_task(
     // Governance gate: file an approval and launch nothing.
     if requires_approval != 0 && !bypass_approval {
         let approval_id = uuid::Uuid::now_v7().to_string();
-        let mut tx = state.pool.begin().await?;
+        let mut tx = state.write_tx().await?;
         sqlx::query(
             "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
              VALUES (?, ?, 'task_start', 'pending', ?, ?, ?)",
@@ -488,7 +498,7 @@ pub async fn start_task(
     };
     let work_dir_str = work_dir.to_string_lossy().into_owned();
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
 
     // Budget check, atomic with checkout. spent (this month) + reserved
     // (in-flight) + this run's estimate must fit under the cap.
@@ -769,7 +779,7 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         return Ok(());
     }
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.write_tx().await?;
     sqlx::query(
         "UPDATE agent_task_sessions SET status = 'running', resumed_count = resumed_count + 1 WHERE id = ?",
     )
@@ -1360,7 +1370,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         },
     };
 
-    let mut tx = ctx.state.pool.begin().await?;
+    let mut tx = ctx.state.write_tx().await?;
 
     // What the run produced, besides (or instead of) a diff — M17.
     //

@@ -7,6 +7,10 @@
 
 services:
   overmind:
+    # Agents work with the tools the image carries (git, gh, ripgrep, python,
+    # node). If yours need more -- a LaTeX toolchain, a linter, a compiler --
+    # add it at build time instead of deriving an image:
+    #   docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"
     build: .
     image: overmind:latest
     ports:

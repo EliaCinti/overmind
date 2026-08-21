@@ -444,6 +444,19 @@ export type Economy =
 
 export const api = {
   /** Server identity, and how it pays. */
+  /** The subscription sign-in flow, orchestrated by the server (M23). */
+  claudeAuthStart: () => req<void>("POST", "/claude-auth/start"),
+  claudeAuthStatus: () =>
+    req<
+      | { state: "idle" }
+      | { state: "starting"; tail?: string }
+      | { state: "exchanging"; tail?: string }
+      | { state: "url_ready"; url: string; tail?: string }
+      | { state: "done"; economy: Economy }
+      | { state: "failed"; tail: string }
+    >("GET", "/claude-auth"),
+  claudeAuthCode: (code: string) => req<void>("POST", "/claude-auth/code", { code }),
+
   health: () =>
     req<{
       status: string;

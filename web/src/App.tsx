@@ -258,7 +258,7 @@ export default function App() {
           onToggleTheme={toggle}
         />
 
-        <SignInNotice economy={economy} />
+        <SignInNotice economy={economy} onSignedIn={refreshHealth} />
         {!companyId ? (
           <Onboarding defaultLanguage={language} onDone={afterCompanyCreated} />
         ) : (

@@ -52,6 +52,18 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// A transaction that intends to write, and says so at the door (M23).
+    ///
+    /// `BEGIN IMMEDIATE` takes SQLite's write lock up front, where
+    /// `busy_timeout` can do its waiting. The default deferred `BEGIN` reads
+    /// from a snapshot first and upgrades to a writer later -- and an upgrade
+    /// over a snapshot another writer has since moved past is refused on the
+    /// spot (`SQLITE_BUSY_SNAPSHOT`), timeout or not. The burn-in measured
+    /// it: twelve simultaneous task checkouts, eight answered 500.
+    pub async fn write_tx(&self) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+        self.pool.begin_with("BEGIN IMMEDIATE").await
+    }
+
     /// The brain directory a company's memories live in (ADR-0024). Derived
     /// from the id rather than stored, so a company and its brain cannot point
     /// at different places.
@@ -469,6 +481,15 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         .map_err(|e| InitError::Url(e.to_string()))?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // Writers wait their turn instead of failing on the spot (M23).
+        // WAL lets readers run beside one writer, but two writers still
+        // collide -- and without a busy timeout SQLite answers the second
+        // one with "database is locked" immediately. Measured in the first
+        // minute of real use: a CEO turn was writing its messages, creating
+        // a project at the same moment got a 500. Five seconds is far above
+        // any transaction this server holds, so hitting it means a real
+        // deadlock, which deserves the error.
+        .busy_timeout(std::time::Duration::from_secs(5))
         .foreign_keys(true);
 
     // An in-memory database exists per-connection: the pool must never open

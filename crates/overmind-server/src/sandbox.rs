@@ -295,6 +295,25 @@ fn adapter_paths() -> Vec<PathBuf> {
     ]
 }
 
+/// Paths the adapter needs to *read* for its own sign-in, never to write (M23).
+///
+/// A subscription's OAuth token lives in the login Keychain on macOS --
+/// `~/Library/Keychains` -- not under `~/.claude`, which is why the cage
+/// passed every key-authenticated run (the key rides the environment) and
+/// silently killed every subscription one: exit 1, stderr empty, measured
+/// live the day the owner asked whether his plan works. Keychain items stay
+/// encrypted and per-item ACLs are enforced by securityd either way; this
+/// grants the file, not the secrets.
+fn adapter_read_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    vec![
+        home.join("Library/Keychains"),
+        home.join("Library/Preferences"),
+    ]
+}
+
 /// A path as the sandbox will match it: absolute, with symlinks and `..`
 /// resolved.
 ///
@@ -338,6 +357,15 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     // spelling of the other one, and belongs only here.
     writable.push(PathBuf::from("/private/tmp"));
 
+    let mut allow_read = String::new();
+    for p in adapter_read_paths() {
+        if let Some(rp) = real_path(&p)
+            && let Some(q) = quote(&rp)
+        {
+            allow_read.push_str(&format!("  (subpath \"{q}\")\n"));
+        }
+    }
+
     let mut allow_write = String::new();
     for p in &writable {
         // A path we cannot express is a path we do not grant. The run may fail
@@ -359,6 +387,12 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
   (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/System")
   (subpath "/Library") (subpath "/opt") (subpath "/private/etc")
   (subpath "/private/var") (subpath "/dev") (subpath "/Applications"))
+
+; The adapter's own sign-in, readable and never writable: a subscription's
+; token lives in the login Keychain, and a cage that starves the adapter of
+; its credential kills the run before the first word (M23).
+(allow file-read*
+{allow_read})
 
 ; The run's own directory, temp, and whatever the adapter needs to exist.
 (allow file*
@@ -389,6 +423,36 @@ pub fn caged(config: &Config, cage: &Cage<'_>) -> bool {
 /// Falls back to a bare `sh -c` when sandboxing is off, unavailable, or the
 /// profile cannot be expressed — and those are the only three cases, each of
 /// them a decision rather than an accident.
+/// A subscription's long-lived token rides the environment, like a key.
+///
+/// Injected wherever the adapter runs (caged work, probes): the CLI reads
+/// `CLAUDE_CODE_OAUTH_TOKEN`, and the file it comes from is the server's,
+/// 0600 under the data dir (M23). An explicit variable already in the
+/// environment wins -- the operator outranks the stored token.
+fn inject_oauth_token<C: CommandEnv>(config: &Config, cmd: &mut C) {
+    if std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none()
+        && let Some(tok) = crate::claude_auth::stored_token(config)
+    {
+        cmd.set_env("CLAUDE_CODE_OAUTH_TOKEN", &tok);
+    }
+}
+
+/// The two Command types, one env call. A trait beats duplicating the
+/// injection rule until the copies disagree.
+trait CommandEnv {
+    fn set_env(&mut self, k: &str, v: &str);
+}
+impl CommandEnv for Command {
+    fn set_env(&mut self, k: &str, v: &str) {
+        self.env(k, v);
+    }
+}
+impl CommandEnv for std::process::Command {
+    fn set_env(&mut self, k: &str, v: &str) {
+        self.env(k, v);
+    }
+}
+
 pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
     let held = confinement(config, cage);
     let mut cmd = match &held.profile {
@@ -420,6 +484,7 @@ pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
             cmd.pre_exec(move || crate::landlock::restrict(rules.as_raw_fd()));
         }
     }
+    inject_oauth_token(config, &mut cmd);
     cmd
 }
 
@@ -467,6 +532,26 @@ pub fn as_agent(config: &Config, program: &str) -> Command {
     if let Some(user) = agent_user(config) {
         drop_to(&mut cmd, config, user);
     }
+    inject_oauth_token(config, &mut cmd);
+    cmd
+}
+
+/// [`as_agent`], but for `std::process::Command` (M23).
+///
+/// The sign-in flow needs a *blocking* child wired to a pty, which is
+/// `std::process` territory; everything `as_agent` promises -- same uid, same
+/// `HOME` -- holds here for the same reasons.
+pub fn as_agent_std(config: &Config, program: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(unix)]
+    if let Some(user) = agent_user(config) {
+        use std::os::unix::process::CommandExt;
+        cmd.uid(user.uid).gid(user.gid);
+        if let Some(home) = &config.agent_home {
+            cmd.env("HOME", home);
+        }
+    }
+    inject_oauth_token(config, &mut cmd);
     cmd
 }
 
@@ -687,6 +772,22 @@ mod tests {
         // The home itself is never granted wholesale — only the adapter's own
         // corners of it, which is the difference between a cage and a gesture.
         assert!(!text.contains("(subpath \"/Users\")"), "{text}");
+        // The adapter's sign-in is readable and never writable (M23): the
+        // keychain grant must sit in the read-only stanza, and must never
+        // migrate into the `file*` one -- an agent that can rewrite the login
+        // keychain is a different threat model, not a wider grant.
+        let read_stanza = text
+            .split("(allow file-read*\n")
+            .nth(2)
+            .expect("the credential read stanza exists");
+        let write_stanza = text.split("(allow file*\n").nth(1).expect("write stanza");
+        if let Some(home) = std::env::var_os("HOME") {
+            let kc = format!("{}/Library/Keychains", home.to_string_lossy());
+            if std::path::Path::new(&kc).exists() {
+                assert!(read_stanza.contains("Library/Keychains"), "{text}");
+                assert!(!write_stanza.contains("Library/Keychains"), "{text}");
+            }
+        }
     }
 
     #[test]
