@@ -54,6 +54,21 @@ ARG CLAUDE_CODE_VERSION=2.1.233
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
+# The toolchain is yours to extend (M23). Dogfooding found an agent trying to
+# verify its own LaTeX deliverable with pdflatex the image does not carry --
+# it shipped the sheet anyway, honestly, with the failure logged beside it.
+# Baking every toolchain in would grow the image without bound; instead one
+# build argument adds what YOUR agents need:
+#
+#   docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base texlive-lang-italian"
+#
+ARG EXTRA_APT_PACKAGES=""
+RUN if [ -n "$EXTRA_APT_PACKAGES" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends $EXTRA_APT_PACKAGES \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # The memory provider (ADR-0031), for the same reason as the CLI above: the
 # server's memory contract is MCP over stdio, so an image with no provider to
 # name in OVERMIND_MEMORY_CMD remembers nothing — and M19's acceptance run
