@@ -432,7 +432,15 @@ export type Economy =
       overrides_login: boolean;
     }
   | { kind: "subscription"; metered: false; plan: string | null }
-  | { kind: "unknown"; metered: false; reason: string };
+  | {
+      kind: "unknown";
+      metered: false;
+      reason: string;
+      /** Why it is unknown, machine-readable (M22): only `not_signed_in`
+       *  carries a remedy the interface should offer; `custom_adapter` is
+       *  deliberate and stays quiet. */
+      unknown_kind: "not_signed_in" | "custom_adapter" | "unreadable";
+    };
 
 export const api = {
   /** Server identity, and how it pays. */
