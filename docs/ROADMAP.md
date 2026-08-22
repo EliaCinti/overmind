@@ -410,5 +410,8 @@ Twenty-six milestones closed by tests and live acceptance, a README and a site t
 - **Declared permissions are not policed** (`repo:write`, `web:read`, …) — honest by design until M10 sandboxing.
 - **No quorum on meeting requests** — one agent convenes. Deliberate: seconding would burn an adapter turn per invitee *before* the human answers. Mitigated by the M13.5 limits instead.
 
+## What comes next
+The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
+
 ## Later / icebox
-Native Linux/Windows (today: the image) · per-company roles and member removal · plugin system · agent marketplace-style role templates · public release polish
+Native Linux/Windows (today: the image) · per-company roles and member removal · plugin system · agent marketplace-style role templates
