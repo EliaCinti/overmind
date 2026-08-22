@@ -72,6 +72,8 @@ export default function App() {
   const [membersOpen, setMembersOpen] = useState(false);
   /** The signed-in name (M25): the members list says "you" beside it. */
   const [meName, setMeName] = useState<string | null>(null);
+  /** The server's answer to "where were you", read once at the door. */
+  const serverLast = useRef<string | null>(null);
   /** Where each plan window stands; refreshed on every live change. */
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
@@ -116,6 +118,7 @@ export default function App() {
         setGate(a.state === "in" ? "in" : a.state);
         setIsOwner(a.state === "in" && a.role === "owner");
         setMeName(a.state === "in" ? (a.name ?? null) : null);
+        serverLast.current = a.state === "in" ? (a.last_company_id ?? null) : null;
       })
       .catch(() => setGate("in")); // an unreachable server shows its own errors
   }, [gate === "in"]);
@@ -134,14 +137,20 @@ export default function App() {
         setArchetypes(arch);
         setDomains(doms);
         setModels(mods);
-        const last = localStorage.getItem(LAST_COMPANY);
+        // Where you left off: the server's memory first (per user, survives a
+        // fresh browser -- M23 carried), this browser's second, then the
+        // first company.
+        const last = serverLast.current ?? localStorage.getItem(LAST_COMPANY);
         setCompanyId(cs.find((c) => c.id === last)?.id ?? cs[0]?.id ?? null);
       })
       .finally(() => setLoading(false));
   }, [gate]);
 
   useEffect(() => {
-    if (companyId) localStorage.setItem(LAST_COMPANY, companyId);
+    if (!companyId) return;
+    localStorage.setItem(LAST_COMPANY, companyId);
+    // Best-effort: an unclaimed instance has no one to remember it for.
+    api.authRememberCompany(companyId).catch(() => {});
   }, [companyId]);
 
   /**

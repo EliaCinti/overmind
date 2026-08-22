@@ -170,6 +170,8 @@ pub async fn request(
         labels.push(agent_label(state, id).await?);
     }
     let roster = labels.join(", ");
+    // The approval's summary in the company's language (M23, carried).
+    let lang = crate::i18n::company_language(state, company_id).await;
     let reason = if req.reason.trim().is_empty() {
         "(no reason given)".to_string()
     } else {
@@ -191,7 +193,9 @@ pub async fn request(
     .bind(&approval_id)
     .bind(company_id)
     .bind(json!({ "meeting_id": meeting_id }).to_string())
-    .bind(format!("{convener} asks to meet about \"{topic}\""))
+    .bind(crate::i18n::meeting_request_summary(
+        &lang, &convener, topic,
+    ))
     .bind(now())
     .execute(&mut *tx)
     .await?;

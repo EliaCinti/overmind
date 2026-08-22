@@ -1016,3 +1016,68 @@ async fn a_decision_says_who_made_it() {
         .expect("the decision is on the chain");
     assert_eq!(decided["actor_name"], json!("dec_own"), "{decided}");
 }
+
+/// The last company a person worked in is the server's to remember (M23,
+/// carried): a fresh browser used to land on the first company rather than
+/// the one you left. It is per user -- two people on one instance have two
+/// answers -- and it is refused for a company you are not in.
+#[tokio::test]
+async fn the_server_remembers_where_each_person_left_off() {
+    let app = setup().await;
+    let owner = claim(&app, "lc_own", "correct-horse-battery").await;
+    let mut ids = Vec::new();
+    for name in ["Alfa", "Beta"] {
+        let (_, v, _) = send_raw(
+            &app,
+            "POST",
+            "/api/companies",
+            Some(json!({ "name": name })),
+            Some(&owner),
+        )
+        .await;
+        ids.push(v["id"].as_str().expect("id").to_string());
+    }
+    let beta = ids[1].clone();
+
+    // Nothing remembered yet.
+    let (_, v, _) = send_raw(&app, "GET", "/api/auth", None, Some(&owner)).await;
+    assert_eq!(v["last_company_id"], Value::Null, "{v}");
+
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/last-company",
+        Some(json!({ "company_id": beta })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v, _) = send_raw(&app, "GET", "/api/auth", None, Some(&owner)).await;
+    assert_eq!(v["last_company_id"], json!(beta), "{v}");
+
+    // A member who is not in Beta cannot be remembered as being there.
+    let code = mint(&app, &owner).await;
+    let (_, _, cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "lc_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    let member = cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/last-company",
+        Some(json!({ "company_id": beta })),
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}

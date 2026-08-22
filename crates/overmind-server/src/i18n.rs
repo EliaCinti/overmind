@@ -60,3 +60,46 @@ pub async fn company_language(state: &crate::db::AppState, company_id: &str) -> 
         .filter(|l| is_supported(l))
         .unwrap_or_else(|| DEFAULT.to_string())
 }
+
+/// An approval's durable summary, in the company's language (M23, carried).
+/// The inbox words notifications from kind+params and never reads these;
+/// the approvals list does, and an Italian company used to read "Start …"
+/// there. Server-composed prose is kept to these two sentences on purpose --
+/// anything richer belongs in structured params the client can word.
+pub fn start_task_summary(code: &str, title: &str) -> String {
+    match code {
+        "it" => format!("Avvia «{title}»"),
+        _ => format!("Start \"{title}\""),
+    }
+}
+
+/// The meeting-request approval's summary, in the company's language.
+pub fn meeting_request_summary(code: &str, convener: &str, topic: &str) -> String {
+    match code {
+        "it" => format!("{convener} chiede di riunirsi su «{topic}»"),
+        _ => format!("{convener} asks to meet about \"{topic}\""),
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::{meeting_request_summary, start_task_summary};
+
+    #[test]
+    fn summaries_speak_the_companys_language_and_default_to_english() {
+        assert_eq!(start_task_summary("it", "Listino"), "Avvia «Listino»");
+        assert_eq!(
+            start_task_summary("en", "Price list"),
+            "Start \"Price list\""
+        );
+        assert_eq!(start_task_summary("xx", "X"), "Start \"X\"");
+        assert_eq!(
+            meeting_request_summary("it", "Nico", "budget"),
+            "Nico chiede di riunirsi su «budget»"
+        );
+        assert_eq!(
+            meeting_request_summary("en", "Nico", "budget"),
+            "Nico asks to meet about \"budget\""
+        );
+    }
+}

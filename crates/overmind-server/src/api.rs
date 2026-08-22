@@ -231,6 +231,7 @@ fn api_router() -> Router<AppState> {
         .route("/auth/invites", post(auth_mint_invite))
         .route("/auth/login", post(auth_login))
         .route("/auth/logout", post(auth_logout))
+        .route("/auth/last-company", post(auth_last_company))
         // Signing the agent CLI into a Claude subscription, from the product
         // (M23). A setup surface: loopback-only like everything else today.
         .route("/claude-auth", get(claude_auth_status))
@@ -343,6 +344,22 @@ async fn auth_logout(
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     crate::auth::logout(&state, &headers).await
+}
+
+#[derive(serde::Deserialize)]
+struct LastCompany {
+    company_id: String,
+}
+
+/// Where this person is working now (M23, carried): remembered per user, so
+/// a fresh browser lands there instead of on the first company.
+async fn auth_last_company(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<LastCompany>,
+) -> Result<StatusCode, ApiError> {
+    crate::auth::remember_last_company(&state, &headers, &req.company_id).await?;
+    Ok(StatusCode::OK)
 }
 
 /// Where the subscription sign-in stands (M23). Polled by the interface.

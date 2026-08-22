@@ -474,10 +474,16 @@ export const api = {
   /** Server identity, and how it pays. */
   /** The door (M24): where it stands, and the three ways through it. */
   authState: () =>
-    req<{ state: "unclaimed" | "locked" | "in"; name?: string; role?: "owner" | "member" }>(
-      "GET",
-      "/auth",
-    ),
+    req<{
+      state: "unclaimed" | "locked" | "in";
+      name?: string;
+      role?: "owner" | "member";
+      /** Where this person left off, remembered by the server (M23). */
+      last_company_id?: string | null;
+    }>("GET", "/auth"),
+  /** Tell the server where you are working now, so a fresh browser lands there. */
+  authRememberCompany: (companyId: string) =>
+    req<unknown>("POST", "/auth/last-company", { company_id: companyId }),
   authSignup: (name: string, password: string, invite?: string) =>
     req<{ state: "in"; name: string; role: "owner" | "member" }>("POST", "/auth/signup", {
       name,
