@@ -2501,6 +2501,21 @@ async fn resume_meeting(
 }
 
 /// A company's meetings, newest first — including the ones still waiting on you.
+/// The human behind a meeting's fate, read off the audit chain (M25): the one
+/// who declined it, or -- for a room that was let to convene -- the one who
+/// decided the approval that opened it. `m` is the meetings alias.
+const MEETING_DECIDED_BY: &str = "COALESCE(
+    (SELECT u.name FROM audit_events e
+       JOIN users u ON u.id = json_extract(e.payload, '$.actor')
+      WHERE e.kind = 'meeting.declined'
+        AND json_extract(e.payload, '$.meeting_id') = m.id
+      ORDER BY e.seq DESC LIMIT 1),
+    (SELECT u.name FROM audit_events e
+       JOIN users u ON u.id = json_extract(e.payload, '$.actor')
+      WHERE e.kind = 'approval.decided'
+        AND json_extract(e.payload, '$.approval_id') = m.approval_id
+      ORDER BY e.seq DESC LIMIT 1)) AS decided_by";
+
 async fn list_meetings(
     State(state): State<AppState>,
     Path(company_id): Path<String>,
@@ -2518,13 +2533,15 @@ async fn list_meetings(
         Option<String>,
         String,
         Option<String>,
+        Option<String>,
     );
-    let rows: Vec<Row> = sqlx::query_as(
+    let rows: Vec<Row> = sqlx::query_as(&format!(
         "SELECT m.id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap, m.status,
-                m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at
+                m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at,
+                {MEETING_DECIDED_BY}
          FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
-         WHERE m.company_id = ? ORDER BY m.created_at DESC",
-    )
+         WHERE m.company_id = ? ORDER BY m.created_at DESC"
+    ))
     .bind(&company_id)
     .fetch_all(&state.pool)
     .await?;
@@ -2544,6 +2561,7 @@ async fn list_meetings(
                 approval_id,
                 created_at,
                 decided_at,
+                decided_by,
             )| {
                 json!({
                     "id": id, "topic": topic, "reason": reason,
@@ -2551,6 +2569,7 @@ async fn list_meetings(
                     "turn_cap": turn_cap, "status": status, "decision": decision,
                     "decline_note": decline_note, "approval_id": approval_id,
                     "created_at": created_at, "decided_at": decided_at,
+                    "decided_by": decided_by,
                 })
             },
         )
@@ -2578,14 +2597,15 @@ async fn get_meeting(
         String,
         Option<String>,
         Option<String>,
+        Option<String>,
     );
-    let row: Option<MeetingRow> = sqlx::query_as(
+    let row: Option<MeetingRow> = sqlx::query_as(&format!(
         "SELECT m.id, m.company_id, m.topic, m.reason, m.convener_agent_id, a.name, m.turn_cap,
                 m.status, m.decision, m.decline_note, m.approval_id, m.created_at, m.decided_at,
-                m.paused_note
+                m.paused_note, {MEETING_DECIDED_BY}
          FROM meetings m LEFT JOIN agents a ON a.id = m.convener_agent_id
-         WHERE m.id = ?",
-    )
+         WHERE m.id = ?"
+    ))
     .bind(&meeting_id)
     .fetch_optional(&state.pool)
     .await?;
@@ -2604,6 +2624,7 @@ async fn get_meeting(
         created_at,
         decided_at,
         paused_note,
+        decided_by,
     )) = row
     else {
         return Err(ApiError::NotFound("meeting"));
@@ -2633,6 +2654,8 @@ async fn get_meeting(
             // Why the room is waiting, when it is (ADR-0022).
             "paused_note": paused_note,
             "created_at": created_at, "decided_at": decided_at,
+            // The human who let it convene, or who declined it (M25).
+            "decided_by": decided_by,
         },
         "participants": participants.into_iter().map(|(id, name, title)| {
             json!({ "id": id, "name": name, "title": title })
@@ -3529,23 +3552,30 @@ async fn set_agent_budget(
     ))
 }
 
-/// (id, type, status, summary, decision_note, created_at, decided_at)
-type ApprovalRow = (
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-    Option<String>,
-);
-
 async fn list_approvals(
     State(state): State<AppState>,
     Path(company_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let rows: Vec<ApprovalRow> = sqlx::query_as(
-        "SELECT id, type, status, summary, decision_note, created_at, decided_at
+    // Who decided is read off the audit chain, never off a second column
+    // (M25): the actor has ridden inside every hashed payload since M24, and
+    // a column beside it could only ever drift from the chain.
+    type Row = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, type, status, summary, decision_note, created_at, decided_at,
+                (SELECT u.name FROM audit_events e
+                   JOIN users u ON u.id = json_extract(e.payload, '$.actor')
+                  WHERE e.kind = 'approval.decided'
+                    AND json_extract(e.payload, '$.approval_id') = approvals.id
+                  ORDER BY e.seq DESC LIMIT 1) AS decided_by
              FROM approvals WHERE company_id = ? ORDER BY created_at DESC",
     )
     .bind(&company_id)
@@ -3554,7 +3584,7 @@ async fn list_approvals(
     let approvals: Vec<Value> = rows
         .into_iter()
         .map(
-            |(id, kind, status, summary, note, created_at, decided_at)| {
+            |(id, kind, status, summary, note, created_at, decided_at, decided_by)| {
                 json!({
                     "id": id,
                     "type": kind,
@@ -3563,6 +3593,7 @@ async fn list_approvals(
                     "decision_note": note,
                     "created_at": created_at,
                     "decided_at": decided_at,
+                    "decided_by": decided_by,
                 })
             },
         )
@@ -3812,7 +3843,15 @@ type EventRow = (
     String,
     String,
     String,
+    Option<String>,
 );
+
+/// The chain's feed, with the actor resolved to a name beside the payload
+/// (M25). The payload itself is returned verbatim -- it is what the hash
+/// covers -- and the name rides outside it, a convenience, never a claim.
+const EVENT_COLUMNS: &str = "e.seq, e.company_id, e.task_id, e.kind, e.payload, e.created_at,
+     e.prev_hash, e.hash, u.name
+     FROM audit_events e LEFT JOIN users u ON u.id = json_extract(e.payload, '$.actor')";
 
 async fn list_events(
     State(state): State<AppState>,
@@ -3820,27 +3859,23 @@ async fn list_events(
 ) -> Result<Json<Value>, ApiError> {
     let rows: Vec<EventRow> = match &filter.company_id {
         Some(company_id) => {
-            sqlx::query_as(
-                "SELECT seq, company_id, task_id, kind, payload, created_at, prev_hash, hash
-                 FROM audit_events WHERE company_id = ? ORDER BY seq",
-            )
+            sqlx::query_as(&format!(
+                "SELECT {EVENT_COLUMNS} WHERE e.company_id = ? ORDER BY e.seq"
+            ))
             .bind(company_id)
             .fetch_all(&state.pool)
             .await?
         }
         None => {
-            sqlx::query_as(
-                "SELECT seq, company_id, task_id, kind, payload, created_at, prev_hash, hash
-                 FROM audit_events ORDER BY seq",
-            )
-            .fetch_all(&state.pool)
-            .await?
+            sqlx::query_as(&format!("SELECT {EVENT_COLUMNS} ORDER BY e.seq"))
+                .fetch_all(&state.pool)
+                .await?
         }
     };
     let events = rows
         .into_iter()
         .map(
-            |(seq, company_id, task_id, kind, payload, created_at, prev_hash, hash)| {
+            |(seq, company_id, task_id, kind, payload, created_at, prev_hash, hash, actor_name)| {
                 let payload: Value = serde_json::from_str(&payload)?;
                 Ok(json!({
                     "seq": seq,
@@ -3851,6 +3886,7 @@ async fn list_events(
                     "created_at": created_at,
                     "prev_hash": prev_hash,
                     "hash": hash,
+                    "actor_name": actor_name,
                 }))
             },
         )

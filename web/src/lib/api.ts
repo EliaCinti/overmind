@@ -124,6 +124,8 @@ export interface Approval {
   decision_note: string | null;
   created_at: string;
   decided_at: string | null;
+  /** Who decided, by name -- read off the audit chain (M25). Null while pending. */
+  decided_by: string | null;
 }
 
 export interface AgentBudget {
@@ -199,6 +201,8 @@ export interface Meeting {
   approval_id: string | null;
   created_at: string;
   decided_at: string | null;
+  /** The human who let it convene, or who declined it (M25). */
+  decided_by?: string | null;
 }
 
 export interface MeetingTurn {
@@ -366,6 +370,8 @@ export interface AuditEvent {
   payload: unknown;
   created_at: string;
   hash: string;
+  /** The actor resolved to a name, beside the payload the hash covers (M25). */
+  actor_name: string | null;
 }
 
 export class ApiError extends Error {

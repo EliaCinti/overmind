@@ -185,6 +185,8 @@ export const en = {
     deliberating: "deliberating…",
     decision: "Decision",
     carried: "Everyone in the room carries this into their work",
+    approvedBy: "Approved by {name}",
+    declinedBy: "Declined by {name}",
     resume: "Resume",
     pausedFallback: "An agent ran out of budget. Raise its cap, then resume.",
   },
@@ -233,6 +235,8 @@ export const en = {
     empty:
       "Nothing yet. When an agent needs you — to convene a meeting, to start a gated task — it lands here.",
     toastWaiting: "Waiting on you — click to decide",
+    approvedBy: "Approved by {name}",
+    rejectedBy: "Rejected by {name}",
   },
   /**
    * Notifications. The server sends the parts (`params`), we word them — see
@@ -695,6 +699,8 @@ export const it: Dictionary = {
     resume: "Riprendi",
     pausedFallback: "Un agente ha finito il budget. Alza il suo tetto, poi riprendi.",
     carried: "Chi era nella stanza porta questa decisione nel proprio lavoro",
+    approvedBy: "Approvata da {name}",
+    declinedBy: "Rifiutata da {name}",
   },
   memory: {
     memories: "Memorie",
@@ -738,6 +744,8 @@ export const it: Dictionary = {
     empty:
       "Ancora niente. Quando un agente ha bisogno di te — per convocare una riunione, per avviare un task sotto approvazione — arriva qui.",
     toastWaiting: "Aspetta te — clicca per decidere",
+    approvedBy: "Approvato da {name}",
+    rejectedBy: "Rifiutato da {name}",
   },
   notif: {
     meetingRequestedTitle: "{agent} vuole convocare una riunione",

@@ -907,3 +907,112 @@ async fn a_company_lists_its_members_founder_first() {
         "each member says when they came in: {v}"
     );
 }
+
+/// The actor made legible (M25): the id has ridden inside every hashed
+/// payload since M24; now the surfaces where decisions show say *who* beside
+/// *what* -- resolved from the chain itself, the one source of truth, never
+/// from a second column that could drift from it.
+#[tokio::test]
+async fn a_decision_says_who_made_it() {
+    let app = setup().await;
+    let owner = claim(&app, "dec_own", "correct-horse-battery").await;
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Alfa" })),
+        Some(&owner),
+    )
+    .await;
+    let alfa = v["id"].as_str().expect("company id").to_string();
+    let ceo = v["ceo"]["id"].as_str().expect("ceo id").to_string();
+
+    // Gate the CEO, file a task, ask to start it: an approval is born.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/agents/{ceo}/approval-gate"),
+        Some(json!({ "requires_approval": true })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/tasks"),
+        Some(json!({ "title": "Needs sign-off", "execution_kind": "knowledge" })),
+        Some(&owner),
+    )
+    .await;
+    let task = v["id"].as_str().expect("task id").to_string();
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task}/transition"),
+        Some(json!({ "to": "todo" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task}/start"),
+        Some(json!({ "agent_id": ceo })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+    let approval = v["approval_id"].as_str().expect("approval id").to_string();
+
+    // Undecided: nobody yet.
+    let (_, v, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/companies/{alfa}/approvals"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(v["approvals"][0]["decided_by"], Value::Null, "{v}");
+
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/approvals/{approval}/decision"),
+        Some(json!({ "decision": "reject", "note": "not now" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Decided: the approval says who, by name.
+    let (_, v, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/companies/{alfa}/approvals"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(v["approvals"][0]["status"], json!("rejected"));
+    assert_eq!(v["approvals"][0]["decided_by"], json!("dec_own"), "{v}");
+
+    // And the chain's own feed names the actor beside every event it has.
+    let (_, v, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/audit/events?company_id={alfa}"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    let decided = v["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .find(|e| e["kind"] == "approval.decided")
+        .expect("the decision is on the chain");
+    assert_eq!(decided["actor_name"], json!("dec_own"), "{decided}");
+}

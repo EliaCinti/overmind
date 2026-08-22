@@ -58,6 +58,10 @@ export function Inbox({
 
   const pendingApproval = (id: string | null) =>
     id ? approvals.find((a) => a.id === id && a.status === "pending") : undefined;
+  // Who beside what (M25): once decided, the item says by whom -- a name read
+  // off the audit chain, where the actor has lived since M24.
+  const decidedApproval = (id: string | null) =>
+    id ? approvals.find((a) => a.id === id && a.status !== "pending") : undefined;
 
   const decide = async (n: Notification, decision: "approve" | "reject") => {
     if (!n.approval_id) return;
@@ -82,8 +86,9 @@ export function Inbox({
     <>
       <button
         onClick={() => setOpen(true)}
-        className="relative inline-flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground"
+        className="relative inline-flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-foreground"
         title={unread ? t("nav.unread", { n: unread }) : t("nav.inbox")}
+        aria-label={t("nav.inbox")}
       >
         <Bell className="h-4.5 w-4.5" />
         {unread > 0 && (
@@ -139,6 +144,12 @@ export function Inbox({
                     </p>
                     <p className="mt-1.5 text-[11px] text-muted-foreground/70">
                       {timeAgo(n.created_at)}
+                      {(() => {
+                        const d = decidedApproval(n.approval_id);
+                        return d?.decided_by
+                          ? ` · ${t(d.status === "approved" ? "inbox.approvedBy" : "inbox.rejectedBy", { name: d.decided_by })}`
+                          : null;
+                      })()}
                     </p>
                   </div>
                 </div>
