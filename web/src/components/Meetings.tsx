@@ -156,6 +156,19 @@ export function Meetings({
                 <span className="mono ml-1 text-xs text-muted-foreground">
                   {t("meetings.cap", { n: detail.meeting.turn_cap })}
                 </span>
+                {/* Who beside what (M25): the human behind this room's fate,
+                    read off the audit chain. */}
+                {detail.meeting.decided_by && (
+                  <span className="ml-1 text-xs text-muted-foreground">
+                    ·{" "}
+                    {t(
+                      detail.meeting.status === "declined"
+                        ? "meetings.declinedBy"
+                        : "meetings.approvedBy",
+                      { name: detail.meeting.decided_by },
+                    )}
+                  </span>
+                )}
               </div>
 
               {/* Out of budget mid-deliberation (ADR-0022). The transcript is
