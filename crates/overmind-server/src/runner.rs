@@ -468,7 +468,19 @@ pub async fn start_task(
     }
 
     let budget = trait_budget_cents(&agent_traits);
-    let estimate = state.config.start_estimate_cents;
+    // Priced by this agent's own ledger (M26, ADR-0035), read before the
+    // write transaction opens: a read that can wait on nothing.
+    let estimate = {
+        let mut conn = state.pool.acquire().await?;
+        crate::governance::estimate_cents(
+            &mut conn,
+            agent_id,
+            crate::governance::SpendKind::Task,
+            state.config.start_estimate_cents,
+        )
+        .await?
+        .cents
+    };
 
     // Where the brain stands before this run touches anything (ADR-0026).
     // Taken OUTSIDE the transaction on purpose: it is an MCP round-trip to

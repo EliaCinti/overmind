@@ -3814,6 +3814,24 @@ async fn budget_summary(
         let mut conn = state.pool.acquire().await?;
         let spent = (crate::governance::spent_cents(&mut conn, &id, &window).await?,);
         let reserved = (crate::governance::reserved_cents(&mut conn, &id).await?,);
+        // What the next run will reserve, and on how much it rests (M26):
+        // the person steering by the bar should know whether the number is
+        // the agent's or the default's.
+        let default = state.config.start_estimate_cents;
+        let task = crate::governance::estimate_cents(
+            &mut conn,
+            &id,
+            crate::governance::SpendKind::Task,
+            default,
+        )
+        .await?;
+        let turn = crate::governance::estimate_cents(
+            &mut conn,
+            &id,
+            crate::governance::SpendKind::Turn,
+            default,
+        )
+        .await?;
         drop(conn);
         out.push(json!({
             "agent_id": id,
@@ -3821,6 +3839,7 @@ async fn budget_summary(
             "budget_cents": budget,
             "spent_cents": spent.0,
             "reserved_cents": reserved.0,
+            "estimates": { "task": task, "turn": turn },
         }));
     }
     Ok(Json(json!({ "budgets": out, "window_start": window })))
