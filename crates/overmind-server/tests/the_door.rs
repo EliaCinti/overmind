@@ -80,6 +80,13 @@ async fn claim(app: &axum::Router, name: &str, pass: &str) -> String {
         .to_string()
 }
 
+/// Mint an invite as the given session and hand back the raw code.
+async fn mint(app: &axum::Router, cookie: &str) -> String {
+    let (s, v, _) = send_raw(app, "POST", "/api/auth/invites", None, Some(cookie)).await;
+    assert_eq!(s, StatusCode::OK, "mint should succeed");
+    v["invite"].as_str().expect("the raw code").to_string()
+}
+
 /// Before an owner exists the API is exactly as open as it was before M24:
 /// a fresh install must be able to work and to claim itself.
 #[tokio::test]
@@ -104,7 +111,7 @@ async fn an_unclaimed_instance_is_open_and_says_so() {
 #[tokio::test]
 async fn a_claimed_instance_refuses_the_sessionless() {
     let app = setup().await;
-    let _cookie = claim(&app, "elia", "correct-horse-battery").await;
+    let _cookie = claim(&app, "cl_own", "correct-horse-battery").await;
 
     let (s, _, _) = send_raw(&app, "GET", "/api/companies", None, None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -123,7 +130,7 @@ async fn a_claimed_instance_refuses_the_sessionless() {
 #[tokio::test]
 async fn a_real_session_enters_and_a_forged_one_does_not() {
     let app = setup().await;
-    let cookie = claim(&app, "elia", "correct-horse-battery").await;
+    let cookie = claim(&app, "rs_own", "correct-horse-battery").await;
 
     let (s, _, _) = send_raw(&app, "GET", "/api/companies", None, Some(&cookie)).await;
     assert_eq!(s, StatusCode::OK);
@@ -168,13 +175,13 @@ async fn the_owner_is_claimed_exactly_once_even_racing() {
 #[tokio::test]
 async fn wrong_credentials_are_refused_and_guessing_is_rate_limited() {
     let app = setup().await;
-    let _ = claim(&app, "elia", "correct-horse-battery").await;
+    let _ = claim(&app, "rl_own", "correct-horse-battery").await;
 
     let (s, _, cookie) = send_raw(
         &app,
         "POST",
         "/api/auth/login",
-        Some(json!({ "name": "elia", "password": "correct-horse-battery" })),
+        Some(json!({ "name": "rl_own", "password": "correct-horse-battery" })),
         None,
     )
     .await;
@@ -185,7 +192,7 @@ async fn wrong_credentials_are_refused_and_guessing_is_rate_limited() {
         &app,
         "POST",
         "/api/auth/login",
-        Some(json!({ "name": "elia", "password": "wrong" })),
+        Some(json!({ "name": "rl_own", "password": "wrong" })),
         None,
     )
     .await;
@@ -229,7 +236,7 @@ async fn wrong_credentials_are_refused_and_guessing_is_rate_limited() {
 #[tokio::test]
 async fn logout_revokes_the_session_not_just_the_cookie() {
     let app = setup().await;
-    let cookie = claim(&app, "elia", "correct-horse-battery").await;
+    let cookie = claim(&app, "lo_own", "correct-horse-battery").await;
 
     let (s, _, _) = send_raw(&app, "POST", "/api/auth/logout", None, Some(&cookie)).await;
     assert_eq!(s, StatusCode::OK);
@@ -252,7 +259,7 @@ async fn the_cookie_wears_its_armor() {
         &app,
         "POST",
         "/api/auth/claim",
-        Some(json!({ "name": "elia", "password": "correct-horse-battery" })),
+        Some(json!({ "name": "ck_own", "password": "correct-horse-battery" })),
         None,
     )
     .await;
@@ -285,7 +292,7 @@ async fn a_short_password_is_refused_at_the_door() {
 #[tokio::test]
 async fn a_forms_content_type_is_refused_at_the_wall() {
     let app = setup().await;
-    let cookie = claim(&app, "elia", "correct-horse-battery").await;
+    let cookie = claim(&app, "ct_own", "correct-horse-battery").await;
 
     let request = Request::builder()
         .method("POST")
@@ -305,7 +312,7 @@ async fn a_forms_content_type_is_refused_at_the_wall() {
 #[tokio::test]
 async fn audit_events_carry_who_did_it() {
     let app = setup().await;
-    let cookie = claim(&app, "elia", "correct-horse-battery").await;
+    let cookie = claim(&app, "ae_own", "correct-horse-battery").await;
 
     let (s, _, _) = send_raw(
         &app,
@@ -347,13 +354,14 @@ async fn audit_events_carry_who_did_it() {
 #[tokio::test]
 async fn signup_adds_users_and_does_not_enumerate_names() {
     let app = setup().await;
-    let _owner = claim(&app, "elia", "correct-horse-battery").await;
+    let owner = claim(&app, "sa_own", "correct-horse-battery").await;
 
+    let code = mint(&app, &owner).await;
     let (s, _, cookie) = send_raw(
         &app,
         "POST",
         "/api/auth/signup",
-        Some(json!({ "name": "amico", "password": "another-long-pass" })),
+        Some(json!({ "name": "sa_mem", "password": "another-long-pass", "invite": code })),
         None,
     )
     .await;
@@ -365,18 +373,19 @@ async fn signup_adds_users_and_does_not_enumerate_names() {
         &app,
         "POST",
         "/api/auth/login",
-        Some(json!({ "name": "amico", "password": "another-long-pass" })),
+        Some(json!({ "name": "sa_mem", "password": "another-long-pass" })),
         None,
     )
     .await;
     assert_eq!(s, StatusCode::OK);
 
     // A taken name answers exactly like a bad credential.
+    let code2 = mint(&app, &owner).await;
     let (s, _, _) = send_raw(
         &app,
         "POST",
         "/api/auth/signup",
-        Some(json!({ "name": "elia", "password": "whatever-else-long" })),
+        Some(json!({ "name": "sa_own", "password": "whatever-else-long", "invite": code2 })),
         None,
     )
     .await;
@@ -395,7 +404,7 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
         &app,
         "POST",
         "/api/auth/signup",
-        Some(json!({ "name": "elia", "password": "correct-horse-battery" })),
+        Some(json!({ "name": "fo_own", "password": "correct-horse-battery" })),
         None,
     )
     .await;
@@ -408,11 +417,12 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
         .expect("cookie pair")
         .to_string();
 
+    let code = mint(&app, &owner_cookie).await;
     let (s, v, member_cookie) = send_raw(
         &app,
         "POST",
         "/api/auth/signup",
-        Some(json!({ "name": "amico", "password": "another-long-pass" })),
+        Some(json!({ "name": "fo_mem", "password": "another-long-pass", "invite": code })),
         None,
     )
     .await;
@@ -450,4 +460,201 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
     )
     .await;
     assert_ne!(s, StatusCode::FORBIDDEN, "the owner's standing suffices");
+}
+
+// ── M25: invites and membership (ADR-0033) ──────────────────────────────────
+
+/// Once anyone exists, sign-up spends an invite: no code, no entry; a spent
+/// or invented code refuses wordlessly; the owner mints them one at a time.
+#[tokio::test]
+async fn signup_after_the_first_needs_an_invite_spent_once() {
+    let app = setup().await;
+    let owner = claim(&app, "si_own", "correct-horse-battery").await;
+
+    // Without a code: told a code is required (that much is not a secret).
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "si_mem", "password": "another-long-pass" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // The owner mints one.
+    let (s, v, _) = send_raw(&app, "POST", "/api/auth/invites", None, Some(&owner)).await;
+    assert_eq!(s, StatusCode::OK);
+    let code = v["invite"]
+        .as_str()
+        .expect("the raw code, once")
+        .to_string();
+
+    // It lets exactly one person in.
+    let (s, v, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "si_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["role"], json!("member"));
+
+    // Spent: the same code lets nobody else in.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "terzo", "password": "yet-another-pass", "invite": code })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // And a member cannot mint invites: entry is the owner's to grant.
+    let (s, _, member_cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/login",
+        Some(json!({ "name": "si_mem", "password": "another-long-pass" })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let member_cookie = member_cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/invites",
+        None,
+        Some(&member_cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+/// A taken name hands the invite back: the transaction that failed to
+/// create the user must not have burnt the code.
+#[tokio::test]
+async fn a_failed_signup_does_not_burn_the_invite() {
+    let app = setup().await;
+    let owner = claim(&app, "fb_own", "correct-horse-battery").await;
+    let (_, v, _) = send_raw(&app, "POST", "/api/auth/invites", None, Some(&owner)).await;
+    let code = v["invite"].as_str().expect("code").to_string();
+
+    // Try to take the owner's name: refused, code untouched.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "fb_own", "password": "whatever-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // The same code still works for a fresh name.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "fb_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "the invite survived the failed attempt");
+}
+
+/// Membership is the filter: a member sees their companies and not the
+/// others; the company-scoped surface refuses non-members; adding a member
+/// opens it. The owner passes everywhere -- the administrator of the box.
+#[tokio::test]
+async fn members_see_their_companies_and_only_theirs() {
+    let app = setup().await;
+    let owner = claim(&app, "ms_own", "correct-horse-battery").await;
+
+    // The owner founds two companies.
+    for name in ["Alfa", "Beta"] {
+        let (s, _, _) = send_raw(
+            &app,
+            "POST",
+            "/api/companies",
+            Some(json!({ "name": name })),
+            Some(&owner),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+
+    // A member joins the instance.
+    let (_, v, _) = send_raw(&app, "POST", "/api/auth/invites", None, Some(&owner)).await;
+    let code = v["invite"].as_str().expect("code").to_string();
+    let (_, _, member_cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "ms_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    let member = member_cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // The member sees nothing yet; the owner sees both.
+    let (_, v, _) = send_raw(&app, "GET", "/api/companies", None, Some(&member)).await;
+    assert_eq!(v["companies"].as_array().map(Vec::len), Some(0), "{v}");
+    let (_, v, _) = send_raw(&app, "GET", "/api/companies", None, Some(&owner)).await;
+    assert_eq!(v["companies"].as_array().map(Vec::len), Some(2), "{v}");
+
+    // The company-scoped surface refuses the non-member.
+    let alfa = v["companies"].as_array().expect("companies")[0]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let (s, _, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/companies/{alfa}/tasks"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // The owner brings the member in; the same surface opens.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/members"),
+        Some(json!({ "name": "ms_mem" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/companies/{alfa}/tasks"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, v, _) = send_raw(&app, "GET", "/api/companies", None, Some(&member)).await;
+    assert_eq!(
+        v["companies"].as_array().map(Vec::len),
+        Some(1),
+        "one company now: {v}"
+    );
 }

@@ -36,7 +36,7 @@ export function Dialog({
               <motion.div
                 className={cn(
                   "fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2",
-                  "rounded-lg border border-border bg-card shadow-pop focus:outline-none",
+                  "rounded-3xl border border-border/70 bg-card/90 shadow-pop backdrop-blur-xl focus:outline-none",
                   "max-h-[calc(100vh-4rem)] overflow-hidden flex flex-col",
                   className,
                 )}

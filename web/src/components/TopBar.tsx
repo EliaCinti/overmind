@@ -11,6 +11,8 @@ import {
   BrainCircuit,
   Plug,
   LogOut,
+  ChevronDown,
+  UserRoundPlus,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -43,6 +45,7 @@ export function TopBar({
   theme,
   onToggleTheme,
   onLogout,
+  onInvite,
 }: {
   companies: Company[];
   companyId: string | null;
@@ -65,6 +68,8 @@ export function TopBar({
   onToggleTheme: () => void;
   /** Absent while the instance is unclaimed: no session, nothing to end. */
   onLogout?: () => void;
+  /** The invite surface (M25): present only for the owner. */
+  onInvite?: () => void;
 }) {
   const t = useT();
   return (
@@ -76,21 +81,28 @@ export function TopBar({
 
       <div className="mx-1 h-5 w-px bg-border" />
 
-      <select
-        value={companyId ?? ""}
-        onChange={(e) =>
-          e.target.value === "__new" ? onNewCompany() : onSelectCompany(e.target.value)
-        }
-        className="h-9 max-w-40 shrink rounded-md border border-input bg-background px-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
+      <div className="relative shrink">
+        <select
+          value={companyId ?? ""}
+          onChange={(e) =>
+            e.target.value === "__new" ? onNewCompany() : onSelectCompany(e.target.value)
+          }
+          className={cn(
+            "h-9 max-w-40 cursor-pointer appearance-none rounded-full border border-input bg-background pl-3.5 pr-8 text-sm",
+            "transition-all duration-200 focus-visible:outline-none focus-visible:border-primary",
+            "focus-visible:shadow-[0_0_0_4px_var(--ring-soft,rgba(124,92,255,0.15))]",
+          )}
+        >
         {companies.length === 0 && <option value="">{t("nav.noCompany")}</option>}
         {companies.map((c) => (
           <option key={c.id} value={c.id}>
             {c.name}
           </option>
         ))}
-        <option value="__new">{t("nav.newCompany")}</option>
-      </select>
+          <option value="__new">{t("nav.newCompany")}</option>
+        </select>
+        <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      </div>
 
       {showViews && (
         <div className="ml-2">
@@ -143,6 +155,11 @@ export function TopBar({
         >
           {theme === "dark" ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
         </Button>
+        {onInvite && (
+          <Button variant="ghost" size="icon" onClick={onInvite} aria-label={t("door.inviteMint")}>
+            <UserRoundPlus className="h-4.5 w-4.5" />
+          </Button>
+        )}
         {onLogout && (
           <Button variant="ghost" size="icon" onClick={onLogout} aria-label={t("door.logout")}>
             <LogOut className="h-4.5 w-4.5" />

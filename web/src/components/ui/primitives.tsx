@@ -49,9 +49,10 @@ export const Input = forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTML
     <input
       ref={ref}
       className={cn(
-        "h-10 w-full rounded-md border border-input bg-background px-3 text-sm",
-        "placeholder:text-muted-foreground/60",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "h-10 w-full rounded-full border border-input bg-background px-4 text-sm",
+        "placeholder:text-muted-foreground/60 transition-all duration-200",
+        "focus-visible:outline-none focus-visible:border-primary",
+        "focus-visible:shadow-[0_0_0_4px_var(--ring-soft,rgba(124,92,255,0.15))]",
         className,
       )}
       {...props}
@@ -67,7 +68,9 @@ export const Textarea = forwardRef<
   <textarea
     ref={ref}
     className={cn(
-      "w-full rounded-md border border-input bg-background px-3 py-2 text-sm",
+      "w-full rounded-2xl border border-input bg-background px-4 py-2.5 text-sm transition-all duration-200",
+      "focus-visible:outline-none focus-visible:border-primary",
+      "focus-visible:shadow-[0_0_0_4px_var(--ring-soft,rgba(124,92,255,0.15))]",
       "placeholder:text-muted-foreground/60 resize-y min-h-20",
       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
       className,

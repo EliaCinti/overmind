@@ -33,6 +33,7 @@ import { CreateTaskDialog } from "./components/CreateTaskDialog";
 import { ConnectRepoDialog } from "./components/ConnectRepoDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Door } from "./components/Door";
+import { InviteDialog } from "./components/InviteDialog";
 import { SignInNotice } from "./components/SignInNotice";
 import { Spinner } from "./components/ui/primitives";
 
@@ -62,6 +63,9 @@ export default function App() {
   const [economy, setEconomy] = useState<Economy | null>(null);
   /** The door (M24): nothing behind it is fetched before a session exists. */
   const [gate, setGate] = useState<"checking" | "unclaimed" | "locked" | "in">("checking");
+  /** Who is signed in (M25): the invite surface is the owner's. */
+  const [isOwner, setIsOwner] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   /** Where each plan window stands; refreshed on every live change. */
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
@@ -102,9 +106,12 @@ export default function App() {
   useEffect(() => {
     api
       .authState()
-      .then((a) => setGate(a.state === "in" ? "in" : a.state))
+      .then((a) => {
+        setGate(a.state === "in" ? "in" : a.state);
+        setIsOwner(a.state === "in" && a.role === "owner");
+      })
       .catch(() => setGate("in")); // an unreachable server shows its own errors
-  }, []);
+  }, [gate === "in"]);
 
   // Bootstrap: companies + both catalogs + the models we ship (ADR-0021).
   useEffect(() => {
@@ -296,7 +303,9 @@ export default function App() {
           onLogout={() => {
             api.authLogout().finally(() => setGate("locked"));
           }}
+          onInvite={isOwner ? () => setInviteOpen(true) : undefined}
         />
+        <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
 
         <SignInNotice economy={economy} onSignedIn={refreshHealth} />
         {!companyId ? (

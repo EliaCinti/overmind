@@ -180,6 +180,10 @@ pub async fn require_owner(state: &AppState, headers: &HeaderMap) -> Result<(), 
 pub struct Credentials {
     pub name: String,
     pub password: String,
+    /// The invite code (M25): ignored while the instance is empty, required
+    /// once anyone exists.
+    #[serde(default)]
+    pub invite: Option<String>,
 }
 
 /// Create the owner -- exactly once, atomically. Of N concurrent claims one
@@ -235,25 +239,84 @@ pub async fn signup(state: &AppState, req: &Credentials) -> Result<Response, Api
     if over_limit(name) {
         return Err(ApiError::Invalid("too many attempts; wait a minute".into()));
     }
+    // One transaction for the whole entry (M25): the invite gate, the user
+    // row and the invite's attribution commit together -- a taken name must
+    // not leave a code half-burnt, and of two racers on one code exactly
+    // one gets in.
     let hash = hash_password(&req.password)?;
+    let user_id = new_id();
+    let mut tx = state.write_tx().await?;
+    let anyone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0);
+    if anyone > 0
+        && req
+            .invite
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .is_none()
+    {
+        return Err(ApiError::Invalid("an invite code is required".into()));
+    }
+    // The user row first, the invite spend second -- the foreign key on
+    // `used_by` checks immediately, so the row it names must exist. Both
+    // live or die with the same transaction: a refused spend discards the
+    // row, a taken name hands the code back untouched.
     let done = sqlx::query(
         "INSERT OR IGNORE INTO users (id, name, password_hash, created_at, role)
          VALUES (?, ?, ?, ?,
                  CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'member' ELSE 'owner' END)",
     )
-    .bind(new_id())
+    .bind(&user_id)
     .bind(name)
     .bind(&hash)
     .bind(now().to_rfc3339())
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     if done.rows_affected() == 0 {
-        // The same wordless shape as a failed login: whether a name is taken
-        // is not for an anonymous caller to enumerate.
         return Err(ApiError::Unauthorized);
     }
+    if anyone > 0 {
+        let code = req.invite.as_deref().map(str::trim).expect("checked above");
+        let spent = sqlx::query(
+            "UPDATE invites SET used_by = ? WHERE id = ? AND used_by IS NULL AND expires_at > ?",
+        )
+        .bind(&user_id)
+        .bind(token_hash(code))
+        .bind(now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        if spent.rows_affected() == 0 {
+            // Wordless, and the dropped transaction takes the user row with
+            // it: no code, no account.
+            return Err(ApiError::Unauthorized);
+        }
+    }
+    tx.commit().await?;
     audit_auth(state, "auth.signed_up", name).await;
     open_session(state, name).await
+}
+
+/// Mint an invite (owner only): a single-use code, seven days, stored
+/// hashed. The raw code appears exactly once, in this response.
+pub async fn mint_invite(state: &AppState, headers: &HeaderMap) -> Result<Value, ApiError> {
+    require_owner(state, headers).await?;
+    let Some((user_id, _, _)) = session_identity(state, headers).await else {
+        return Err(ApiError::Unauthorized);
+    };
+    let code = new_token()?;
+    let n = now();
+    sqlx::query("INSERT INTO invites (id, created_by, created_at, expires_at) VALUES (?, ?, ?, ?)")
+        .bind(token_hash(&code))
+        .bind(&user_id)
+        .bind(n.to_rfc3339())
+        .bind((n + chrono::Duration::days(7)).to_rfc3339())
+        .execute(&state.pool)
+        .await?;
+    audit_auth(state, "auth.invite_minted", &user_id).await;
+    Ok(json!({ "invite": code, "expires_days": 7 }))
 }
 
 /// Log in. The same answer for a wrong name and a wrong password: which of
@@ -461,7 +524,27 @@ pub async fn wall(State(state): State<AppState>, req: Request<Body>, next: Next)
         }
     }
 
-    if let Some(user_id) = session_user(&state, req.headers()).await {
+    if let Some((user_id, _, role)) = session_identity(&state, req.headers()).await {
+        // Membership gates the company-scoped surface (M25, ADR-0033):
+        // /companies/{id}/... answers members and the owner. Organizational,
+        // not adversarial -- the bare-id surface is slice B, and the threat
+        // model says so out loud.
+        if role != "owner"
+            && let Some(rest) = path.strip_prefix("/companies/")
+            && let Some(company_id) = rest.split('/').next().filter(|c| !c.is_empty())
+        {
+            let member: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM company_members WHERE company_id = ? AND user_id = ?",
+            )
+            .bind(company_id)
+            .bind(&user_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap_or(0);
+            if member == 0 {
+                return ApiError::Forbidden.into_response();
+            }
+        }
         // Every audit event this request appends carries who did it (M24):
         // the field M25's "who approved this" is made of.
         return crate::audit::ACTOR

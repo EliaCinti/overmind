@@ -39,16 +39,18 @@ export function Segmented<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-border bg-muted/50 p-0.5">
+    <div className="inline-flex rounded-full border border-border bg-muted/50 p-0.5">
       {options.map((opt) => (
         <button
           key={opt.value}
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "rounded px-3 py-1.5 text-sm transition cursor-pointer",
+            "rounded-full px-3 py-1.5 text-sm transition cursor-pointer",
             value === opt.value
-              ? "bg-card text-foreground shadow-soft font-medium"
+              ? // The chosen one wears the accent (owner's word): you always
+                // know which room you are in.
+                "bg-primary text-primary-foreground font-medium shadow-[0_4px_14px_-6px_var(--ring-soft,rgba(124,92,255,0.7))]"
               : "text-muted-foreground hover:text-foreground",
           )}
         >
