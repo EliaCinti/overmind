@@ -241,6 +241,18 @@ exec "$@""#;
 /// Answers with an error string when a flow is already running or the spawn
 /// fails; the caller turns that into an HTTP status.
 pub fn start(state: &AppState) -> Result<(), String> {
+    // A custom adapter is not the Claude CLI, and `setup-token` is not a
+    // contract it signed -- the same honesty the economy detector applies.
+    // Measured on the owner's desk: without this, the door suite (which runs
+    // with a custom agent command) still spawned the REAL CLI on a machine
+    // that has one, and every `cargo test` opened the browser on an OAuth
+    // page -- a dozen times a day, for two days, before anyone saw why.
+    if state.config.agent_cmd.is_some() {
+        return Err(
+            "a custom OVERMIND_AGENT_CMD is configured; the subscription sign-in is for the Claude CLI"
+                .into(),
+        );
+    }
     let mut slot = FLOW.lock().map_err(|_| "flow state poisoned".to_string())?;
     if let Some(f) = slot.as_mut() {
         let stale = f.started.elapsed() > Duration::from_secs(600)

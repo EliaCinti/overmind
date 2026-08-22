@@ -298,6 +298,15 @@ export const en = {
     inviteMint: "Invite someone",
     inviteMinted: "One-time code, valid 7 days. It is shown only now:",
     inviteCopy: "Copy",
+    members: "Members",
+    membersHint:
+      "Anyone in the company can bring in a colleague who already has an account here. Accounts come from the owner's invites.",
+    membersAdd: "Add",
+    membersAddPlaceholder: "Their name on this Overmind",
+    membersUnknown: "Nobody by that name has an account here.",
+    membersSince: "since {date}",
+    membersOwner: "owner",
+    membersYou: "you",
     inviteCopied: "Copied.",
   },
   economy: {
@@ -790,6 +799,15 @@ export const it: Dictionary = {
     inviteMint: "Invita qualcuno",
     inviteMinted: "Codice monouso, valido 7 giorni. Viene mostrato solo adesso:",
     inviteCopy: "Copia",
+    members: "Membri",
+    membersHint:
+      "Chiunque sia nell'azienda può far entrare un collega che ha già un account qui. Gli account nascono dagli inviti del proprietario.",
+    membersAdd: "Aggiungi",
+    membersAddPlaceholder: "Il suo nome su questo Overmind",
+    membersUnknown: "Nessuno con quel nome ha un account qui.",
+    membersSince: "dal {date}",
+    membersOwner: "proprietario",
+    membersYou: "tu",
     inviteCopied: "Copiato.",
   },
   economy: {

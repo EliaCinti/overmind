@@ -82,6 +82,15 @@ export interface IssuedToken {
   created_at: string;
 }
 
+/** Someone inside a company (M25). `role` is the instance role, not a
+ *  per-company one -- there are none (ADR-0033). */
+export interface Member {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  added_at: string;
+}
+
 export interface Company {
   id: string;
   name: string;
@@ -462,6 +471,12 @@ export const api = {
       invite: invite || undefined,
     }),
   authMintInvite: () => req<{ invite: string; expires_days: number }>("POST", "/auth/invites"),
+  /** Who is inside a company, founder first (M25). */
+  listMembers: (companyId: string) =>
+    req<{ members: Member[] }>("GET", `/companies/${companyId}/members`).then((r) => r.members),
+  /** Bring a registered colleague in by name -- any member's verb (ADR-0033). */
+  addMember: (companyId: string, name: string) =>
+    req<unknown>("POST", `/companies/${companyId}/members`, { name }),
   authClaim: (name: string, password: string) =>
     req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password }),
   authLogin: (name: string, password: string) =>

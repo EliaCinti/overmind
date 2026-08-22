@@ -14,6 +14,7 @@ import {
   ChevronDown,
   UserRoundPlus,
   Trash2,
+  Users,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -48,6 +49,7 @@ export function TopBar({
   onLogout,
   onInvite,
   onDeleteCompany,
+  onMembers,
 }: {
   companies: Company[];
   companyId: string | null;
@@ -74,6 +76,8 @@ export function TopBar({
   onInvite?: () => void;
   /** Absent while no company is selected: nothing to delete (ADR-0034). */
   onDeleteCompany?: () => void;
+  /** The members surface (M25): who is in this company, and adding one. */
+  onMembers?: () => void;
 }) {
   const t = useT();
   return (
@@ -150,6 +154,17 @@ export function TopBar({
           </>
         )}
         {companyId && <Connections companyId={companyId} />}
+        {companyId && onMembers && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onMembers}
+            aria-label={t("door.members")}
+            title={t("door.members")}
+          >
+            <Users className="h-4.5 w-4.5" />
+          </Button>
+        )}
         {companyId && onDeleteCompany && (
           <Button
             variant="ghost"
