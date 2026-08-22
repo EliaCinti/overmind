@@ -197,11 +197,62 @@ fn find_url(text: &str) -> Option<String> {
     None
 }
 
+/// The argument vector that runs `program args…` tethered to `parent`'s
+/// life: a shell whose background watchdog polls the parent and, the moment
+/// it is gone, TERMs then KILLs the program -- which runs in the foreground
+/// *as the shell itself* (`exec`), so the pid the watchdog holds is the
+/// program's, the pty and session leadership pass through untouched, and a
+/// program that simply finishes hands back its own exit status.
+///
+/// Why a shell and not `kill_on_drop`: the child calls `setsid()` and
+/// therefore leaves the server's process group, and nothing in-process can
+/// fire once the server is gone. Measured live (22 Aug): a dozen
+/// `setup-token` processes outlived their servers, each reopening the owner's
+/// browser. `prctl(PR_SET_PDEATHSIG)` would do it on Linux alone; this does
+/// it wherever there is a `sh`.
+pub(crate) fn tethered(parent: u32, program: &str, args: &[&str]) -> Vec<String> {
+    // The watchdog lets go of the pty (its fds go to /dev/null) so the
+    // server's reader sees EOF the moment the program exits, and it only
+    // ever signals when the parent is actually gone -- never on the
+    // program's own exit, where the pid could already belong to someone else.
+    // `alive` cannot be `kill -0` alone: in the image the program runs as the
+    // agent uid and the server is root, so `kill -0` answers EPERM for a
+    // parent that is perfectly alive -- there, `/proc` is the witness.
+    const SCRIPT: &str = r#"parent=$1; shift
+alive() { kill -0 "$1" 2>/dev/null || [ -d "/proc/$1" ]; }
+( while alive "$parent" && alive $$; do sleep 1; done
+  alive "$parent" || { kill -TERM $$ 2>/dev/null; sleep 2; kill -KILL $$ 2>/dev/null; }
+) </dev/null >/dev/null 2>&1 &
+exec "$@""#;
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        SCRIPT.to_string(),
+        "sh".to_string(),
+        parent.to_string(),
+        program.to_string(),
+    ];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    argv
+}
+
 /// Begin the sign-in: spawn `claude setup-token` as the agent on a pty.
 ///
 /// Answers with an error string when a flow is already running or the spawn
 /// fails; the caller turns that into an HTTP status.
 pub fn start(state: &AppState) -> Result<(), String> {
+    // A custom adapter is not the Claude CLI, and `setup-token` is not a
+    // contract it signed -- the same honesty the economy detector applies.
+    // Measured on the owner's desk: without this, the door suite (which runs
+    // with a custom agent command) still spawned the REAL CLI on a machine
+    // that has one, and every `cargo test` opened the browser on an OAuth
+    // page -- a dozen times a day, for two days, before anyone saw why.
+    if state.config.agent_cmd.is_some() {
+        return Err(
+            "a custom OVERMIND_AGENT_CMD is configured; the subscription sign-in is for the Claude CLI"
+                .into(),
+        );
+    }
     let mut slot = FLOW.lock().map_err(|_| "flow state poisoned".to_string())?;
     if let Some(f) = slot.as_mut() {
         let stale = f.started.elapsed() > Duration::from_secs(600)
@@ -239,8 +290,10 @@ pub fn start(state: &AppState) -> Result<(), String> {
     let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
     let slave = unsafe { OwnedFd::from_raw_fd(slave_fd) };
 
-    let mut cmd = crate::sandbox::as_agent_std(&state.config, "claude");
-    cmd.arg("setup-token")
+    // Tethered to this server's life: see `tethered`.
+    let argv = tethered(std::process::id(), "claude", &["setup-token"]);
+    let mut cmd = crate::sandbox::as_agent_std(&state.config, &argv[0]);
+    cmd.args(&argv[1..])
         .stdin(std::process::Stdio::from(
             slave.try_clone().map_err(|e| e.to_string())?,
         ))
@@ -461,5 +514,64 @@ mod tests {
     #[test]
     fn a_fragment_is_not_a_token() {
         assert_eq!(find_token("sk-ant-oat01-tooshort"), None);
+    }
+
+    fn spawn_tethered(parent: u32, program: &str, args: &[&str]) -> std::process::Child {
+        let argv = super::tethered(parent, program, args);
+        std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn tethered command")
+    }
+
+    fn exits_within(
+        child: &mut std::process::Child,
+        secs: u64,
+    ) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        None
+    }
+
+    /// Measured live (22 Aug): a dozen `setup-token` processes outlived the
+    /// servers that spawned them, each reopening the browser. The CLI must
+    /// die with the server -- whatever killed the server, timeout or not.
+    #[test]
+    fn the_cli_dies_with_the_server_that_started_it() {
+        let mut fake_server = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("a stand-in for the server");
+        let mut cli = spawn_tethered(fake_server.id(), "sleep", &["60"]);
+        // Still alive while the server is.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(
+            cli.try_wait().expect("poll").is_none(),
+            "the cli died too early"
+        );
+
+        fake_server.kill().expect("kill the stand-in");
+        let _ = fake_server.wait();
+        assert!(
+            exits_within(&mut cli, 8).is_some(),
+            "the cli outlived the server"
+        );
+    }
+
+    /// The tether must be invisible to a CLI that simply finishes: its exit
+    /// status is the flow's verdict, and the wrapper must not launder it.
+    #[test]
+    fn a_tethered_cli_keeps_its_own_exit_status() {
+        let mut cli = spawn_tethered(std::process::id(), "sh", &["-c", "exit 7"]);
+        let status = exits_within(&mut cli, 8).expect("a finished cli exits");
+        assert_eq!(status.code(), Some(7));
     }
 }

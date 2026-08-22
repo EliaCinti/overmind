@@ -58,9 +58,9 @@ function StepShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-card p-7 shadow-soft">
+    <div className="rounded-[2rem] border border-border/70 bg-card/80 p-7 shadow-pop backdrop-blur-xl">
       <div className="mb-5 flex flex-col items-center text-center">
-        <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+        <span className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
           {icon}
         </span>
         <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -132,11 +132,14 @@ function CompanyStep({
                   aria-pressed={active}
                   onClick={() => setLanguage(l.code)}
                   className={cn(
-                    "flex-1 rounded-md border px-3 py-2 text-sm transition",
-                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "flex-1 rounded-full border px-3 py-2 text-sm transition-all duration-200 cursor-pointer",
+                    "hover:-translate-y-px active:translate-y-0 active:scale-[0.98]",
+                    "focus-visible:outline-none focus-visible:border-primary",
+                    "focus-visible:shadow-[0_0_0_4px_var(--ring-soft,rgba(124,92,255,0.15))]",
                     active
-                      ? "border-primary bg-primary/10 font-medium text-foreground"
-                      : "border-border text-muted-foreground hover:bg-muted hover:text-foreground",
+                      ? // The chosen one wears the accent, as in every Segmented.
+                        "border-primary bg-primary font-medium text-primary-foreground shadow-[0_4px_14px_-6px_var(--ring-soft,rgba(124,92,255,0.7))]"
+                      : "border-input bg-background text-muted-foreground hover:text-foreground",
                   )}
                 >
                   {l.name}
@@ -200,7 +203,7 @@ function RepoStep({ company, onDone }: { company: Company; onDone: () => void })
         <button
           onClick={onDone}
           disabled={busy}
-          className="-mt-1 self-center rounded-md px-2 py-1 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
+          className="-mt-1 self-center rounded-full px-3 py-1 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
         >
           {t("onboard.skip")}
         </button>

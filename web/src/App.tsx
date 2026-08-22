@@ -35,6 +35,7 @@ import { Onboarding } from "./components/Onboarding";
 import { Door } from "./components/Door";
 import { InviteDialog } from "./components/InviteDialog";
 import { DeleteCompanyDialog } from "./components/DeleteCompanyDialog";
+import { MembersDialog } from "./components/MembersDialog";
 import { SignInNotice } from "./components/SignInNotice";
 import { Spinner } from "./components/ui/primitives";
 
@@ -68,6 +69,9 @@ export default function App() {
   const [isOwner, setIsOwner] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [deleteCompanyOpen, setDeleteCompanyOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  /** The signed-in name (M25): the members list says "you" beside it. */
+  const [meName, setMeName] = useState<string | null>(null);
   /** Where each plan window stands; refreshed on every live change. */
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
@@ -111,6 +115,7 @@ export default function App() {
       .then((a) => {
         setGate(a.state === "in" ? "in" : a.state);
         setIsOwner(a.state === "in" && a.role === "owner");
+        setMeName(a.state === "in" ? (a.name ?? null) : null);
       })
       .catch(() => setGate("in")); // an unreachable server shows its own errors
   }, [gate === "in"]);
@@ -317,8 +322,17 @@ export default function App() {
           }}
           onInvite={isOwner ? () => setInviteOpen(true) : undefined}
           onDeleteCompany={companyId ? () => setDeleteCompanyOpen(true) : undefined}
+          onMembers={companyId ? () => setMembersOpen(true) : undefined}
         />
         <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
+        {companyId && (
+          <MembersDialog
+            open={membersOpen}
+            onOpenChange={setMembersOpen}
+            companyId={companyId}
+            me={meName}
+          />
+        )}
         {companyId && (
           <DeleteCompanyDialog
             open={deleteCompanyOpen}

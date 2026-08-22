@@ -106,7 +106,10 @@ fn api_router() -> Router<AppState> {
         .route("/models", get(list_models))
         .route("/companies/{company_id}/language", post(set_language))
         // Membership (M25): any member brings in a colleague by name.
-        .route("/companies/{company_id}/members", post(add_member))
+        .route(
+            "/companies/{company_id}/members",
+            post(add_member).get(list_members),
+        )
         .route(
             "/companies/{company_id}/brain",
             get(brain_status).post(set_brain_enabled),
@@ -243,6 +246,31 @@ struct AddMember {
 /// Add a registered user to a company (M25). Any member can: a team invites
 /// a colleague, and the owner is not a bottleneck. The wall has already
 /// established the caller is a member (or the owner) of this company.
+/// Who is inside a company, in the order they came in -- the founder first
+/// (M25). The instance role rides along so the interface can mark the
+/// administrator without a second request; it is not a per-company role,
+/// there are none (ADR-0033, decision 3).
+async fn list_members(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+        "SELECT u.id, u.name, u.role, m.added_at
+         FROM company_members m JOIN users u ON u.id = m.user_id
+         WHERE m.company_id = ? ORDER BY m.added_at, u.name",
+    )
+    .bind(&company_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let members: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, name, role, added_at)| {
+            json!({ "id": id, "name": name, "role": role, "added_at": added_at })
+        })
+        .collect();
+    Ok(Json(json!({ "members": members })))
+}
+
 async fn add_member(
     State(state): State<AppState>,
     Path(company_id): Path<String>,

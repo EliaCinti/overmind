@@ -469,6 +469,73 @@ pub async fn ws_wall(State(state): State<AppState>, req: Request<Body>, next: Ne
     ApiError::Unauthorized.into_response()
 }
 
+/// The company a request is about, when its path (or its query) names one
+/// (ADR-0033, slice B). `/companies/{id}/…` names it outright; the bare-id
+/// surface -- a task, a session, an agent, an approval, an artifact reached
+/// by its own id -- names it through a row, and that row is read here so the
+/// wall can ask the same membership question it asks of the company-scoped
+/// surface. `None` when the path is not company-scoped at all, or when the
+/// id resolves to nothing: an id nobody owns is not a secret, and the handler
+/// behind it answers 404 the way it always did.
+async fn company_of(pool: &sqlx::SqlitePool, path: &str, query: Option<&str>) -> Option<String> {
+    if let Some(rest) = path.strip_prefix("/companies/") {
+        return rest
+            .split('/')
+            .next()
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+    }
+    // The audit feed filtered by company is the same surface, read sideways.
+    if path == "/audit/events" {
+        return query?
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("company_id="))
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+    }
+    const RESOLVERS: &[(&str, &str)] = &[
+        ("/agents/", "SELECT company_id FROM agents WHERE id = ?"),
+        (
+            "/approvals/",
+            "SELECT company_id FROM approvals WHERE id = ?",
+        ),
+        (
+            "/artifacts/",
+            "SELECT t.company_id FROM task_artifacts a JOIN tasks t ON t.id = a.task_id WHERE a.id = ?",
+        ),
+        ("/meetings/", "SELECT company_id FROM meetings WHERE id = ?"),
+        (
+            "/notifications/",
+            "SELECT company_id FROM notifications WHERE id = ?",
+        ),
+        (
+            "/org-proposals/",
+            "SELECT company_id FROM org_proposals WHERE id = ?",
+        ),
+        ("/projects/", "SELECT company_id FROM projects WHERE id = ?"),
+        (
+            "/sessions/",
+            "SELECT t.company_id FROM agent_task_sessions s JOIN tasks t ON t.id = s.task_id WHERE s.id = ?",
+        ),
+        ("/tasks/", "SELECT company_id FROM tasks WHERE id = ?"),
+        (
+            "/tokens/",
+            "SELECT company_id FROM company_tokens WHERE id = ?",
+        ),
+    ];
+    let (prefix, sql) = RESOLVERS.iter().find(|(p, _)| path.starts_with(p))?;
+    let id = path[prefix.len()..]
+        .split('/')
+        .next()
+        .filter(|c| !c.is_empty())?;
+    sqlx::query_scalar::<_, String>(sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
 // ── the wall ────────────────────────────────────────────────────────────────
 
 /// The middleware in front of `/api`: everything requires a session except
@@ -525,18 +592,18 @@ pub async fn wall(State(state): State<AppState>, req: Request<Body>, next: Next)
     }
 
     if let Some((user_id, _, role)) = session_identity(&state, req.headers()).await {
-        // Membership gates the company-scoped surface (M25, ADR-0033):
-        // /companies/{id}/... answers members and the owner. Organizational,
-        // not adversarial -- the bare-id surface is slice B, and the threat
-        // model says so out loud.
+        // Membership gates every company-scoped request (M25, ADR-0033):
+        // /companies/{id}/... names the company outright, the bare-id
+        // surface names it through a row (slice B), and both answer members
+        // and the owner. Organizational, not adversarial -- the threat model
+        // says so out loud.
         if role != "owner"
-            && let Some(rest) = path.strip_prefix("/companies/")
-            && let Some(company_id) = rest.split('/').next().filter(|c| !c.is_empty())
+            && let Some(company_id) = company_of(&state.pool, path, req.uri().query()).await
         {
             let member: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM company_members WHERE company_id = ? AND user_id = ?",
             )
-            .bind(company_id)
+            .bind(&company_id)
             .bind(&user_id)
             .fetch_one(&state.pool)
             .await

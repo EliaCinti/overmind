@@ -53,6 +53,9 @@ async fn setup() -> axum::Router {
         overmind_server::Config {
             data_dir: std::env::temp_dir()
                 .join(format!("overmind-door-{}", uuid::Uuid::now_v7().simple())),
+            // Never the real CLI: on a machine that has it, a test touching
+            // the subscription sign-in would open the owner's browser.
+            agent_cmd: Some("/usr/bin/true".into()),
             ..overmind_server::Config::default()
         },
     )
@@ -449,8 +452,12 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "billing is not a member's call");
 
-    // The owner is allowed through the role gate (the spawn itself may fail
-    // in a test environment; 403 is the only refusal under test).
+    // The owner passes the role gate -- and meets the next honest refusal:
+    // this suite runs with a custom agent command, and a custom adapter is
+    // not the Claude CLI, so there is no subscription to sign into. Measured
+    // on the owner's desk (22 Aug): before this, the spawn SUCCEEDED on a
+    // machine with the real CLI installed, and every `cargo test` opened
+    // the owner's browser on an OAuth page -- a dozen times a day.
     let (s, _, _) = send_raw(
         &app,
         "POST",
@@ -459,7 +466,11 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
         Some(&owner_cookie),
     )
     .await;
-    assert_ne!(s, StatusCode::FORBIDDEN, "the owner's standing suffices");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "a custom adapter has no subscription sign-in to start"
+    );
 }
 
 // ── M25: invites and membership (ADR-0033) ──────────────────────────────────
@@ -729,4 +740,170 @@ async fn deleting_a_company_is_its_members_verb() {
     // Gone for everyone, the founder included.
     let (_, v, _) = send_raw(&app, "GET", "/api/companies", None, Some(&owner)).await;
     assert_eq!(v["companies"].as_array().map(Vec::len), Some(0), "{v}");
+}
+
+/// Slice B of ADR-0033: a task, a session, an agent, an approval reached by
+/// bare id belongs to a company, and the wall resolves the id to that
+/// company before letting a member through -- the same wordless 403 an
+/// outsider gets on the company-scoped surface. The audit feed filtered by
+/// company is part of the same surface. An id nobody owns passes the wall
+/// and meets the handler's 404: membership is organizational, and a member
+/// asking about a vanished task deserves the truth, not a refusal.
+#[tokio::test]
+async fn the_bare_id_surface_is_gated_by_membership_too() {
+    let app = setup().await;
+    let owner = claim(&app, "bare_own", "correct-horse-battery").await;
+
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Alfa" })),
+        Some(&owner),
+    )
+    .await;
+    let alfa = v["id"].as_str().expect("company id").to_string();
+    let ceo = v["ceo"]["id"].as_str().expect("ceo id").to_string();
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/tasks"),
+        Some(json!({ "title": "Private work" })),
+        Some(&owner),
+    )
+    .await;
+    let task = v["id"].as_str().expect("task id").to_string();
+
+    let code = mint(&app, &owner).await;
+    let (_, _, cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "bare_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    let member = cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // Reached by bare id, still not their room.
+    for (method, uri) in [
+        ("GET", format!("/api/tasks/{task}/sessions")),
+        ("POST", format!("/api/agents/{ceo}/pause")),
+        ("GET", format!("/api/audit/events?company_id={alfa}")),
+    ] {
+        let (s, _, _) = send_raw(&app, method, &uri, None, Some(&member)).await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} should refuse an outsider"
+        );
+    }
+
+    // An id nobody owns is not a secret: the wall lets it reach the 404.
+    let (s, _, _) = send_raw(
+        &app,
+        "GET",
+        "/api/sessions/not-a-session",
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Brought inside, the same ids answer.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/members"),
+        Some(json!({ "name": "bare_mem" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    for uri in [
+        format!("/api/tasks/{task}/sessions"),
+        format!("/api/audit/events?company_id={alfa}"),
+    ] {
+        let (s, _, _) = send_raw(&app, "GET", &uri, None, Some(&member)).await;
+        assert_eq!(s, StatusCode::OK, "GET {uri} should answer a member");
+    }
+}
+
+/// The members surface (M25): a company can say who is inside it, in the
+/// order they came in -- the founder first. Adding a colleague is already a
+/// member's verb; this is the list the interface needs to show it.
+#[tokio::test]
+async fn a_company_lists_its_members_founder_first() {
+    let app = setup().await;
+    let owner = claim(&app, "list_own", "correct-horse-battery").await;
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Alfa" })),
+        Some(&owner),
+    )
+    .await;
+    let alfa = v["id"].as_str().expect("company id").to_string();
+
+    let (s, v, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/companies/{alfa}/members"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let names: Vec<&str> = v["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|m| m["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["list_own"]);
+
+    let code = mint(&app, &owner).await;
+    let (_, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "list_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/members"),
+        Some(json!({ "name": "list_mem" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    let (_, v, _) = send_raw(
+        &app,
+        "GET",
+        &format!("/api/companies/{alfa}/members"),
+        None,
+        Some(&owner),
+    )
+    .await;
+    let names: Vec<&str> = v["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|m| m["name"].as_str().expect("name"))
+        .collect();
+    assert_eq!(names, vec!["list_own", "list_mem"]);
+    assert!(
+        v["members"][1]["added_at"].as_str().is_some(),
+        "each member says when they came in: {v}"
+    );
 }
