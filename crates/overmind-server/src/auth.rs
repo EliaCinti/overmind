@@ -138,9 +138,56 @@ pub async fn state_of(state: &AppState, headers: &HeaderMap) -> Value {
         return json!({ "state": "unclaimed" });
     };
     match session_identity(state, headers).await {
-        Some((_, name, role)) => json!({ "state": "in", "name": name, "role": role }),
+        Some((user_id, name, role)) => {
+            // Where this person left off (M23, carried): the server's to
+            // remember, so a fresh browser lands where you were.
+            let last: Option<(Option<String>,)> =
+                sqlx::query_as("SELECT last_company_id FROM users WHERE id = ?")
+                    .bind(&user_id)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .ok()
+                    .flatten();
+            json!({
+                "state": "in",
+                "name": name,
+                "role": role,
+                "last_company_id": last.and_then(|(c,)| c),
+            })
+        }
         None => json!({ "state": "locked", "owner": owner_name }),
     }
+}
+
+/// Remember the company a person is working in (M23, carried). Per user,
+/// not per browser; refused for a company they are not a member of -- the
+/// owner passes, as everywhere.
+pub async fn remember_last_company(
+    state: &AppState,
+    headers: &HeaderMap,
+    company_id: &str,
+) -> Result<(), ApiError> {
+    let Some((user_id, _, role)) = session_identity(state, headers).await else {
+        return Err(ApiError::Unauthorized);
+    };
+    if role != "owner" {
+        let member: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM company_members WHERE company_id = ? AND user_id = ?",
+        )
+        .bind(company_id)
+        .bind(&user_id)
+        .fetch_one(&state.pool)
+        .await?;
+        if member == 0 {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    sqlx::query("UPDATE users SET last_company_id = ? WHERE id = ?")
+        .bind(company_id)
+        .bind(&user_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(())
 }
 
 /// The full identity behind a session: (user id, name, role).

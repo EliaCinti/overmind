@@ -555,3 +555,65 @@ async fn deleting_a_company_sweeps_its_directory() {
         "the company's directory should be swept: {corner:?}"
     );
 }
+
+/// An approval's durable summary is written in the company's language (M23,
+/// carried): the inbox words notifications from kind+params, but the stored
+/// summary is what the approvals list shows, and an Italian company used to
+/// read "Start ..." there.
+#[tokio::test]
+async fn an_approvals_summary_speaks_the_companys_language() {
+    let (app, _state) = setup().await;
+    let (_, company) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Rossi Vini", "language": "it" })),
+    )
+    .await;
+    let company_id = company["id"].as_str().expect("company id").to_string();
+    let ceo = company["ceo"]["id"].as_str().expect("ceo id").to_string();
+    let (s, _) = send(
+        &app,
+        "POST",
+        &format!("/api/agents/{ceo}/approval-gate"),
+        Some(json!({ "requires_approval": true })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, task) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/tasks"),
+        Some(json!({ "title": "Listino 2027", "execution_kind": "knowledge" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    let (s, v) = send(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": ceo })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+
+    let (_, v) = send(
+        &app,
+        "GET",
+        &format!("/api/companies/{company_id}/approvals"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        v["approvals"][0]["summary"],
+        json!("Avvia «Listino 2027»"),
+        "{v}"
+    );
+}

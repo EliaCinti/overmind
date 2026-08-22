@@ -418,6 +418,9 @@ pub async fn start_task(
     // Governance gate: file an approval and launch nothing.
     if requires_approval != 0 && !bypass_approval {
         let approval_id = uuid::Uuid::now_v7().to_string();
+        // The summary in the company's language, read before the write
+        // transaction opens (M23, carried).
+        let lang = crate::i18n::company_language(state, &company_id).await;
         let mut tx = state.write_tx().await?;
         sqlx::query(
             "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
@@ -426,7 +429,7 @@ pub async fn start_task(
         .bind(&approval_id)
         .bind(&company_id)
         .bind(json!({ "task_id": task_id, "agent_id": agent_id }).to_string())
-        .bind(format!("Start \"{title}\""))
+        .bind(crate::i18n::start_task_summary(&lang, &title))
         .bind(now())
         .execute(&mut *tx)
         .await?;
