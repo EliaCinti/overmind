@@ -98,6 +98,9 @@ fn api_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/companies", post(create_company).get(list_companies))
+        // Deleting is a member's verb like every other on this surface
+        // (ADR-0034); the membership wall already keeps outsiders off it.
+        .route("/companies/{company_id}", delete(delete_company))
         .route("/archetypes", get(list_archetypes))
         .route("/domains", get(list_domains))
         .route("/models", get(list_models))
@@ -649,6 +652,176 @@ async fn create_company(
             "ceo": ceo,
         })),
     ))
+}
+
+/// Delete a company: the rows, the brain, the debris on disk (ADR-0034).
+///
+/// A hard delete, deliberately — the ROADMAP names the wound this heals:
+/// the owner's first real test found no way to remove a company, and
+/// cleaning up meant surgery on the volume. The audit chain is the one
+/// thing that stays: `audit_events` carries no foreign key and its
+/// append-only triggers would abort any thinning, so history keeps saying
+/// this company existed — and the newest event says it was deleted, which
+/// is what separates a deletion from corruption.
+///
+/// The foreign keys are left ON as a net: the deletes walk children-first,
+/// and a table this function forgot fails the whole transaction instead of
+/// leaving orphans behind.
+async fn delete_company(
+    State(state): State<AppState>,
+    Path(company_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.write_tx().await?;
+    let name: Option<(String,)> = sqlx::query_as("SELECT name FROM companies WHERE id = ?")
+        .bind(&company_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((name,)) = name else {
+        return Err(ApiError::NotFound("company"));
+    };
+
+    // A queued or running session is an agent mid-thought: deleting the
+    // ground under it would leave the runner finalizing into missing rows.
+    // The door holds until the work settles (or is terminated).
+    let (live,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM agent_task_sessions s
+         JOIN tasks t ON t.id = s.task_id
+         WHERE t.company_id = ? AND s.status IN ('queued', 'running')",
+    )
+    .bind(&company_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if live > 0 {
+        return Err(ApiError::Conflict(format!(
+            "{live} session(s) still queued or running; wait for them to finish before deleting"
+        )));
+    }
+
+    // The directories to sweep afterwards are named by row ids, so the ids
+    // must be read before the rows go.
+    let ids = |rows: Vec<(String,)>| rows.into_iter().map(|(id,)| id).collect::<Vec<_>>();
+    let task_ids: Vec<(String,)> = sqlx::query_as("SELECT id FROM tasks WHERE company_id = ?")
+        .bind(&company_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    let conversation_ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM conversations WHERE company_id = ?")
+            .bind(&company_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let session_ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT s.id FROM agent_task_sessions s
+         JOIN tasks t ON t.id = s.task_id WHERE t.company_id = ?",
+    )
+    .bind(&company_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let meeting_ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM meetings WHERE company_id = ?")
+            .bind(&company_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    let (task_ids, conversation_ids, session_ids, meeting_ids) = (
+        ids(task_ids),
+        ids(conversation_ids),
+        ids(session_ids),
+        ids(meeting_ids),
+    );
+
+    // Children first, each level before the one it points at. The two
+    // self-references (agents.reports_to, roles.reports_to) are cut before
+    // their tables go, because a single DELETE promises nothing about the
+    // order it visits rows in.
+    for statement in [
+        "DELETE FROM task_artifacts WHERE task_id IN (SELECT id FROM tasks WHERE company_id = ?)",
+        "DELETE FROM attachments WHERE task_id IN (SELECT id FROM tasks WHERE company_id = ?)
+             OR conversation_id IN (SELECT id FROM conversations WHERE company_id = ?)",
+        "DELETE FROM messages WHERE conversation_id IN
+             (SELECT id FROM conversations WHERE company_id = ?)",
+        "DELETE FROM cost_events WHERE company_id = ?",
+        "DELETE FROM agent_task_sessions WHERE task_id IN
+             (SELECT id FROM tasks WHERE company_id = ?)",
+        "DELETE FROM meeting_turns WHERE meeting_id IN
+             (SELECT id FROM meetings WHERE company_id = ?)",
+        "DELETE FROM meeting_participants WHERE meeting_id IN
+             (SELECT id FROM meetings WHERE company_id = ?)",
+        "DELETE FROM org_proposal_members WHERE proposal_id IN
+             (SELECT id FROM org_proposals WHERE company_id = ?)",
+        "DELETE FROM agent_wakeup_requests WHERE agent_id IN
+             (SELECT id FROM agents WHERE company_id = ?)",
+        "DELETE FROM agent_turn_reservations WHERE company_id = ?",
+        "DELETE FROM budget_incidents WHERE company_id = ?",
+        "DELETE FROM agent_config_revisions WHERE company_id = ?",
+        "DELETE FROM notifications WHERE company_id = ?",
+        "DELETE FROM meetings WHERE company_id = ?",
+        "DELETE FROM org_proposals WHERE company_id = ?",
+        "DELETE FROM approvals WHERE company_id = ?",
+        "DELETE FROM conversations WHERE company_id = ?",
+        "DELETE FROM tasks WHERE company_id = ?",
+        "DELETE FROM goals WHERE project_id IN (SELECT id FROM projects WHERE company_id = ?)",
+        "DELETE FROM project_workspaces WHERE project_id IN
+             (SELECT id FROM projects WHERE company_id = ?)",
+        "DELETE FROM projects WHERE company_id = ?",
+        "UPDATE agents SET reports_to = NULL WHERE company_id = ?",
+        "DELETE FROM agents WHERE company_id = ?",
+        "DELETE FROM memory_links WHERE company_id = ?",
+        // company_tokens and company_members cascade with the row.
+        "DELETE FROM companies WHERE id = ?",
+    ] {
+        let mut query = sqlx::query(statement).bind(&company_id);
+        if statement.matches('?').count() == 2 {
+            query = query.bind(&company_id);
+        }
+        query.execute(&mut *tx).await?;
+    }
+
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::COMPANY_DELETED,
+        &json!({ "name": name }),
+    )
+    .await?;
+    tx.commit().await?;
+
+    // The brain's server processes die before their directory does: a live
+    // MCP pool holds open handles into the tree about to be removed.
+    state.forget_brain(&company_id);
+    let mut debris = vec![state.config.data_dir.join("companies").join(&company_id)];
+    for task_id in &task_ids {
+        debris.push(state.config.data_dir.join("attachments").join(task_id));
+    }
+    for conversation_id in &conversation_ids {
+        debris.push(
+            state
+                .config
+                .data_dir
+                .join("attachments")
+                .join(conversation_id),
+        );
+    }
+    for session_id in &session_ids {
+        for root in ["artifacts", "worktrees", "sessions"] {
+            debris.push(state.config.data_dir.join(root).join(session_id));
+        }
+    }
+    for meeting_id in &meeting_ids {
+        debris.push(state.config.data_dir.join("meetings").join(meeting_id));
+    }
+    for dir in debris {
+        // Best-effort like every filesystem sweep here: the rows are already
+        // gone, and a directory that would not delete is disk to reclaim by
+        // hand, not a reason to claim the company still exists.
+        if let Err(e) = tokio::fs::remove_dir_all(&dir).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!("could not sweep {} (ignored): {e}", dir.display());
+        }
+    }
+
+    state.notify(&company_id);
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn list_companies(

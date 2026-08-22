@@ -13,6 +13,7 @@ import {
   LogOut,
   ChevronDown,
   UserRoundPlus,
+  Trash2,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -46,6 +47,7 @@ export function TopBar({
   onToggleTheme,
   onLogout,
   onInvite,
+  onDeleteCompany,
 }: {
   companies: Company[];
   companyId: string | null;
@@ -70,6 +72,8 @@ export function TopBar({
   onLogout?: () => void;
   /** The invite surface (M25): present only for the owner. */
   onInvite?: () => void;
+  /** Absent while no company is selected: nothing to delete (ADR-0034). */
+  onDeleteCompany?: () => void;
 }) {
   const t = useT();
   return (
@@ -146,6 +150,17 @@ export function TopBar({
           </>
         )}
         {companyId && <Connections companyId={companyId} />}
+        {companyId && onDeleteCompany && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onDeleteCompany}
+            aria-label={t("nav.deleteCompany")}
+            title={t("nav.deleteCompany")}
+          >
+            <Trash2 className="h-4.5 w-4.5" />
+          </Button>
+        )}
         {companyId && <LanguageMenu language={language} onChange={onChangeLanguage} />}
         <Button
           variant="ghost"

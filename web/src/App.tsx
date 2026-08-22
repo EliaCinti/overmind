@@ -34,6 +34,7 @@ import { ConnectRepoDialog } from "./components/ConnectRepoDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Door } from "./components/Door";
 import { InviteDialog } from "./components/InviteDialog";
+import { DeleteCompanyDialog } from "./components/DeleteCompanyDialog";
 import { SignInNotice } from "./components/SignInNotice";
 import { Spinner } from "./components/ui/primitives";
 
@@ -66,6 +67,7 @@ export default function App() {
   /** Who is signed in (M25): the invite surface is the owner's. */
   const [isOwner, setIsOwner] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [deleteCompanyOpen, setDeleteCompanyOpen] = useState(false);
   /** Where each plan window stands; refreshed on every live change. */
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   const [loading, setLoading] = useState(true);
@@ -253,6 +255,16 @@ export default function App() {
     setCompanyId(id);
   };
 
+  // The mirror of the above (ADR-0034): the server already forgot the
+  // company, so the list is refetched and the selection moves to whatever
+  // remains — or to onboarding, which is what `null` renders.
+  const afterCompanyDeleted = async () => {
+    const cs = await api.listCompanies();
+    setCompanies(cs);
+    setCompanyId(cs[0]?.id ?? null);
+    if (cs.length === 0) localStorage.removeItem(LAST_COMPANY);
+  };
+
   if (gate === "checking") {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -304,8 +316,18 @@ export default function App() {
             api.authLogout().finally(() => setGate("locked"));
           }}
           onInvite={isOwner ? () => setInviteOpen(true) : undefined}
+          onDeleteCompany={companyId ? () => setDeleteCompanyOpen(true) : undefined}
         />
         <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
+        {companyId && (
+          <DeleteCompanyDialog
+            open={deleteCompanyOpen}
+            onOpenChange={setDeleteCompanyOpen}
+            companyId={companyId}
+            companyName={companies.find((c) => c.id === companyId)?.name ?? ""}
+            onDeleted={afterCompanyDeleted}
+          />
+        )}
 
         <SignInNotice economy={economy} onSignedIn={refreshHealth} />
         {!companyId ? (

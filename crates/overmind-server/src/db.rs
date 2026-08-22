@@ -136,6 +136,18 @@ impl AppState {
         }
     }
 
+    /// Drop the cached memory handle for a company that is going away
+    /// (ADR-0034). The cache entry owns a pool of live MCP server processes
+    /// bound to the company's brain directory; dropping it kills them
+    /// (`kill_on_drop`), which must happen *before* the directory is removed
+    /// or the servers keep open handles into a deleted tree. A poisoned lock
+    /// means nobody can be holding a handle to hand out anyway.
+    pub fn forget_brain(&self, company_id: &str) {
+        if let Ok(mut cache) = self.brains.lock() {
+            cache.remove(company_id);
+        }
+    }
+
     /// Record which task or meeting produced a memory the provider just stored
     /// (ADR-0025). `memory_ref` is whatever identifier it gave back, so `None`
     /// — a provider that answers without one, or a call that failed — records

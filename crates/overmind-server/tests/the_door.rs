@@ -658,3 +658,75 @@ async fn members_see_their_companies_and_only_theirs() {
         "one company now: {v}"
     );
 }
+
+/// Deleting a company is a member's verb (ADR-0034): membership is the
+/// filter here as everywhere on the company-scoped surface -- an outsider
+/// gets the same wordless 403 as for any other room they are not in.
+#[tokio::test]
+async fn deleting_a_company_is_its_members_verb() {
+    let app = setup().await;
+    let owner = claim(&app, "del_own", "correct-horse-battery").await;
+
+    let (s, v, _) = send_raw(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Alfa" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let alfa = v["id"].as_str().expect("id").to_string();
+
+    // A second person joins the instance but not the company.
+    let code = mint(&app, &owner).await;
+    let (_, _, cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "del_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    let member = cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // Not their room, not their verb.
+    let (s, _, _) = send_raw(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{alfa}"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // Brought inside, the verb is theirs like any other.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/members"),
+        Some(json!({ "name": "del_mem" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, _, _) = send_raw(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{alfa}"),
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Gone for everyone, the founder included.
+    let (_, v, _) = send_raw(&app, "GET", "/api/companies", None, Some(&owner)).await;
+    assert_eq!(v["companies"].as_array().map(Vec::len), Some(0), "{v}");
+}
