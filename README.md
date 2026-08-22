@@ -16,7 +16,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7c5cff?labelColor=1a1523" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/server-Rust-9d7bff?labelColor=1a1523" alt="Rust" />
   <img src="https://img.shields.io/badge/ui-React%20%2B%20TS-c9bcff?labelColor=1a1523" alt="React + TypeScript" />
-  <img src="https://img.shields.io/badge/status-pre--alpha-f5b73d?labelColor=1a1523" alt="Status" />
+  <a href="https://github.com/EliaCinti/overmind/releases"><img src="https://img.shields.io/badge/release-0.1.0-f5b73d?labelColor=1a1523" alt="Release 0.1.0" /></a>
 </p>
 
 <br/>
@@ -219,7 +219,8 @@ git clone https://github.com/EliaCinti/overmind.git && cd overmind
 # EITHER: pay with an API key — export it before starting
 export ANTHROPIC_API_KEY=sk-ant-…
 
-docker compose up --build          # → http://localhost:7070
+docker compose pull && docker compose up   # the published image → http://localhost:7070
+# (or build it from this tree: docker compose up --build)
 
 # OR: pay with a Claude subscription — sign in from the product (the notice
 # above the first screen walks you through it), or once from the shell:

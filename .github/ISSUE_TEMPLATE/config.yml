@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Guides and FAQ
+    url: https://overmind.eliacinti.dev/wiki
+    about: How to install, connect a provider, run tasks, work with someone else over Tailscale.
+  - name: A security boundary crossed
+    url: https://github.com/EliaCinti/overmind/security/advisories/new
+    about: Report it privately — see SECURITY.md.

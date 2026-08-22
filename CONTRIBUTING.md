@@ -79,6 +79,25 @@ npm run lint
 npm run build
 ```
 
+### The image
+
+CI also builds the Docker image and runs a real task inside it (`.github/scripts/container-smoke.sh`) — "does it build" is not the bar, "an agent can do a day's work in it" is. Locally: `docker compose build` then `bash .github/scripts/container-smoke.sh`.
+
+### Writing tests
+
+- **Test first.** Watch it fail for the reason you expect, then make it pass. A test that passed the moment it was written has proved nothing yet.
+- Name the behaviour, not the function: `a_cheap_agent_is_priced_by_its_own_ledger_not_a_flat_guess`, not `test_estimate`.
+- Tests never touch the real agent CLI: the door suite runs with `agent_cmd: Some("/usr/bin/true")`, the runner suites with a stub script. A test that spawned the real CLI on a machine that has one once opened the owner's browser a dozen times a day — it is in the roadmap as a lesson.
+- Every claim in `docs/THREAT-MODEL.md` names the test that holds it; a security change updates both.
+
+## Architecture decisions
+
+Anything that changes a boundary, a contract or a default is an ADR in `docs/adr/` (copy `0000-template.md`), written **before** the code and linked from the roadmap entry. The ADR says what was decided, why, and what was rejected; the roadmap says what shipped and how it was accepted.
+
+## Releasing
+
+Releases are tags. `CHANGELOG.md` gets its entry first (the GitHub Release notes are extracted from it — the workflow fails if the entry is missing), the workspace version in `Cargo.toml` matches, then `git tag vX.Y.Z && git push --tags`: `.github/workflows/release.yml` builds the image, pushes it to `ghcr.io/eliacinti/overmind` (`X.Y.Z`, `X.Y`, `latest`) and publishes the release.
+
 ## Branch & Pull Request Workflow
 
 The `main` branch is **protected**. Direct pushes are not allowed. 

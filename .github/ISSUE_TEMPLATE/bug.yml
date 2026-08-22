@@ -1,0 +1,63 @@
+name: Something broke
+description: A run, a screen or a command that did not do what the docs say it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. The things below are what lets us reproduce it; a request or a command that shows it is worth more than a description.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag, or the commit — and the image tag if you run the image.
+      placeholder: v0.1.0 · ghcr.io/eliacinti/overmind:0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you run it
+      options:
+        - Docker image (docker compose up)
+        - From source on macOS (cargo run)
+        - Other (say how below)
+    validations:
+      required: true
+  - type: dropdown
+    id: economy
+    attributes:
+      label: How the agent pays
+      options:
+        - API key (ANTHROPIC_API_KEY)
+        - Claude subscription
+        - A custom OVERMIND_AGENT_CMD
+        - Not relevant
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw. Paste the exact error if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      placeholder: |
+        1. found a company, language it
+        2. hire a writer, cap 10¢
+        3. start a knowledge task → …
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log, if you have it
+      description: "`docker compose logs overmind` or the terminal `cargo run` is in. Remove anything secret."
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I checked the [threat model](https://github.com/EliaCinti/overmind/blob/main/docs/THREAT-MODEL.md) and this is not a limit it already names.
+        - label: I checked the [wiki FAQ](https://overmind.eliacinti.dev/wiki/faq).
