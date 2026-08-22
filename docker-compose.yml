@@ -14,11 +14,15 @@ services:
     build: .
     image: overmind:latest
     ports:
-      # Loopback ONLY, on purpose. Overmind has no authentication, and its API
-      # starts tasks that run a CLI on this machine — publishing it on every
-      # interface would hand anyone who can reach the port the ability to run
-      # commands here. Do not change this to "7070:7070" until auth lands;
-      # to reach it from another machine, tunnel: `ssh -L 7070:localhost:7070`.
+      # Loopback ONLY, on purpose. Since M24 the API answers to a credential
+      # (the owner claims the instance at first run; everyone after joins by
+      # invite), but reaching out is a decision, never a surprise: an
+      # UNCLAIMED instance is open, and the API starts tasks that run a CLI on
+      # this machine. To share it with someone, publish it on your tailnet
+      # address and nothing else -- "100.x.y.z:7070:7070" -- and claim the
+      # owner account before you share the address (ADR-0032, ADR-0033). For a
+      # public hostname, terminate TLS in a reverse proxy that preserves Host
+      # and set OVERMIND_COOKIE_SECURE=on. Never "0.0.0.0:7070:7070".
       - "127.0.0.1:7070:7070"
     volumes:
       - overmind-data:/data
