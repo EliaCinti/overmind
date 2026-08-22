@@ -11,6 +11,7 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 3. **The data has no way out.** One owner, one SQLite, one brain per company, one Docker volume — and today an unplugged SSD proved the volume can vanish under a running factory. There is no backup, no export, no restore.
 4. **The walks are by hand.** Every UI acceptance so far was a person (or a Playwright script run once from a laptop). Nothing in CI opens a browser; a regression in the door, the onboarding or the inbox would ship green.
 5. **The audit chain is trusted but unseen.** The actor flows to the API (`actor_name`), approvals and meetings say who decided — but there is no page that shows the chain itself, and no history of decided approvals once they leave the inbox.
+6. **It is a desk product.** Decisions reach a person who is mostly away from the desk, and the interface assumes a mouse and a wide screen; there is no way to be told on a phone that a run waits, and no secure context on the tailnet for a phone to be told in.
 
 ## The order, and why
 
@@ -42,6 +43,16 @@ Every acceptance walk that has ever been done by hand, done by a machine on ever
 A page for the audit chain: the events of a company, each with its actor's name, kind, time and payload; the verify result at the top; filters by kind and actor. And a **history** of approvals and meetings — decided, by whom, when — so the inbox can stay a place for what is pending. The thing the product is proudest of, finally visible without `curl`.
 
 **Accept:** the page shows the chain and says "verified"; break the chain in the test and the page names the block.
+
+### M33 — Overmind in your pocket
+The owner's ask, and the right shape for it. A person who runs a company of agents is mostly *away from it* — and what reaches them is a decision: approve a start, allow a meeting, answer the CEO, glance at the board. That is a phone's job. Overmind is already reachable from a phone over Tailscale (iOS and Android have it), with no cloud in between; the hard part of "an app" is done. The rest comes in stages, cheapest and most honest first:
+
+- **A · HTTPS on the tailnet, verified.** A service worker and push need a secure context, and the documented way to reach Overmind today is plain HTTP on the tailnet address. `tailscale serve` gives the machine an HTTPS name and a certificate for free; verify it against the door (cookie `Secure`, `OVERMIND_COOKIE_SECURE=on`), the WebSocket's origin guard and the live updates — and write the result into the wiki, where today it is only promised for a reverse proxy.
+- **B · The decision surfaces, mobile-first.** The inbox, the meeting room, the chat and the board laid out for a hand: one column, thumb-reachable actions, nothing that needs a hover. Installable as a PWA — an icon on the home screen, full screen, no store, no signing, no review.
+- **C · "Waiting on you", pushed.** Web Push (VAPID keys minted by the server, kept under the data dir) for exactly the notifications that wait on a person; tapping one opens the item. Nothing else pushes — the phone is for deciding, not for watching.
+- **D · A native shell, only if B and C prove insufficient** — and, if it comes, **built with Overmind**: a company *Overmind Mobile*, a workspace on the app's repository, the CEO drafting the team, every diff reviewed by the owner and landed through M30's verb, the costs in the ledger. Documented as a walk, not claimed as a demo: the strongest proof the product can give that it does real work is to ship a piece of itself.
+
+**Accept:** from a phone on the tailnet, over HTTPS: sign in, get a push that a run waits, approve it, see the board move — without an app store. D has its own acceptance when it opens.
 
 ### Then, when someone needs them
 - **Per-company roles and member removal** — deferred in ADR-0033 until a real need names them; the two-machine walk will say whether it has.
