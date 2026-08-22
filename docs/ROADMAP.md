@@ -396,9 +396,9 @@ Two milestones carried the same sentence: *"a turn is still not priced before it
 
 ## Known gaps — carried deliberately, not forgotten
 
-- **No authentication of any kind.** For a single user on their own machine this is the right trade — the boundary is the machine, and anyone who has it can run the CLI directly. It stops being fine the moment the port is reachable by anyone else: the API spawns processes. Compose binds loopback only; the browser boundary (CORS + WebSocket origin) is held by `tests/browser_boundary.rs`. Real auth has **no milestone yet** — M10 turned out to be the cage around the *agent*, not a door in front of the *caller* — and it is what a shared or hosted Overmind needs first.
+- **The door guards the port; nothing guards a hostile host.** Since M24 the API answers to a credential and since M25 membership filters every company surface — but someone with the machine itself (a shell, root, the Docker socket) owns the process and always will, an *unclaimed* instance is as open as before the door existed (claim early), and membership is an organizational boundary, not an adversarial one: every account on the instance is one the owner invited. Overmind does not terminate TLS: reach it over Tailscale, or behind a reverse proxy with `OVERMIND_COOKIE_SECURE=on`. The browser boundary (CORS + WebSocket origin) is held by `tests/browser_boundary.rs`; the door by `tests/the_door.rs`.
 - **Declared permissions are not policed** (`repo:write`, `web:read`, …) — honest by design until M10 sandboxing.
 - **No quorum on meeting requests** — one agent convenes. Deliberate: seconding would burn an adapter turn per invitee *before* the human answers. Mitigated by the M13.5 limits instead.
 
 ## Later / icebox
-Linux/Windows support · multi-user · plugin system · agent marketplace-style role templates · public release polish
+Native Linux/Windows (today: the image) · per-company roles and member removal · plugin system · agent marketplace-style role templates · public release polish
