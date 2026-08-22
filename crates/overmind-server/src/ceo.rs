@@ -882,7 +882,19 @@ pub(crate) async fn run_adapter(
 ) -> Result<String, CeoError> {
     let traits = turn.traits;
     let cap = crate::runner::trait_budget_cents(traits);
-    let estimate = state.config.start_estimate_cents;
+    // Priced by this agent's own turns (M26, ADR-0035), before the write
+    // transaction opens.
+    let estimate = {
+        let mut conn = state.pool.acquire().await?;
+        crate::governance::estimate_cents(
+            &mut conn,
+            turn.agent_id,
+            crate::governance::SpendKind::Turn,
+            state.config.start_estimate_cents,
+        )
+        .await?
+        .cents
+    };
 
     let mut tx = state.write_tx().await?;
     let check = crate::governance::check(&mut tx, turn.agent_id, cap, estimate).await?;

@@ -343,6 +343,9 @@ export const en = {
     left: "{pct}% left",
     ofCap: "{used} of {cap}",
     approxOfCap: "≈{used} of {cap}",
+    nextRun: "next: ≈{task} a task · ≈{turn} a turn",
+    nextRunFrom:
+      "Priced from this agent's own ledger — {task} task runs, {turn} turns on record. Fewer than three and the flat default stands.",
     spentNoCap: "{used} spent",
     usedThisMonth: "Overmind has used {amount} this month.",
     monthNotPlanWindow:
@@ -848,6 +851,9 @@ export const it: Dictionary = {
     left: "{pct}% rimasto",
     ofCap: "{used} di {cap}",
     approxOfCap: "≈{used} di {cap}",
+    nextRun: "prossimo: ≈{task} a task · ≈{turn} a turno",
+    nextRunFrom:
+      "Stimato dal registro di questo agente — {task} run di task, {turn} turni registrati. Sotto i tre resta il default piatto.",
     spentNoCap: "{used} spesi",
     usedThisMonth: "Overmind ha usato {amount} questo mese.",
     monthNotPlanWindow:

@@ -128,12 +128,20 @@ export interface Approval {
   decided_by: string | null;
 }
 
+/** What the next run will reserve, and how much history it rests on (M26).
+ *  `samples` below three means the flat default is standing in. */
+export interface Estimate {
+  cents: number;
+  samples: number;
+}
+
 export interface AgentBudget {
   agent_id: string;
   name: string;
   budget_cents: number;
   spent_cents: number;
   reserved_cents: number;
+  estimates?: { task: Estimate; turn: Estimate };
 }
 
 /** How the company reaches you (ADR-0020). Actionable when `approval_id` is set. */

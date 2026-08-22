@@ -347,3 +347,103 @@ pub async fn record_revision(
     .await?;
     Ok(())
 }
+
+/// What a run is expected to cost before it runs (M26, ADR-0035), and how
+/// much history that number rests on. `samples == 0` below the threshold
+/// means the flat default is standing in, visibly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Estimate {
+    pub cents: i64,
+    pub samples: usize,
+}
+
+/// The two kinds of spend the ledger tells apart by `session_id` -- a task
+/// run carries a repository into the context, a conversational turn carries
+/// a conversation, and they cost differently for the same agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpendKind {
+    Task,
+    Turn,
+}
+
+/// Fewer samples than this and the flat default stands: a guess from one
+/// data point is the same guess with a false precision attached.
+const MIN_SAMPLES: usize = 3;
+/// How far back the estimate looks: enough to smooth one odd run, short
+/// enough to follow an agent whose work changed.
+const WINDOW_RUNS: i64 = 10;
+
+/// The value at three quarters of the way up the sorted costs -- at least
+/// 75% of past runs cost this much or less. Above the median on purpose: a
+/// reservation exists to keep the next run *inside* the cap, so it leans
+/// toward the agent's dearer days. Never below one cent.
+fn leaning_dear(mut costs: Vec<i64>) -> i64 {
+    costs.sort_unstable();
+    let idx = ((costs.len() * 3) / 4).min(costs.len().saturating_sub(1));
+    costs.get(idx).copied().unwrap_or(1).max(1)
+}
+
+/// The estimate for an agent's next run of `kind`: its own last ten costs of
+/// that kind, read from the ledger, leaning dear; `default` until the ledger
+/// knows at least three.
+pub async fn estimate_cents(
+    conn: &mut SqliteConnection,
+    agent_id: &str,
+    kind: SpendKind,
+    default: i64,
+) -> Result<Estimate, sqlx::Error> {
+    let sql = match kind {
+        // A task run may record more than one event; the run is the sum.
+        SpendKind::Task => {
+            "SELECT SUM(cost_cents) AS cents FROM cost_events
+             WHERE agent_id = ? AND session_id IS NOT NULL
+             GROUP BY session_id ORDER BY MAX(occurred_at) DESC LIMIT ?"
+        }
+        SpendKind::Turn => {
+            "SELECT cost_cents FROM cost_events
+             WHERE agent_id = ? AND session_id IS NULL
+             ORDER BY occurred_at DESC LIMIT ?"
+        }
+    };
+    let rows: Vec<(i64,)> = sqlx::query_as(sql)
+        .bind(agent_id)
+        .bind(WINDOW_RUNS)
+        .fetch_all(conn)
+        .await?;
+    let costs: Vec<i64> = rows.into_iter().map(|(c,)| c).collect();
+    let samples = costs.len();
+    if samples < MIN_SAMPLES {
+        return Ok(Estimate {
+            cents: default,
+            samples,
+        });
+    }
+    Ok(Estimate {
+        cents: leaning_dear(costs),
+        samples,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::leaning_dear;
+
+    /// Four runs at 2, 3, 3, 4: the reservation is 4, not the median 3 --
+    /// a number that is right half the time lets the cap be crossed half
+    /// the time.
+    #[test]
+    fn the_estimate_leans_toward_the_dearer_days() {
+        assert_eq!(leaning_dear(vec![3, 2, 4, 3]), 4);
+        assert_eq!(leaning_dear(vec![70, 90, 80]), 90);
+        // Ten runs: the eighth smallest, so one outlier at the top does not
+        // price every run after it.
+        assert_eq!(leaning_dear(vec![1, 1, 1, 1, 1, 1, 1, 2, 3, 100]), 2);
+    }
+
+    /// A run that cost nothing is not a run that costs nothing next time:
+    /// the floor keeps the gate from becoming a formality.
+    #[test]
+    fn the_estimate_is_never_below_a_cent() {
+        assert_eq!(leaning_dear(vec![0, 0, 0]), 1);
+    }
+}

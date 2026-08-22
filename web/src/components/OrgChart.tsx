@@ -255,17 +255,33 @@ function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy 
     used: formatCents(used),
     cap: formatCents(budget.budget_cents),
   });
+  const est = budget.estimates;
   return (
-    <div className="mt-2.5 flex items-center gap-2" title={amounts}>
-      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-        <div
-          className="h-full rounded-full transition-all"
-          style={{ width: `${pct}%`, background: tone }}
-        />
+    <div className="mt-2.5">
+      <div className="flex items-center gap-2" title={amounts}>
+        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+          <div
+            className="h-full rounded-full transition-all"
+            style={{ width: `${pct}%`, background: tone }}
+          />
+        </div>
+        <span className="mono shrink-0 text-[11px] text-muted-foreground">
+          {t("economy.left", { pct: left })}
+        </span>
       </div>
-      <span className="mono shrink-0 text-[11px] text-muted-foreground">
-        {t("economy.left", { pct: left })}
-      </span>
+      {/* What the next run will reserve, priced from this agent's own ledger
+          (M26) -- and, in the tooltip, on how much history it rests. */}
+      {est && (
+        <p
+          className="mt-1 text-[11px] text-muted-foreground/80"
+          title={t("economy.nextRunFrom", { task: est.task.samples, turn: est.turn.samples })}
+        >
+          {t("economy.nextRun", {
+            task: formatCents(est.task.cents),
+            turn: formatCents(est.turn.cents),
+          })}
+        </p>
+      )}
     </div>
   );
 }
