@@ -16,7 +16,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7c5cff?labelColor=1a1523" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/server-Rust-9d7bff?labelColor=1a1523" alt="Rust" />
   <img src="https://img.shields.io/badge/ui-React%20%2B%20TS-c9bcff?labelColor=1a1523" alt="React + TypeScript" />
-  <a href="https://github.com/EliaCinti/overmind/releases"><img src="https://img.shields.io/badge/release-0.1.0-f5b73d?labelColor=1a1523" alt="Release 0.1.0" /></a>
+  <a href="https://github.com/EliaCinti/overmind/releases"><img src="https://img.shields.io/badge/release-0.1.1-f5b73d?labelColor=1a1523" alt="Release 0.1.1" /></a>
 </p>
 
 <br/>
