@@ -131,7 +131,7 @@ The control plane, drawn to scale: one server runs your company, every action pa
 
 ## Several people, one company — over Tailscale
 
-Overmind is one server that everyone reaches. There is no cloud in between and no multi-server sync: a shared company lives on **one** Overmind — your Mac, or a small VPS — and the other person reaches it over a network you both own. The documented way is **[Tailscale](https://tailscale.com)** (or WireGuard): encryption and identity at the network layer, zero certificates, the right default for "my Mac and my friend's PC". The door does the rest.
+Overmind is one server that everyone reaches. There is no cloud in between and no multi-server sync: a shared company lives on **one** Overmind and the other person reaches it over a network you both own. The host can be a **Mac** (natively or in the image), a **Linux** box or small VPS (the image), or a **Windows** PC running Docker Desktop (the image — there is no native Windows build, on purpose; the image is the Windows path and it is what CI tests). The colleague's machine can be anything with a browser and Tailscale; they install nothing of Overmind. The documented way to reach it is **[Tailscale](https://tailscale.com)** (or WireGuard): encryption and identity at the network layer, zero certificates, the right default for "my Mac and my friend's PC". The door does the rest.
 
 ```sh
 # On the machine that runs Overmind, join your tailnet, then bind to its address.
