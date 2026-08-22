@@ -2,6 +2,11 @@
 
 All notable changes to Overmind are recorded here, newest first. Overmind is developed milestone by milestone; each entry names the milestones it ships and the decisions behind them (`docs/adr/`). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/) from `0.1.0` on — before `1.0`, minor versions may change behaviour.
 
+## [0.1.1] — 2026-08-22
+
+### Fixed
+- **The published image runs on Apple Silicon and arm Linux.** `0.1.0` shipped `linux/amd64` alone, and the very first `docker compose pull` on an Apple Silicon Mac answered *no matching manifest for linux/arm64*. The release workflow now builds both platforms natively — amd64 and arm64 on their own runners — and unites them under one manifest; `ghcr.io/eliacinti/overmind:0.1.1` (and `:0.1`, `:latest`) pull on either.
+
 ## [0.1.0] — 2026-08-22
 
 The first release: a company of AI agents you can actually run, and let someone else into.
@@ -41,4 +46,5 @@ The first release: a company of AI agents you can actually run, and let someone 
 ### Known limits, stated
 The threat model (`docs/THREAT-MODEL.md`) says what is not defended against: anyone with the machine, a malicious adapter or memory binary you configured, the network. No quorum on meeting requests and declared-but-unpoliced permissions are deliberate; membership is organizational, not adversarial; the plan's remaining percentage is not visible headless; the adapter's brake overshoots (measured 2.6× at a five-cent ceiling).
 
+[0.1.1]: https://github.com/EliaCinti/overmind/releases/tag/v0.1.1
 [0.1.0]: https://github.com/EliaCinti/overmind/releases/tag/v0.1.0

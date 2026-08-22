@@ -1,10 +1,17 @@
 name: Release
 
-# On a version tag: build the image once, push it to GHCR under the version
-# and as `latest`, and publish a GitHub Release whose notes are the changelog's
+# On a version tag: build the image for both platforms people actually run --
+# amd64 (a Linux box, a VPS, Windows through Docker Desktop on Intel) and
+# arm64 (Apple Silicon, and arm Linux) -- each natively on its own runner,
+# push both by digest, unite them under one manifest tagged with the version
+# and `latest`, and publish a GitHub Release whose notes are the changelog's
 # entry for that version. The image is how everyone who is not on macOS has
-# Overmind; publishing it is what turns `docker compose up` from a seven-minute
-# build into a download.
+# Overmind, and how macOS has it too without a Rust toolchain; publishing it
+# is what turns `docker compose up` from a seven-minute build into a download.
+#
+# 0.1.0 shipped amd64 alone, and the very first `docker compose pull` on an
+# Apple Silicon Mac answered "no matching manifest for linux/arm64" -- the
+# owner's machine. Measured, not assumed, from then on.
 on:
   push:
     tags: ["v*"]
@@ -13,12 +20,60 @@ permissions:
   contents: write
   packages: write
 
+env:
+  IMAGE: ghcr.io/eliacinti/overmind
+
 jobs:
-  image:
-    name: the image, published
-    runs-on: ubuntu-latest
+  build:
+    name: the image, ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - name: Export the digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  manifest:
+    name: the image, united
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -28,25 +83,24 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Create the manifest list and push it
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$IMAGE@sha256:%s " *)
+      - name: Inspect
+        run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
 
   release:
     name: the release notes
     runs-on: ubuntu-latest
-    needs: image
+    needs: manifest
     steps:
       - uses: actions/checkout@v5
       # The notes are the changelog's entry for this version -- one source,

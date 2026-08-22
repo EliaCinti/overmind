@@ -1039,8 +1039,21 @@ async fn two_overlapping_runs_writing_the_same_thing_are_reported() {
     await_session(&env, &b).await;
     let _ = std::fs::remove_file(&gate);
 
-    let ns = notifications(&env, &acme).await;
-    let collision = ns.iter().find(|n| n["kind"] == "memory.collision");
+    // The session is marked complete BEFORE the memory is stored and the
+    // collision reported: memory is best-effort and comes after, by design.
+    // So the notification is eventual, and the test waits for it the way a
+    // person would -- measured as a flake on CI's macOS runner, where the
+    // store landed after the first read of the inbox.
+    let mut ns = Vec::new();
+    let mut collision = None;
+    for _ in 0..100 {
+        ns = notifications(&env, &acme).await;
+        collision = ns.iter().find(|n| n["kind"] == "memory.collision").cloned();
+        if collision.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let Some(c) = collision else {
         panic!("two overlapping runs on the same subject went unreported: {ns:?}");
     };

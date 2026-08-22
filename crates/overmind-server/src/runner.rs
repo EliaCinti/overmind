@@ -959,6 +959,30 @@ async fn exclude_from_git(worktree: &Path) {
     let _ = tokio::fs::write(&path, format!("/{DELIVERABLES_DIR}/\n/{INPUTS_DIR}/\n")).await;
 }
 
+/// One `git worktree add` at a time per repository. Two concurrent adds on
+/// the same repo race inside `.git/worktrees/` -- measured on CI (M27):
+/// *"failed to read .git/worktrees/<other session>/commondir"*, the second
+/// add reading the first's half-written entry -- and git offers no lock of
+/// its own for it. Process-wide, keyed by the repository path: runs on
+/// different repositories never wait on each other.
+static WORKTREE_LOCKS: std::sync::Mutex<
+    Option<std::collections::HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::Mutex::new(None);
+
+fn worktree_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut guard = match WORKTREE_LOCKS.lock() {
+        Ok(g) => g,
+        // A poisoned registry costs a fresh lock, not a failed checkout --
+        // the same trade the runner makes everywhere.
+        Err(e) => e.into_inner(),
+    };
+    guard
+        .get_or_insert_with(Default::default)
+        .entry(repo.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(), RunnerError> {
     if let Some(parent) = ctx.worktree_dir.parent() {
         tokio::fs::create_dir_all(parent)
@@ -970,8 +994,12 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
     if let Some(r) = &spec.default_ref {
         args.push(r.as_str());
     }
-    git(&spec.repo_cwd, &args).await?;
-    let base_sha = git(&ctx.worktree_dir, &["rev-parse", "HEAD"]).await?;
+    let base_sha = {
+        let lock = worktree_lock(&spec.repo_cwd);
+        let _held = lock.lock().await;
+        git(&spec.repo_cwd, &args).await?;
+        git(&ctx.worktree_dir, &["rev-parse", "HEAD"]).await?
+    };
     // A code run can also hand back documents (M17): `deliverables/` is
     // collected as artifacts and kept out of git, so one run can produce a
     // diff *and* a report without either polluting the other. Same for the
