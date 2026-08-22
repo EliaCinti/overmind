@@ -1,0 +1,26 @@
+name: Something bit me
+description: It worked, but it cost you a minute you should not have spent — a friction, a missing verb, a sentence that lied.
+labels: ["friction"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Overmind's milestones are closed by using it; frictions found in real use are how the next one gets chosen. Say what you were trying to do.
+  - type: textarea
+    id: doing
+    attributes:
+      label: What you were trying to do
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: What bit you
+      description: Where you stopped, what you expected to find, what you had to do instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: v0.1.0

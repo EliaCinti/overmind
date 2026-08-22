@@ -84,7 +84,7 @@ fn unique_root() -> PathBuf {
 /// tools answer prose instead, standing in for a conforming server that simply
 /// does not expose a list. `$STUB_TOOL_LOG` records which tool was called, so a
 /// test can tell searching apart from listing.
-const BRAIN_MCP: &str = r#"import sys, json, os
+const BRAIN_MCP: &str = r#"import sys, json, os, fcntl
 brain = os.environ.get("BRAIN_DIR") or os.environ.get("FALLBACK_BRAIN")
 os.makedirs(brain, exist_ok=True)
 store = os.path.join(brain, "memories.txt")
@@ -139,6 +139,13 @@ for line in sys.stdin:
             remembered = " | ".join(r["title"] for r in rows())
             reply(mid, "BRAIN[%s] KNOWS: %s" % (brain, remembered))
         elif name in ("store_memory", "store_decision"):
+            # One writer at a time, as a real provider is. Overmind's memory
+            # pool runs stores concurrently, and two stub processes that each
+            # read the file before the other appended would see neither the
+            # other's row nor the collision -- measured as a flake on CI's
+            # macOS runner, where the two finalizes landed together.
+            lock = open(store + ".lock", "w")
+            fcntl.flock(lock, fcntl.LOCK_EX)
             existing = rows()
             row = {
                 "id": len(existing) + 1,
@@ -167,6 +174,8 @@ for line in sys.stdin:
                     if mine & theirs:
                         collisions.append({"kind": "memory", "id": r["id"],
                                            "title": r["title"], "similarity": 0.9})
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
             if os.environ.get("STUB_NO_IDS"):
                 reply(mid, "stored")
             else:

@@ -11,8 +11,12 @@ services:
     # node). If yours need more -- a LaTeX toolchain, a linter, a compiler --
     # add it at build time instead of deriving an image:
     #   docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"
+    # The published image (built by the release workflow on every version
+    # tag): `docker compose pull && docker compose up` is a download, not a
+    # seven-minute build. `docker compose up --build` still builds from this
+    # tree -- the path for developers and for EXTRA_APT_PACKAGES.
     build: .
-    image: overmind:latest
+    image: ghcr.io/eliacinti/overmind:latest
     ports:
       # Loopback ONLY, on purpose. Since M24 the API answers to a credential
       # (the owner claims the instance at first run; everyone after joins by
