@@ -730,3 +730,95 @@ async fn deleting_a_company_is_its_members_verb() {
     let (_, v, _) = send_raw(&app, "GET", "/api/companies", None, Some(&owner)).await;
     assert_eq!(v["companies"].as_array().map(Vec::len), Some(0), "{v}");
 }
+
+/// Slice B of ADR-0033: a task, a session, an agent, an approval reached by
+/// bare id belongs to a company, and the wall resolves the id to that
+/// company before letting a member through -- the same wordless 403 an
+/// outsider gets on the company-scoped surface. The audit feed filtered by
+/// company is part of the same surface. An id nobody owns passes the wall
+/// and meets the handler's 404: membership is organizational, and a member
+/// asking about a vanished task deserves the truth, not a refusal.
+#[tokio::test]
+async fn the_bare_id_surface_is_gated_by_membership_too() {
+    let app = setup().await;
+    let owner = claim(&app, "bare_own", "correct-horse-battery").await;
+
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Alfa" })),
+        Some(&owner),
+    )
+    .await;
+    let alfa = v["id"].as_str().expect("company id").to_string();
+    let ceo = v["ceo"]["id"].as_str().expect("ceo id").to_string();
+    let (_, v, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/tasks"),
+        Some(json!({ "title": "Private work" })),
+        Some(&owner),
+    )
+    .await;
+    let task = v["id"].as_str().expect("task id").to_string();
+
+    let code = mint(&app, &owner).await;
+    let (_, _, cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "bare_mem", "password": "another-long-pass", "invite": code })),
+        None,
+    )
+    .await;
+    let member = cookie
+        .expect("cookie")
+        .split(';')
+        .next()
+        .expect("cookie pair")
+        .to_string();
+
+    // Reached by bare id, still not their room.
+    for (method, uri) in [
+        ("GET", format!("/api/tasks/{task}/sessions")),
+        ("POST", format!("/api/agents/{ceo}/pause")),
+        ("GET", format!("/api/audit/events?company_id={alfa}")),
+    ] {
+        let (s, _, _) = send_raw(&app, method, &uri, None, Some(&member)).await;
+        assert_eq!(
+            s,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} should refuse an outsider"
+        );
+    }
+
+    // An id nobody owns is not a secret: the wall lets it reach the 404.
+    let (s, _, _) = send_raw(
+        &app,
+        "GET",
+        "/api/sessions/not-a-session",
+        None,
+        Some(&member),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Brought inside, the same ids answer.
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        &format!("/api/companies/{alfa}/members"),
+        Some(json!({ "name": "bare_mem" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    for uri in [
+        format!("/api/tasks/{task}/sessions"),
+        format!("/api/audit/events?company_id={alfa}"),
+    ] {
+        let (s, _, _) = send_raw(&app, "GET", &uri, None, Some(&member)).await;
+        assert_eq!(s, StatusCode::OK, "GET {uri} should answer a member");
+    }
+}

@@ -70,3 +70,18 @@ them), and a way to say *which companies* each person is part of.
 - The threat model's "sign-up is open" row is rewritten to describe the
   invite gate, and the "organizational, not security" honesty moves from a
   promise into the boundary table with its tests.
+
+## Addendum — slice B delivered (22 Aug 2026)
+
+The bare-id surface now answers the same membership question. The wall
+resolves an id to its company through the row that owns it — one
+prefix→query table: `/agents/`, `/approvals/`, `/artifacts/` (via its task),
+`/meetings/`, `/notifications/`, `/org-proposals/`, `/projects/`,
+`/sessions/` (via its task), `/tasks/`, `/tokens/` — plus the audit feed
+filtered by `company_id`, which is the same surface read sideways. A
+non-member gets the wordless 403 of decision 2; the owner passes as before.
+An id that resolves to nothing is let through to the handler's 404: the
+boundary is organizational, and a member asking about a vanished task
+deserves the truth rather than a refusal that would only make sense against
+an adversary the threat model does not claim to stop. Held by
+`the_door.rs — the_bare_id_surface_is_gated_by_membership_too`.
