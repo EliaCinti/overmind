@@ -45,6 +45,12 @@ export const en = {
     audit: "audit",
     auditOk: "Audit chain verified",
     auditBroken: "Audit chain BROKEN",
+    deleteCompany: "Delete company",
+    deleteCompanyWarning:
+      "This deletes {name} — its agents, tasks, conversations, meetings and memory. The audit history stays. There is no undo.",
+    deleteCompanyType: "Type the company's name to confirm",
+    deleteCompanyConfirm: "Delete forever",
+    deleteCompanyBusy: "A session is still running — wait for it to finish, then try again.",
   },
   common: {
     approve: "Approve",
@@ -541,6 +547,12 @@ export const it: Dictionary = {
     audit: "audit",
     auditOk: "Catena di audit verificata",
     auditBroken: "Catena di audit COMPROMESSA",
+    deleteCompany: "Elimina azienda",
+    deleteCompanyWarning:
+      "Questo elimina {name} — i suoi agenti, task, conversazioni, riunioni e memoria. La storia di audit resta. Non si può annullare.",
+    deleteCompanyType: "Scrivi il nome dell'azienda per confermare",
+    deleteCompanyConfirm: "Elimina per sempre",
+    deleteCompanyBusy: "Una sessione è ancora in corso — aspetta che finisca e riprova.",
   },
   common: {
     approve: "Approva",

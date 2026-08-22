@@ -494,6 +494,9 @@ export const api = {
   listCompanies: () => req<{ companies: Company[] }>("GET", "/companies").then((r) => r.companies),
   createCompany: (name: string, language: LanguageCode) =>
     req<Company>("POST", "/companies", { name, language }),
+  /** Bodyless on purpose: the CSRF belt inspects bodied writes, and the
+   *  server wants nothing from us but the id in the path (ADR-0034). */
+  deleteCompany: (companyId: string) => req<unknown>("DELETE", `/companies/${companyId}`),
   listTokens: (companyId: string) =>
     req<{ tokens: CompanyToken[] }>("GET", `/companies/${companyId}/tokens`).then((r) => r.tokens),
   createToken: (companyId: string, label: string) =>

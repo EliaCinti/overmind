@@ -339,3 +339,219 @@ async fn tampering_with_an_event_breaks_the_chain() {
     assert_eq!(report["valid"], json!(false));
     assert_eq!(report["first_invalid_seq"], json!(1));
 }
+
+/// Deleting a company takes every row it owns -- tasks, agents, projects,
+/// the lot -- and returns 404 for whoever asks again. The audit chain is
+/// deliberately NOT thinned: history that a company existed, worked and was
+/// deleted is exactly what an audit log is for, and the deletion itself is
+/// the chain's newest event.
+#[tokio::test]
+async fn deleting_a_company_takes_its_rows_and_leaves_the_audit_chain_whole() {
+    let (app, state) = setup().await;
+
+    let (_, company) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Ephemeral" })),
+    )
+    .await;
+    let company_id = company["id"].as_str().expect("company id").to_string();
+
+    // Give it a life worth deleting: project -> goal -> task.
+    let (_, project) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/projects"),
+        Some(json!({ "title": "Short lived" })),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_string();
+    let (_, goal) = send(
+        &app,
+        "POST",
+        &format!("/api/projects/{project_id}/goals"),
+        Some(json!({ "title": "Be deleted cleanly" })),
+    )
+    .await;
+    let goal_id = goal["id"].as_str().expect("goal id").to_string();
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/tasks"),
+        Some(json!({ "title": "Leave no orphans", "goal_id": goal_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = send(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{company_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {body}");
+
+    // The list no longer names it, and the rows are truly gone.
+    let (_, v) = send(&app, "GET", "/api/companies", None).await;
+    assert_eq!(v["companies"].as_array().map(Vec::len), Some(0), "{v}");
+    for table in ["companies", "tasks", "projects", "agents", "conversations"] {
+        let (n,): (i64,) = sqlx::query_as(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE {} = ?",
+            if table == "companies" {
+                "id"
+            } else {
+                "company_id"
+            }
+        ))
+        .bind(&company_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("count");
+        assert_eq!(n, 0, "{table} still holds rows for the deleted company");
+    }
+
+    // The audit chain still verifies, and its newest company event says why.
+    let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["valid"], json!(true), "report: {report}");
+    let (_, v) = send(
+        &app,
+        "GET",
+        &format!("/api/audit/events?company_id={company_id}"),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = v["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .map(|e| e["kind"].as_str().expect("kind"))
+        .collect();
+    assert!(
+        kinds.contains(&"company.deleted"),
+        "the deletion is an audit event: {kinds:?}"
+    );
+
+    // Asking again finds nothing: the verb is not idempotent theater.
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{company_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A session still queued or running is an agent mid-thought: deleting the
+/// company under it would leave the runner writing into a void. The door
+/// holds with 409 until the work settles.
+#[tokio::test]
+async fn a_live_session_holds_the_door_against_deletion() {
+    let (app, state) = setup().await;
+
+    let (_, company) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Busy" })),
+    )
+    .await;
+    let company_id = company["id"].as_str().expect("company id").to_string();
+    let (_, agent) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/agents"),
+        Some(json!({ "name": "Worker", "archetype": "reviewer" })),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id").to_string();
+    let (_, task) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/tasks"),
+        Some(json!({ "title": "In flight" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+
+    sqlx::query(
+        "INSERT INTO agent_task_sessions
+             (id, task_id, agent_id, status, branch, workspace_path, created_at)
+         VALUES ('sess-live', ?, ?, 'running', 'work', '/tmp/nowhere', '2026-08-22T00:00:00Z')",
+    )
+    .bind(&task_id)
+    .bind(&agent_id)
+    .execute(&state.pool)
+    .await
+    .expect("insert running session");
+
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{company_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Once the session settles, the same request goes through.
+    sqlx::query("UPDATE agent_task_sessions SET status = 'completed' WHERE id = 'sess-live'")
+        .execute(&state.pool)
+        .await
+        .expect("settle session");
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{company_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// The company's corner of the data dir goes with it: the ROADMAP names the
+/// wound -- cleaning up used to mean surgery on the volume.
+#[tokio::test]
+async fn deleting_a_company_sweeps_its_directory() {
+    let data_dir =
+        std::env::temp_dir().join(format!("overmind-del-{}", uuid::Uuid::now_v7().simple()));
+    let state = overmind_server::init_with(
+        "sqlite::memory:",
+        overmind_server::Config {
+            data_dir: data_dir.clone(),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init");
+    let app = overmind_server::app(state);
+
+    let (_, company) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Dusty" })),
+    )
+    .await;
+    let company_id = company["id"].as_str().expect("company id").to_string();
+
+    // Whether or not a brain was provisioned, the corner may hold files.
+    let corner = data_dir.join("companies").join(&company_id);
+    std::fs::create_dir_all(corner.join("brain")).expect("lay a corner");
+
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("/api/companies/{company_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !corner.exists(),
+        "the company's directory should be swept: {corner:?}"
+    );
+}

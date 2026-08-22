@@ -330,6 +330,10 @@ pub mod event_kind {
     /// company without anyone being at the keyboard.
     pub const TOKEN_ISSUED: &str = "company.token_issued";
     pub const TOKEN_REVOKED: &str = "company.token_revoked";
+    /// A company was deleted (ADR-0034). The one company event that outlives
+    /// its subject: every other event for this id now points at nothing, and
+    /// this row is what says that is deliberate rather than corruption.
+    pub const COMPANY_DELETED: &str = "company.deleted";
 }
 
 #[cfg(test)]
