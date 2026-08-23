@@ -74,5 +74,13 @@ M33 reaches you and the two friends on your tailnet. Reaching *more* people — 
 - **Native Linux and Windows** — the image is the path and CI tests it; native builds would prove a port we are not doing.
 - **A plugin system, role templates from a marketplace** — icebox; not before a second person has asked.
 
+## Small debts from the first live walk (23 Aug 2026)
+
+Found while the owner drove the Casa San Vito company; each is small, none is urgent, all are real:
+
+- **Characterization is barely editable after hire.** Tools got their endpoint and chips (ADR-0036); `multimodal` did not — a modeler hired without it cannot be handed a sketch until someone edits the database. The right shape is one `POST /agents/{id}/traits` taking a validated `TraitsPatch` (revision `patch`, same rules as hire), and the org chart's edit row growing the few fields that matter: multimodal, autonomy, model.
+- **Duplicate attachments read twice.** The same file uploaded twice to a thread is listed twice ("BozzaCasa.jpeg, BozzaCasa.jpeg") and copied over itself in the run dir. Dedup by (filename, size) at listing time, or say "×2".
+- **A manual board move to *in progress* runs nobody.** The transition is legal but inert — either offer the start when the column changes, or say plainly that starting lives on the task.
+
 ## How this file is used
 Pick the top milestone, write its ADR if it changes a boundary or a contract, open it in the roadmap as `in-progress`, close it the way every milestone was closed — tests, a live walk, the owner's word — and come back here to take the next one. Frictions from use jump the queue.
