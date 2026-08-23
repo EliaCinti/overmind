@@ -634,9 +634,11 @@ async fn run_agent_turn(
         .filter(|b| !b.is_empty())
         .map(|b| format!("\nYour brief: {b}"))
         .unwrap_or_default();
+    // What this agent holds (ADR-0036), said in its own prompt.
+    let tools_line = crate::runner::tools_line(state, &crate::runner::trait_tools(&traits));
 
     let prompt = format!(
-        "{persona}{brief_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
+        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -967,10 +969,27 @@ async fn spawn_adapter(
     crate::sandbox::hand_over(&state.config, cwd)
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot hand the scratch dir to the agent: {e}")))?;
+    // The tools this agent holds reach it in chat too (ADR-0036): granted
+    // servers only, no memory endpoint -- a turn has no session. The file is
+    // handed to the agent's uid like a run directory is, and lives exactly
+    // as long as this binding.
+    let turn_tools = crate::runner::trait_tools(traits);
+    let mcp = crate::runner::AgentMcpConfig::write_for_turn(
+        state,
+        &format!("turn-{}", uuid::Uuid::new_v4().simple()),
+        &turn_tools,
+    );
+    if let Some(m) = &mcp
+        && let Err(e) = crate::sandbox::hand_over(&state.config, &m.path).await
+    {
+        return Err(CeoError::Invalid(format!(
+            "cannot hand the tools config to the agent: {e}"
+        )));
+    }
     let agent_cmd = crate::runner::agent_command(
         state,
         crate::sandbox::caged(&state.config, &cage),
-        None,
+        mcp.as_ref().map(|m| m.path.as_path()),
         ceiling_cents,
     );
     let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);

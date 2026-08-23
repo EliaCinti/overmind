@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Bot, ChevronRight, Sparkles } from "lucide-react";
 import type {
@@ -9,6 +9,7 @@ import type {
   Domain,
   Model,
   ReviewStrictness,
+  Tool,
 } from "../lib/api";
 import { api } from "../lib/api";
 import { Dialog } from "./ui/dialog";
@@ -82,6 +83,12 @@ export function HireAgentDialog({
   const [brief, setBrief] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The operator's tool registry (ADR-0036), asked for when the dialog opens:
+  // empty is the ordinary case, and then the field simply is not there.
+  const [tools, setTools] = useState<Tool[]>([]);
+  useEffect(() => {
+    if (open) api.listTools().then(setTools).catch(() => setTools([]));
+  }, [open]);
 
   const reset = () => {
     setLevel("pick");
@@ -345,6 +352,35 @@ export function HireAgentDialog({
                     {t("hire.multimodal")}
                   </Chip>
                 </Field>
+
+                {/* Tools (ADR-0036): what the operator declared, granted per
+                    agent. The field is absent when nothing is declared, so a
+                    box with no tools never promises one. */}
+                {tools.length > 0 && (
+                  <Field label={t("hire.tools")} hint={t("hire.toolsHint")}>
+                    <div className="flex flex-wrap gap-2">
+                      {tools.map((tool) => {
+                        const held = (traits.tools ?? []).includes(tool.name);
+                        return (
+                          <Chip
+                            key={tool.name}
+                            active={held}
+                            onClick={() =>
+                              setTraits({
+                                ...traits,
+                                tools: held
+                                  ? (traits.tools ?? []).filter((x) => x !== tool.name)
+                                  : [...(traits.tools ?? []), tool.name],
+                              })
+                            }
+                          >
+                            <span title={tool.description ?? tool.command}>{tool.name}</span>
+                          </Chip>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                )}
               </>
             ) : (
               <Field label={t("hire.brief")} hint={t("hire.briefHint")}>
@@ -447,6 +483,8 @@ function LivePreview({
         <span className="mono">{formatCents(traits.monthly_budget_cents)}</span>
         {t("hire.previewPerMonth")}
         <span className="mono">{traits.model}</span>.{traits.multimodal && t("hire.previewLooks")}
+        {(traits.tools ?? []).length > 0 &&
+          t("hire.previewTools", { tools: (traits.tools ?? []).join(", ") })}
         {hasBrief && t("hire.previewBrief")}
       </p>
     </div>

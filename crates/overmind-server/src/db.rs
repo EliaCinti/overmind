@@ -274,6 +274,13 @@ pub struct Config {
     /// Override for the agent adapter command (`OVERMIND_AGENT_CMD`).
     /// `None` uses the default Claude Code CLI invocation.
     pub agent_cmd: Option<String>,
+    /// The tools an agent *may* be granted (ADR-0036): MCP servers declared
+    /// by whoever runs the box, in the CLI's own `{"mcpServers": {...}}`
+    /// shape, read once from the file `OVERMIND_AGENT_TOOLS` names. A tool is
+    /// a command the server will spawn, which is what makes it the
+    /// operator's to declare -- like `OVERMIND_AGENT_CMD` and
+    /// `OVERMIND_MEMORY_CMD`. Granting is per agent, as a trait.
+    pub agent_tools: AgentTools,
     /// Where worktrees and other runtime data live (`OVERMIND_DATA_DIR`).
     pub data_dir: PathBuf,
     /// Scheduler tick interval (`OVERMIND_HEARTBEAT_SECS`).
@@ -341,11 +348,80 @@ pub struct Config {
     pub cookie_secure: bool,
 }
 
+/// The operator's tool registry (ADR-0036): name -> the MCP server definition
+/// exactly as the CLI wants it, plus a one-line description of our own for
+/// the interface and the prompt. Empty is the ordinary case.
+#[derive(Clone, Debug, Default)]
+pub struct AgentTools {
+    pub servers: std::collections::BTreeMap<String, serde_json::Value>,
+    pub descriptions: std::collections::BTreeMap<String, String>,
+}
+
+impl AgentTools {
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
+    pub fn contains(&self, name: &str) -> bool {
+        self.servers.contains_key(name)
+    }
+    pub fn description(&self, name: &str) -> Option<&str> {
+        self.descriptions.get(name).map(String::as_str)
+    }
+}
+
+impl Config {
+    /// Read the registry from a file in the CLI's `{"mcpServers": {...}}`
+    /// shape, with our optional top-level `"descriptions"`. A file that
+    /// cannot be read or parsed yields an empty registry **and says so on
+    /// stderr**: a misnamed path must not turn into "no tools" in silence.
+    pub fn load_agent_tools(path: &std::path::Path) -> AgentTools {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "OVERMIND_AGENT_TOOLS: cannot read {} ({e}); no tools declared",
+                    path.display()
+                );
+                return AgentTools::default();
+            }
+        };
+        let v: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "OVERMIND_AGENT_TOOLS: {} is not valid JSON ({e}); no tools declared",
+                    path.display()
+                );
+                return AgentTools::default();
+            }
+        };
+        let servers = v
+            .get("mcpServers")
+            .and_then(|s| s.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let descriptions = v
+            .get("descriptions")
+            .and_then(|s| s.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|d| (k.clone(), d.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        AgentTools {
+            servers,
+            descriptions,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             self_url: "http://127.0.0.1:7070".to_string(),
             agent_cmd: None,
+            agent_tools: AgentTools::default(),
             data_dir: PathBuf::from("./overmind-data"),
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
@@ -374,6 +450,10 @@ impl Config {
                 std::env::var("OVERMIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7070".to_string())
             ),
             agent_cmd: std::env::var("OVERMIND_AGENT_CMD").ok(),
+            agent_tools: std::env::var("OVERMIND_AGENT_TOOLS")
+                .ok()
+                .map(|p| Config::load_agent_tools(std::path::Path::new(&p)))
+                .unwrap_or_default(),
             data_dir: std::env::var("OVERMIND_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.data_dir),
@@ -627,6 +707,8 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
         model: crate::model::default_model().id.to_string(),
         // A function is not visual by itself; the domain decides that.
         multimodal: false,
+        // Tools are granted to a person's agent, never to a function (ADR-0036).
+        tools: Vec::new(),
     };
     vec![
         (
@@ -661,6 +743,7 @@ fn builtin_archetypes() -> Vec<(&'static str, &'static str, &'static str, AgentT
                 model: ceo_model().to_string(),
                 // The leader reads whatever you bring to the conversation.
                 multimodal: true,
+                tools: Vec::new(),
             },
         ),
         (

@@ -158,6 +158,13 @@ pub struct AgentTraits {
     /// traits enter the system — an id the catalog does not name is refused at
     /// the boundary, not stored and handed to a prompt later.
     pub model: String,
+    /// The tools this agent holds (ADR-0036): names from the operator's
+    /// registry, written into the run's own MCP config. *Enforced*, unlike
+    /// declared permissions: the server writes the server definition into
+    /// the per-run file or it does not. Validated at every entry point
+    /// against the registry. Absent in rows written before ADR-0036.
+    #[serde(default)]
+    pub tools: Vec<String>,
     /// Whether the agent is characterized to work with visual material —
     /// images, screenshots, diagrams, video stills (ADR-0021).
     ///
@@ -188,6 +195,7 @@ pub struct TraitsPatch {
     pub monthly_budget_cents: Option<i64>,
     pub model: Option<String>,
     pub multimodal: Option<bool>,
+    pub tools: Option<Vec<String>>,
 }
 
 /// What a domain contributes on top of a function's defaults (ADR-0021).
@@ -237,6 +245,9 @@ impl AgentTraits {
         }
         if let Some(v) = patch.multimodal {
             self.multimodal = v;
+        }
+        if let Some(v) = patch.tools {
+            self.tools = v;
         }
         self
     }

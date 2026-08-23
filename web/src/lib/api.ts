@@ -19,6 +19,9 @@ export interface AgentTraits {
   model: string;
   /** Characterized to work with visual material (ADR-0021). */
   multimodal: boolean;
+  /** The tools this agent holds, by name from the operator's registry (ADR-0036).
+   *  Absent on agents hired before it existed. */
+  tools?: string[];
 }
 
 /** The *function* an agent performs (ADR-0021). */
@@ -53,6 +56,14 @@ export interface Model {
   id: string;
   display_name: string;
   vision: boolean;
+}
+
+/** A tool the operator declared and an agent may be granted (ADR-0036):
+ *  an MCP server by name, with the command it runs and a one-line description. */
+export interface Tool {
+  name: string;
+  command: string;
+  description: string | null;
 }
 
 export type LanguageCode = "en" | "it";
@@ -548,6 +559,8 @@ export const api = {
     req<{ archetypes: Archetype[] }>("GET", "/archetypes").then((r) => r.archetypes),
   listDomains: () => req<{ domains: Domain[] }>("GET", "/domains").then((r) => r.domains),
   listModels: () => req<{ models: Model[] }>("GET", "/models").then((r) => r.models),
+  /** The operator's tool registry (ADR-0036). Empty is the ordinary case. */
+  listTools: () => req<{ tools: Tool[] }>("GET", "/tools").then((r) => r.tools),
 
   listAgents: (companyId: string) =>
     req<{ agents: Agent[] }>("GET", `/companies/${companyId}/agents`).then((r) => r.agents),

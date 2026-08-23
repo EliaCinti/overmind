@@ -104,6 +104,9 @@ fn api_router() -> Router<AppState> {
         .route("/archetypes", get(list_archetypes))
         .route("/domains", get(list_domains))
         .route("/models", get(list_models))
+        // The tools an agent may be granted (ADR-0036): what the operator
+        // declared, listed so the interface can offer exactly that.
+        .route("/tools", get(list_tools))
         .route("/companies/{company_id}/language", post(set_language))
         // Membership (M25): any member brings in a colleague by name.
         .route(
@@ -606,6 +609,7 @@ async fn create_company(
     // everyone yourself.
     let ceo = hire(
         &mut tx,
+        &state.config.agent_tools,
         &id,
         &HireAgent {
             name: crate::db::random_ceo_name().to_string(),
@@ -974,10 +978,42 @@ async fn list_models() -> Json<Value> {
     Json(json!({ "models": crate::model::catalog() }))
 }
 
+/// The operator's tool registry, by name (ADR-0036): the name, the command
+/// it runs (so a person can tell what they are granting), and our one-line
+/// description. Empty is the ordinary case and not an error.
+async fn list_tools(State(state): State<AppState>) -> Json<Value> {
+    let reg = &state.config.agent_tools;
+    let tools: Vec<Value> = reg
+        .servers
+        .iter()
+        .map(|(name, def)| {
+            let command = def
+                .get("command")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| def.get("url").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_default();
+            json!({
+                "name": name,
+                "command": command,
+                "description": reg.description(name),
+            })
+        })
+        .collect();
+    Json(json!({ "tools": tools }))
+}
+
 /// Refuse a characterization the server cannot honour, at the boundary where it
 /// enters rather than at the prompt where it would finally break — the rule
 /// M16 already applies to language codes (ADR-0021).
-fn validate_traits(traits: &AgentTraits) -> Result<(), ApiError> {
+fn validate_traits(tools: &crate::db::AgentTools, traits: &AgentTraits) -> Result<(), ApiError> {
+    // A tool grant names something the operator declared, or it is refused
+    // here (ADR-0036) -- never stored and handed to a run later.
+    if let Some(unknown) = traits.tools.iter().find(|t| !tools.contains(t)) {
+        return Err(ApiError::Invalid(format!(
+            "unknown tool `{unknown}`: not declared in OVERMIND_AGENT_TOOLS"
+        )));
+    }
     if !crate::model::is_known(&traits.model) {
         return Err(ApiError::Invalid(format!(
             "unknown model `{}`",
@@ -1028,7 +1064,7 @@ async fn hire_agent(
     if company.is_none() {
         return Err(ApiError::NotFound("company"));
     }
-    let hired = hire(&mut tx, &company_id, &req).await?;
+    let hired = hire(&mut tx, &state.config.agent_tools, &company_id, &req).await?;
     tx.commit().await?;
     state.notify(&company_id);
     Ok((StatusCode::CREATED, Json(hired)))
@@ -1040,6 +1076,7 @@ async fn hire_agent(
 /// archetype defaults + patch, first config revision, audit event.
 pub(crate) async fn hire(
     tx: &mut sqlx::SqliteConnection,
+    tools: &crate::db::AgentTools,
     company_id: &str,
     req: &HireAgent,
 ) -> Result<Value, ApiError> {
@@ -1075,7 +1112,7 @@ pub(crate) async fn hire(
     let traits = defaults
         .with_domain(&domain_patch)
         .apply(req.traits.clone());
-    validate_traits(&traits)?;
+    validate_traits(tools, &traits)?;
     let traits_json = serde_json::to_string(&traits)?;
 
     // A manager, if given, must be an existing agent in this company.

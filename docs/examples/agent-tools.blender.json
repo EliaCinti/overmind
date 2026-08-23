@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "blender": {
+      "command": "uvx",
+      "args": ["blender-mcp"]
+    }
+  },
+  "descriptions": {
+    "blender": "Blender, via BlenderMCP: inspect the open scene, run Python in it, take viewport screenshots. One agent at a time -- Blender has one socket."
+  }
+}
