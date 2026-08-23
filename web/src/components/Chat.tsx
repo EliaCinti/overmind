@@ -36,6 +36,17 @@ export function Chat({
   const [pending, setPending] = useState(false); // agent turn in flight
   const [activeId, setActiveId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // The composer grows with what is being written — one line at rest, up to
+  // about eight, then it scrolls. A pasted brief used to sit in a single
+  // row you could not read back; measured on the owner's first message to
+  // his CEO.
+  const draftRef = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = draftRef.current;
+    if (!el) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [draft]);
 
   // Who you can talk to; the CEO is the org leader (reports to the human).
   const candidates = useMemo(() => agents.filter((a) => a.status === "active"), [agents]);
@@ -241,6 +252,7 @@ export function Chat({
             <Paperclip className="h-4.5 w-4.5" />
           </Button>
           <textarea
+            ref={draftRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -257,7 +269,8 @@ export function Chat({
                 : t("chat.placeholder", { name: agent?.name ?? t("chat.theAgent") })
             }
             className={cn(
-              "max-h-40 min-h-11 flex-1 resize-none rounded-3xl border border-input bg-background px-4 py-2.5 text-sm",
+              "min-h-11 flex-1 resize-none overflow-y-auto border border-input bg-background px-4 py-2.5 text-sm leading-relaxed",
+              draft.includes("\n") || draft.length > 80 ? "rounded-2xl" : "rounded-3xl",
               "placeholder:text-muted-foreground/60 transition-all duration-200",
               "focus-visible:outline-none focus-visible:border-primary",
               "focus-visible:shadow-[0_0_0_4px_var(--ring-soft,rgba(124,92,255,0.15))]",
