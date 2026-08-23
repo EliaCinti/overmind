@@ -504,9 +504,12 @@ async fn run_agent_turn(
     let is_leader = reports_to.is_none();
     let role = title.clone().unwrap_or_else(|| slug.clone());
 
-    // The rest of the team (for delegation / assignment).
-    let team: Vec<(String, Option<String>, String)> = sqlx::query_as(
-        "SELECT a.name, a.title, ar.slug FROM agents a
+    // The rest of the team (for delegation / assignment) — and what each one
+    // holds (ADR-0038): a CEO that does not know a teammate has Blender plans
+    // around Blender, declares the work impossible, and writes a script for
+    // the human to paste. Measured on the owner's first brief.
+    let team: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT a.name, a.title, ar.slug, a.traits FROM agents a
          JOIN archetypes ar ON ar.id = a.archetype_id
          WHERE a.company_id = ? AND a.status = 'active' AND a.id != ?",
     )
@@ -518,9 +521,33 @@ async fn run_agent_turn(
         "(no teammates hired yet)".to_string()
     } else {
         team.iter()
-            .map(|(n, t, s)| format!("- {n} ({})", t.clone().unwrap_or_else(|| s.clone())))
+            .map(|(n, t, s, traits)| {
+                let held = crate::runner::trait_tools(traits);
+                let tools = if held.is_empty() {
+                    String::new()
+                } else {
+                    let named = held
+                        .iter()
+                        .map(|name| match state.config.agent_tools.description(name) {
+                            Some(d) => format!("{name} — {d}"),
+                            None => name.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    format!(" — holds the tools: {named}")
+                };
+                format!("- {n} ({}){tools}", t.clone().unwrap_or_else(|| s.clone()))
+            })
             .collect::<Vec<_>>()
             .join("\n")
+    };
+    // Whether `code` tasks can exist here at all: a code task runs in a
+    // repository, and a company without one cannot start it (ADR-0038).
+    let has_repo = company_has_repo(state, company_id).await?;
+    let kinds_line = if has_repo {
+        "Use \"knowledge\" for research, documents and anything done through a tool an agent holds; \"code\" only for changes to this company's repository."
+    } else {
+        "This company has NO repository connected, so every task is \"knowledge\" — research, documents, and anything done through a tool an agent holds (a tool is not a repository). Never plan \"code\" here."
     };
 
     let history: Vec<(String, String)> = sqlx::query_as(
@@ -638,7 +665,7 @@ async fn run_agent_turn(
     let tools_line = crate::runner::tools_line(state, &crate::runner::trait_tools(&traits));
 
     let prompt = format!(
-        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\nUse \"knowledge\" for research/documents and \"code\" for software changes. Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
+        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\n{kinds_line} Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -747,6 +774,9 @@ async fn run_agent_turn(
     } else {
         crate::runner::default_goal(state, company_id).await
     };
+    let has_repo = company_has_repo(state, company_id).await?;
+    // The tasks opened with an assignee, for the start offered below.
+    let mut opened_for: Vec<(String, String)> = Vec::new();
 
     let mut tx = state.write_tx().await?;
     let message_id = new_id();
@@ -778,6 +808,16 @@ async fn run_agent_turn(
 
     for (title, description, kind, assignee) in &resolved {
         let task_id = new_id();
+        // A `code` task needs a repository. Planned for a company that has
+        // none, it would sit in `todo` forever — no human can start it either.
+        // The work was a knowledge task anyway (a tool is not a repository),
+        // so open it as one and say so in the audit (ADR-0038).
+        let planned_kind: &str = kind;
+        let kind = if planned_kind == "code" && !has_repo {
+            "knowledge"
+        } else {
+            planned_kind
+        };
         sqlx::query(
             "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, assignee_agent_id, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?)",
@@ -800,13 +840,26 @@ async fn run_agent_turn(
             event_kind::TASK_CREATED,
             &json!({
                 "title": title, "execution_kind": kind, "via": name,
+                "planned_kind": planned_kind,
                 "assignee_agent_id": assignee, "conversation_id": conversation_id,
             }),
         )
         .await?;
+        if let Some(assignee) = assignee.as_deref() {
+            opened_for.push((task_id.clone(), assignee.to_string()));
+        }
     }
     tx.commit().await?;
     state.notify(company_id);
+
+    // A planned task goes to work the way its agent's autonomy says
+    // (ADR-0038): within budget it starts now; with approval it asks you, in
+    // the inbox, the moment it is opened; propose-only waits for a human.
+    for (task_id, assignee) in opened_for {
+        if let Err(e) = crate::runner::offer_start(state, &task_id, &assignee).await {
+            eprintln!("could not offer the start of task {task_id}: {e}");
+        }
+    }
 
     // Cross-impact: a specialist can escalate to the leader (its own thread).
     if !is_leader
@@ -1084,6 +1137,19 @@ pub(crate) fn agent_text(output: &str) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| output.to_string())
+}
+
+/// Does this company have a repository a `code` task could run in?
+pub(crate) async fn company_has_repo(state: &AppState, company_id: &str) -> Result<bool, CeoError> {
+    let n: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM project_workspaces w
+         JOIN projects p ON p.id = w.project_id
+         WHERE p.company_id = ? AND w.is_primary = 1",
+    )
+    .bind(company_id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(n.0 > 0)
 }
 
 /// Find the last JSON object in `text` that satisfies `wanted`.
