@@ -299,6 +299,123 @@ pub(crate) async fn default_goal(state: &AppState, company_id: &str) -> Option<S
         .flatten()
 }
 
+/// File the approval that starts a task, and tell the human (ADR-0020): an
+/// approval nobody sees is an agent stuck waiting forever. Used by the
+/// governance gate and by [`offer_start`] for agents that act with approval.
+async fn file_start_approval(
+    state: &AppState,
+    company_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    title: &str,
+) -> Result<String, RunnerError> {
+    let approval_id = uuid::Uuid::now_v7().to_string();
+    // The summary in the company's language, read before the write
+    // transaction opens (M23, carried).
+    let lang = crate::i18n::company_language(state, company_id).await;
+    let mut tx = state.write_tx().await?;
+    sqlx::query(
+        "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
+         VALUES (?, ?, 'task_start', 'pending', ?, ?, ?)",
+    )
+    .bind(&approval_id)
+    .bind(company_id)
+    .bind(json!({ "task_id": task_id, "agent_id": agent_id }).to_string())
+    .bind(crate::i18n::start_task_summary(&lang, title))
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+    audit::append(
+        &mut tx,
+        Some(company_id),
+        Some(task_id),
+        event_kind::APPROVAL_REQUESTED,
+        &json!({ "approval_id": approval_id, "agent_id": agent_id, "type": "task_start" }),
+    )
+    .await?;
+    // Reach the human the same way a meeting request does (ADR-0020): an
+    // approval nobody sees is an agent stuck waiting forever.
+    let who: Option<(String,)> = sqlx::query_as("SELECT name FROM agents WHERE id = ?")
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let who = who.map(|(n,)| n).unwrap_or_else(|| "An agent".into());
+    let notification = crate::notify::post(
+        &mut tx,
+        company_id,
+        crate::notify::New {
+            kind: crate::notify::kind::APPROVAL_REQUESTED,
+            title: &format!("{who} wants to start a task"),
+            body: &format!(
+                "Task: {title}\n\nThis agent is gated: it starts only once you approve."
+            ),
+            params: serde_json::json!({ "agent": who, "task": title }),
+            agent_id: Some(agent_id),
+            subject: Some(("task", task_id)),
+            approval_id: Some(&approval_id),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(company_id);
+    crate::notify::deliver(state, company_id, &notification);
+    Ok(approval_id)
+}
+
+/// What offering a start did (ADR-0038).
+#[derive(Debug)]
+pub enum Offer {
+    /// The agent acts within budget: the task is running.
+    Started,
+    /// The agent acts with approval: the start sits in the inbox.
+    Asked { approval_id: String },
+    /// The agent only proposes: a human starts it, nobody is asked.
+    Waiting,
+}
+
+/// Send a freshly opened task to work the way its agent's autonomy says
+/// (ADR-0038). Until this existed a task the CEO planned for an agent that
+/// "acts with approval" asked nobody for approval, and sat in `todo` until a
+/// human found the button — measured on the owner's first real brief.
+pub async fn offer_start(
+    state: &AppState,
+    task_id: &str,
+    agent_id: &str,
+) -> Result<Offer, RunnerError> {
+    let agent: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT a.company_id, a.traits, t.title FROM agents a
+         JOIN tasks t ON t.id = ? AND t.company_id = a.company_id
+         WHERE a.id = ?",
+    )
+    .bind(task_id)
+    .bind(agent_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((company_id, traits, title)) = agent else {
+        return Err(RunnerError::NotFound("agent"));
+    };
+    let autonomy = serde_json::from_str::<Value>(&traits)
+        .ok()
+        .and_then(|v| {
+            v.get("autonomy")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    match autonomy.as_str() {
+        "act_within_budget" => match start_task(state, task_id, agent_id, false).await? {
+            StartResult::Started(_) => Ok(Offer::Started),
+            StartResult::ApprovalRequired { approval_id } => Ok(Offer::Asked { approval_id }),
+        },
+        "act_with_approval" => {
+            let approval_id =
+                file_start_approval(state, &company_id, task_id, agent_id, &title).await?;
+            Ok(Offer::Asked { approval_id })
+        }
+        _ => Ok(Offer::Waiting),
+    }
+}
+
 pub async fn start_task(
     state: &AppState,
     task_id: &str,
@@ -423,56 +540,8 @@ pub async fn start_task(
 
     // Governance gate: file an approval and launch nothing.
     if requires_approval != 0 && !bypass_approval {
-        let approval_id = uuid::Uuid::now_v7().to_string();
-        // The summary in the company's language, read before the write
-        // transaction opens (M23, carried).
-        let lang = crate::i18n::company_language(state, &company_id).await;
-        let mut tx = state.write_tx().await?;
-        sqlx::query(
-            "INSERT INTO approvals (id, company_id, type, status, payload, summary, created_at)
-             VALUES (?, ?, 'task_start', 'pending', ?, ?, ?)",
-        )
-        .bind(&approval_id)
-        .bind(&company_id)
-        .bind(json!({ "task_id": task_id, "agent_id": agent_id }).to_string())
-        .bind(crate::i18n::start_task_summary(&lang, &title))
-        .bind(now())
-        .execute(&mut *tx)
-        .await?;
-        audit::append(
-            &mut tx,
-            Some(&company_id),
-            Some(task_id),
-            event_kind::APPROVAL_REQUESTED,
-            &json!({ "approval_id": approval_id, "agent_id": agent_id, "type": "task_start" }),
-        )
-        .await?;
-        // Reach the human the same way a meeting request does (ADR-0020): an
-        // approval nobody sees is an agent stuck waiting forever.
-        let who: Option<(String,)> = sqlx::query_as("SELECT name FROM agents WHERE id = ?")
-            .bind(agent_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let who = who.map(|(n,)| n).unwrap_or_else(|| "An agent".into());
-        let notification = crate::notify::post(
-            &mut tx,
-            &company_id,
-            crate::notify::New {
-                kind: crate::notify::kind::APPROVAL_REQUESTED,
-                title: &format!("{who} wants to start a task"),
-                body: &format!(
-                    "Task: {title}\n\nThis agent is gated: it starts only once you approve."
-                ),
-                params: serde_json::json!({ "agent": who, "task": title }),
-                agent_id: Some(agent_id),
-                subject: Some(("task", task_id)),
-                approval_id: Some(&approval_id),
-            },
-        )
-        .await?;
-        tx.commit().await?;
-        state.notify(&company_id);
-        crate::notify::deliver(state, &company_id, &notification);
+        let approval_id =
+            file_start_approval(state, &company_id, task_id, agent_id, &title).await?;
         return Ok(StartResult::ApprovalRequired { approval_id });
     }
 

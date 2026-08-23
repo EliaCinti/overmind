@@ -9,6 +9,7 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 - **Who pays is asked (M29, ADR-0037).** When a key is overriding a claude.ai login, every page offers *Let the plan pay*; the server keeps `ANTHROPIC_API_KEY` out of the agents' environment and asks the CLI again — refused with the reason when the key would still pay. The choice survives restarts and is undone from the org chart; `/api/health` carries `pay_with`.
 
 ### Fixed
+- **From the CEO's plan to a running task (ADR-0038).** The CEO is told what each teammate holds (so Blender in one agent's hand is planned with, not around); a `code` task planned for a company without a repository is opened as `knowledge` (audited); and a planned task is offered by its agent's autonomy — started within budget, filed as a start approval in the inbox with approval, left for a human when propose-only. Before, a planned task for an *acts with approval* agent asked nobody and sat in `todo`.
 - **A plan the CEO wraps in a ```json fence, or pretty-prints over several lines, is found.** The parser read one line at a time; on the owner's first real brief the CEO answered with a sentence and a fenced, multi-line plan — shown raw in the chat, and the task it had planned was never opened. A balanced-brace scan (strings and escapes respected) now follows the line scan.
 
 ### Changed
