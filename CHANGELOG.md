@@ -8,6 +8,9 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 - **Tools in the agent's hand (M28, ADR-0036).** `OVERMIND_AGENT_TOOLS` declares MCP servers in the CLI's own shape; a tool is granted per agent as a structured, enforced trait, written into the run's and the turn's MCP config, offered in the hire dialog, listed at `GET /api/tools`. A tool can also be granted to — or taken from — an agent already hired (`POST /api/agents/{id}/tools`, the org chart's edit row), so the CEO can hire the team and the owner hands the one tool afterwards. First use: one modeler driving Blender through BlenderMCP (`docs/examples/agent-tools.blender.json`).
 - **Who pays is asked (M29, ADR-0037).** When a key is overriding a claude.ai login, every page offers *Let the plan pay*; the server keeps `ANTHROPIC_API_KEY` out of the agents' environment and asks the CLI again — refused with the reason when the key would still pay. The choice survives restarts and is undone from the org chart; `/api/health` carries `pay_with`.
 
+### Fixed
+- **A plan the CEO wraps in a ```json fence, or pretty-prints over several lines, is found.** The parser read one line at a time; on the owner's first real brief the CEO answered with a sentence and a fenced, multi-line plan — shown raw in the chat, and the task it had planned was never opened. A balanced-brace scan (strings and escapes respected) now follows the line scan.
+
 ### Changed
 - **Agents' words render as the Markdown they are written in** — chat replies, meeting turns and decisions, what a task's session said: headings, lists, tables, code; raw HTML is never interpreted, links open in a new tab.
 - **The chat composer grows with the draft** — one line at rest, about eight at most, then it scrolls; it returns to one line when the message is sent (`field-sizing: content` where the browser has it, measured elsewhere).

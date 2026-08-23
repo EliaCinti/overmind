@@ -1107,6 +1107,62 @@ pub(crate) fn find_json_object(
                 return Some(v);
             }
         }
+        // Not one line. A model under a long brief pretty-prints the plan, or
+        // wraps it in a ```json fence (measured 23 Aug 2026, the first real
+        // brief): walk every `{` that opens a line and take the balanced
+        // object from there — strings and escapes respected, so a brace
+        // inside a task description does not end the object early.
+        let mut candidates: Vec<Value> = Vec::new();
+        for (at, _) in haystack.match_indices('{') {
+            let opens_line = haystack[..at]
+                .rfind('\n')
+                .map_or(at == 0, |nl| haystack[nl + 1..at].trim().is_empty())
+                || at == 0;
+            if !opens_line {
+                continue;
+            }
+            if let Some(end) = balanced_object_end(&haystack[at..])
+                && let Ok(v) = serde_json::from_str::<Value>(&haystack[at..at + end])
+                && wanted(&v)
+            {
+                candidates.push(v);
+            }
+        }
+        if let Some(v) = candidates.pop() {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// The byte length of the JSON object that starts at `text[0] == '{'`, if its
+/// braces balance — string contents and escapes are skipped, not counted.
+fn balanced_object_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
     }
     None
 }
@@ -1160,6 +1216,25 @@ mod tests {
         );
         // It proposed a hire in the same turn, which was silently dropped too.
         assert!(plan.get("team").is_some(), "{plan}");
+    }
+
+    /// Measured on the owner's first real brief (23 Aug 2026): the CEO wrote
+    /// a sentence, then the plan inside a ```json fence, pretty-printed over
+    /// several lines. The prompt asks for one line; a model under a long
+    /// brief does not always comply, and a plan that is there must be found —
+    /// the alternative was a raw JSON dump in the chat and no task opened.
+    #[test]
+    fn a_plan_in_a_fenced_multiline_block_is_found() {
+        let said = "Lo schizzo è arrivato e l'ho letto. Apro il task.\n\n```json\n{\"reply\": \"Task creato e assegnato a **Tobia**.\",\n\"tasks\": [{\"title\": \"Pianta della casa\", \"description\": \"Costruisci i volumi.\\n\\nUna stanza = un box {con parentesi} e \\\"virgolette\\\".\", \"execution_kind\": \"code\", \"assignee\": \"Tobia\"}]}\n```";
+        let envelope =
+            serde_json::json!({ "type": "result", "result": said, "total_cost_usd": 0.1 })
+                .to_string();
+        let plan = plan_json(&envelope).expect("the fenced plan is found");
+        assert_eq!(plan["reply"], "Task creato e assegnato a **Tobia**.");
+        assert_eq!(plan["tasks"][0]["assignee"], "Tobia");
+        // Raw (no envelope) and without a fence, pretty-printed: found too.
+        let bare = "Ecco.\n{\n  \"reply\": \"ok\",\n  \"tasks\": []\n}\n";
+        assert_eq!(plan_json(bare).expect("found")["reply"], "ok");
     }
 
     #[test]
