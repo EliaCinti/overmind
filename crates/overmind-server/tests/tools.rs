@@ -356,3 +356,62 @@ async fn a_tool_can_be_granted_to_an_agent_already_hired() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["traits"]["tools"], json!([]));
 }
+
+/// An exclusive tool fits one hand (ADR-0036, hardened on the owner's ask):
+/// the registry may declare `"exclusive": ["probe"]`, and the second grant —
+/// at hire or after — is refused with the holder's name. Blender has one
+/// socket; two agents on it would be two hands on one mouse.
+#[tokio::test]
+async fn an_exclusive_tool_fits_one_hand() {
+    let env = setup(
+        Some(json!({
+            "mcpServers": { "probe": { "command": "true", "args": [] } },
+            "descriptions": { "probe": "a probe that answers nothing" },
+            "exclusive": ["probe"]
+        })),
+        "#!/bin/sh\ntrue\n",
+    )
+    .await;
+    let (s, a) = hire(&env, "Tobia", json!(["probe"])).await;
+    assert_eq!(s, StatusCode::CREATED, "{a}");
+    let tobia = a["id"].as_str().expect("id").to_string();
+
+    // A second hire holding it is refused, and the refusal names the holder.
+    let (s, v) = hire(&env, "Rivale", json!(["probe"])).await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or("").contains("Tobia"),
+        "the refusal names who holds it: {v}"
+    );
+
+    // Granting it after the fact is refused the same way.
+    let (s, b) = hire(&env, "Secondo", json!([])).await;
+    assert_eq!(s, StatusCode::CREATED, "{b}");
+    let secondo = b["id"].as_str().expect("id").to_string();
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{secondo}/tools"),
+        Some(json!({ "tools": ["probe"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+
+    // The hand can change: taken from Tobia, it fits Secondo.
+    let (s, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{tobia}/tools"),
+        Some(json!({ "tools": [] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{secondo}/tools"),
+        Some(json!({ "tools": ["probe"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}

@@ -266,6 +266,24 @@ OVERMIND_MEMORY_CMD="wadachi" cargo run
 
 > **Do not set `BRAIN_DIR` inside the command.** `OVERMIND_MEMORY_CMD="BRAIN_DIR=/my/brain wadachi"` runs through a shell, so that assignment wins over the one Overmind sets — every company would silently share `/my/brain`. If sharing one brain is what you want, say so with `OVERMIND_MANAGED_BRAIN=off`, which is visible and does not depend on shell precedence.
 
+### Tools in the agent's hand
+
+Agents can hold **MCP tools** beyond Overmind's own — the first was Blender, driven through [BlenderMCP](https://github.com/ahujasid/blender-mcp) by a single modeler agent while the rest of the company analyses and proposes ([ADR-0036](docs/adr/0036-tools-in-the-agents-hand.md)). Two roles, deliberately separate:
+
+- **The operator declares** what exists on this machine — a JSON file named by `OVERMIND_AGENT_TOOLS`, in the CLI's own `{"mcpServers": …}` shape plus two Overmind keys ([full example](docs/examples/agent-tools.blender.json)):
+
+```json
+{
+  "mcpServers": { "blender": { "command": "uvx", "args": ["blender-mcp"] } },
+  "exclusive": ["blender"],
+  "descriptions": { "blender": "Blender, via BlenderMCP: inspect the open scene, run Python in it, take viewport screenshots." }
+}
+```
+
+- **The owner grants** per agent — a *Tools* field in the hire dialog, the same chips on the agent's card afterwards (`POST /api/agents/{id}/tools`). An agent holds exactly what it was granted, written into its run's own MCP config under `--strict-mcp-config`: never something it found. A tool in `"exclusive"` fits **one hand at a time** — granting it to a second agent is refused with the holder's name (Blender has one socket).
+
+The tool's *process* is spawned where the CLI runs; what it talks to must be up: for Blender, the application open with the BlenderMCP addon serving on its port, and `uv` installed (`brew install uv`) with its cache allowed through the cage (`OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv:$HOME/.local/share/uv"`).
+
 ### Connect your editor (optional)
 
 Overmind speaks MCP, so a Claude Code session — or anything else that does — can file work into a company and read its board ([ADR-0028](docs/adr/0028-overmind-as-an-mcp-server-for-outside-callers.md)).
@@ -301,7 +319,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_DATA_DIR` | Worktrees, brains, artifacts, attachments (default `./overmind-data`) |
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: the Claude Code CLI, `claude -p … --output-format stream-json --verbose`). A custom adapter is never interrogated for how it pays |
 | `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory; the image sets `wadachi`; empty = off deliberately) |
-| `OVERMIND_AGENT_TOOLS` | A file of MCP servers agents *may* be granted, in the CLI's `{"mcpServers": …}` shape — e.g. Blender via BlenderMCP ([example](docs/examples/agent-tools.blender.json)). Declared here by the operator, granted per agent in the hire dialog; an agent holds exactly what it was granted ([ADR-0036](docs/adr/0036-tools-in-the-agents-hand.md)) |
+| `OVERMIND_AGENT_TOOLS` | A file of MCP servers agents *may* be granted, in the CLI's `{"mcpServers": …}` shape — e.g. Blender via BlenderMCP ([example](docs/examples/agent-tools.blender.json)). Declared here by the operator, granted per agent in the hire dialog; an agent holds exactly what it was granted, and an `"exclusive"` tool fits one hand at a time ([ADR-0036](docs/adr/0036-tools-in-the-agents-hand.md)) |
 | `OVERMIND_MEMORY_POOL` | Concurrent memory connections (default `4`) |
 | `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |
 | `OVERMIND_SANDBOX` | `off` empties the whole set of cage mechanisms — agents become read-only (default on) |

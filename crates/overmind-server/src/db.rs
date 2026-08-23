@@ -405,6 +405,11 @@ pub struct Config {
 pub struct AgentTools {
     pub servers: std::collections::BTreeMap<String, serde_json::Value>,
     pub descriptions: std::collections::BTreeMap<String, String>,
+    /// Tools that fit one hand at a time (`"exclusive": ["blender"]` in the
+    /// registry): granting one to a second active agent is refused with the
+    /// holder's name. Blender has one socket; two agents on it would be two
+    /// hands on one mouse.
+    pub exclusive: std::collections::BTreeSet<String>,
 }
 
 impl AgentTools {
@@ -413,6 +418,9 @@ impl AgentTools {
     }
     pub fn contains(&self, name: &str) -> bool {
         self.servers.contains_key(name)
+    }
+    pub fn is_exclusive(&self, name: &str) -> bool {
+        self.exclusive.contains(name)
     }
     pub fn description(&self, name: &str) -> Option<&str> {
         self.descriptions.get(name).map(String::as_str)
@@ -459,9 +467,19 @@ impl Config {
                     .collect()
             })
             .unwrap_or_default();
+        let exclusive = v
+            .get("exclusive")
+            .and_then(|s| s.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         AgentTools {
             servers,
             descriptions,
+            exclusive,
         }
     }
 }

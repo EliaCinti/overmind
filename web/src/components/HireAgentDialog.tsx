@@ -356,6 +356,18 @@ export function HireAgentDialog({
                 {/* Tools (ADR-0036): what the operator declared, granted per
                     agent. The field is absent when nothing is declared, so a
                     box with no tools never promises one. */}
+                {tools.length === 0 && (
+                  <Field label={t("hire.tools")} hint={t("hire.noToolsDeclared")}>
+                    <a
+                      href="https://overmind.eliacinti.dev/wiki/tools"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary underline underline-offset-2 hover:opacity-80"
+                    >
+                      {t("hire.noToolsHow")} →
+                    </a>
+                  </Field>
+                )}
                 {tools.length > 0 && (
                   <Field label={t("hire.tools")} hint={t("hire.toolsHint")}>
                     <div className="flex flex-wrap gap-2">
@@ -374,7 +386,12 @@ export function HireAgentDialog({
                               })
                             }
                           >
-                            <span title={tool.description ?? tool.command}>{tool.name}</span>
+                            <span title={tool.description ?? tool.command}>
+                              {tool.name}
+                              {tool.exclusive && (
+                                <span className="ml-1 opacity-60">· {t("hire.toolExclusive")}</span>
+                              )}
+                            </span>
                           </Chip>
                         );
                       })}
