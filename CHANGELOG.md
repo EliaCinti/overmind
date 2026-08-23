@@ -6,6 +6,7 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ### Added
 - **Tools in the agent's hand (M28, ADR-0036).** `OVERMIND_AGENT_TOOLS` declares MCP servers in the CLI's own shape; a tool is granted per agent as a structured, enforced trait, written into the run's and the turn's MCP config, offered in the hire dialog, listed at `GET /api/tools`. A tool can also be granted to — or taken from — an agent already hired (`POST /api/agents/{id}/tools`, the org chart's edit row), so the CEO can hire the team and the owner hands the one tool afterwards. First use: one modeler driving Blender through BlenderMCP (`docs/examples/agent-tools.blender.json`).
+- **An `"exclusive"` tool fits one hand at a time.** The registry may declare `"exclusive": ["blender"]`; granting such a tool to a second active agent — at hire or after — is refused with the holder's name. The hire dialog marks it, and its empty state now points at how tools are declared.
 - **Who pays is asked (M29, ADR-0037).** When a key is overriding a claude.ai login, every page offers *Let the plan pay*; the server keeps `ANTHROPIC_API_KEY` out of the agents' environment and asks the CLI again — refused with the reason when the key would still pay. The choice survives restarts and is undone from the org chart; `/api/health` carries `pay_with`.
 
 ### Fixed

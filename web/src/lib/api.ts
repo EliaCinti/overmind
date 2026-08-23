@@ -64,6 +64,8 @@ export interface Tool {
   name: string;
   command: string;
   description: string | null;
+  /** Fits one hand at a time: the server refuses a second holder. */
+  exclusive: boolean;
 }
 
 export type LanguageCode = "en" | "it";

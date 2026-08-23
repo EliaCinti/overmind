@@ -112,3 +112,18 @@ org chart's edit row offers the same chips as the hire dialog. The path the
 owner wanted — *tell the CEO everything, then hand the one tool to the one
 agent* — now exists.
 
+## Addendum (2026-08-23, evening): one hand at a time, and the empty state teaches
+
+Two hardenings from the owner's first day of use:
+
+- **`"exclusive"`** joins the registry: tools listed there fit one hand at a
+  time — the second grant (at hire or after) is refused with the holder's
+  name. Blender has one socket; two agents on it would be two hands on one
+  mouse. Enforced in the server at both grant paths, said in the interface
+  (`exclusive` on `GET /api/tools`, "one hand at a time" beside the chip).
+- The hire dialog's Tools field originally did not exist when nothing was
+  declared ("a box with no tools never promises one"). The owner asked for the
+  opposite: the empty state now *teaches* — one line saying tools are declared
+  by the operator via `OVERMIND_AGENT_TOOLS`, with a link to the walkthrough.
+  A promise is still never made; a road is shown.
+

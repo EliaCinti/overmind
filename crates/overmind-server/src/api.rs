@@ -1052,6 +1052,9 @@ async fn list_tools(State(state): State<AppState>) -> Json<Value> {
                 "name": name,
                 "command": command,
                 "description": reg.description(name),
+                // One hand at a time (the registry's "exclusive" list): the
+                // interface says it, the server enforces it.
+                "exclusive": reg.is_exclusive(name),
             })
         })
         .collect();
@@ -1061,6 +1064,39 @@ async fn list_tools(State(state): State<AppState>) -> Json<Value> {
 /// Refuse a characterization the server cannot honour, at the boundary where it
 /// enters rather than at the prompt where it would finally break — the rule
 /// M16 already applies to language codes (ADR-0021).
+/// An exclusive tool fits one hand: refuse the grant when another active
+/// agent in the company already holds it, naming the holder (ADR-0036).
+async fn refuse_second_hand(
+    tx: &mut sqlx::SqliteConnection,
+    tools: &crate::db::AgentTools,
+    company_id: &str,
+    this_agent: Option<&str>,
+    granted: &[String],
+) -> Result<(), ApiError> {
+    for name in granted {
+        if !tools.is_exclusive(name) {
+            continue;
+        }
+        let holder: Option<(String,)> = sqlx::query_as(
+            "SELECT a.name FROM agents a
+             WHERE a.company_id = ? AND a.status = 'active' AND a.id != COALESCE(?, '')
+               AND EXISTS (SELECT 1 FROM json_each(json_extract(a.traits, '$.tools'))
+                           WHERE json_each.value = ?)",
+        )
+        .bind(company_id)
+        .bind(this_agent)
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((who,)) = holder {
+            return Err(ApiError::Conflict(format!(
+                "the tool `{name}` is exclusive and {who} already holds it — take it out of their hands first"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_traits(tools: &crate::db::AgentTools, traits: &AgentTraits) -> Result<(), ApiError> {
     // A tool grant names something the operator declared, or it is refused
     // here (ADR-0036) -- never stored and handed to a run later.
@@ -1168,6 +1204,7 @@ pub(crate) async fn hire(
         .with_domain(&domain_patch)
         .apply(req.traits.clone());
     validate_traits(tools, &traits)?;
+    refuse_second_hand(tx, tools, company_id, None, &traits.tools).await?;
     let traits_json = serde_json::to_string(&traits)?;
 
     // A manager, if given, must be an existing agent in this company.
@@ -3625,6 +3662,14 @@ async fn set_agent_tools(
     }
     traits.tools = hand.clone();
     validate_traits(&state.config.agent_tools, &traits)?;
+    refuse_second_hand(
+        &mut tx,
+        &state.config.agent_tools,
+        &company_id,
+        Some(&agent_id),
+        &hand,
+    )
+    .await?;
     sqlx::query("UPDATE agents SET traits = ? WHERE id = ?")
         .bind(serde_json::to_string(&traits)?)
         .bind(&agent_id)

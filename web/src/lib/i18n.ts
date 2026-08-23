@@ -474,6 +474,10 @@ export const en = {
     toolsHint:
       "MCP servers the operator declared on this machine. Granted per agent and written into the run's own configuration — an agent holds exactly what you grant here, nothing it finds.",
     previewTools: " Holds the tools: {tools}.",
+    toolExclusive: "one hand at a time",
+    noToolsDeclared:
+      "No tools are declared on this machine. The operator declares them with OVERMIND_AGENT_TOOLS — a JSON file of MCP servers.",
+    noToolsHow: "How to declare tools",
     brief: "Custom brief",
     briefHint:
       "Added on top of the structured config. It can add guidance but never override the enforced limits above.",
@@ -1007,6 +1011,10 @@ export const it: Dictionary = {
     toolsHint:
       "Server MCP dichiarati dall'operatore su questa macchina. Concessi per agente e scritti nella configurazione del run — un agente ha esattamente ciò che concedi qui, niente che trova da sé.",
     previewTools: " Ha gli strumenti: {tools}.",
+    toolExclusive: "una mano alla volta",
+    noToolsDeclared:
+      "Nessuno strumento dichiarato su questa macchina. Li dichiara l'operatore con OVERMIND_AGENT_TOOLS — un file JSON di server MCP.",
+    noToolsHow: "Come dichiarare gli strumenti",
     brief: "Brief personalizzato",
     briefHint:
       "Si aggiunge alla configurazione strutturata. Può dare indicazioni, ma non può mai scavalcare i limiti imposti qui sopra.",
