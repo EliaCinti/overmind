@@ -10,6 +10,7 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ### Fixed
 - **From the CEO's plan to a running task (ADR-0038).** The CEO is told what each teammate holds (so Blender in one agent's hand is planned with, not around); a `code` task planned for a company without a repository is opened as `knowledge` (audited); and a planned task is offered by its agent's autonomy — started within budget, filed as a start approval in the inbox with approval, left for a human when propose-only. Before, a planned task for an *acts with approval* agent asked nobody and sat in `todo`.
+- **The chat knows when an agent is answering, and runs one turn at a time.** `answering` rides on the conversation, so the typing dots survive a page switch; a message sent while the agent is answering waits and is read by the next turn instead of racing a second one. The inbox shows what waits on you alone, earlier items behind a toggle.
 - **A plan the CEO wraps in a ```json fence, or pretty-prints over several lines, is found.** The parser read one line at a time; on the owner's first real brief the CEO answered with a sentence and a fenced, multi-line plan — shown raw in the chat, and the task it had planned was never opened. A balanced-brace scan (strings and escapes respected) now follows the line scan.
 
 ### Changed

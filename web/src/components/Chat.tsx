@@ -86,8 +86,10 @@ export function Chat({
       .then((r) => {
         if (cancelled) return;
         setMessages(r.messages);
-        const last = r.messages[r.messages.length - 1];
-        if (last && last.role !== "user") setPending(false);
+        // Whether the agent is answering is the server's to say (ADR-0038
+        // addendum): the dots survive a page switch, and vanish on the same
+        // live signal the reply arrives on.
+        setPending(r.answering);
       })
       .catch(() => {});
     return () => {

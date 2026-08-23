@@ -720,10 +720,12 @@ export const api = {
 
   // Conversation with an agent — the CEO is the org leader (ADR-0019).
   getConversation: (companyId: string, agentId: string) =>
-    req<{ conversation: Conversation | null; messages: Message[] }>(
-      "GET",
-      `/companies/${companyId}/agents/${agentId}/conversation`,
-    ),
+    req<{
+      conversation: Conversation | null;
+      messages: Message[];
+      /** A turn is in flight (ADR-0038 addendum): show the dots. */
+      answering: boolean;
+    }>("GET", `/companies/${companyId}/agents/${agentId}/conversation`),
   postMessage: (companyId: string, agentId: string, content: string, attachmentIds?: string[]) =>
     req<{ conversation_id: string }>(
       "POST",

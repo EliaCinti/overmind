@@ -78,3 +78,24 @@ Three things stood between that sentence and the product, all ours:
 - A refused start at approval time (the agent paused meanwhile, a capability
   missing) surfaces as the decision's error, as it does for the governance
   gate today.
+
+## Addendum (same day): the chat says when an agent is answering, and one turn at a time
+
+Two more things the owner measured in the same hour. Send a message, switch
+to the board, come back: the typing dots were gone and it looked as if nothing
+was happening — "answering" lived only in the chat component's memory. And a
+second message sent before the reply started a second, concurrent turn.
+
+- `AppState` keeps the set of conversations with a turn in flight (in memory:
+  a turn does not survive a restart, so neither should the claim that one is
+  running). `GET …/conversation` carries `answering`; the chat asks on every
+  load, so the dots survive a page switch and vanish on the same live signal
+  the reply arrives on.
+- One turn per conversation at a time. A message posted while a turn is in
+  flight is stored and the turn is *owed*: when the current one ends, another
+  runs only if the thread still ends with the user's words — so a message the
+  first turn already read is not answered twice, and one it did not read is
+  never left unanswered. Never two turns at once. `tests/answering.rs`.
+- The inbox shows what waits on you alone; everything decided or informative
+  stays as the record, one toggle away (shown outright when nothing waits).
+
