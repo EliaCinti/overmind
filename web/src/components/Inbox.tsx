@@ -33,6 +33,11 @@ export function Inbox({
   const notificationText = useNotificationText();
   const [items, setItems] = useState<Notification[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  // What waits on you stands alone (measured: a new start approval landed on
+  // top of the already-decided team proposal and the two read as one pile).
+  // Everything decided or merely informative is still the record (ADR-0020)
+  // — one toggle away, and shown outright when nothing is waiting.
+  const [showHistory, setShowHistory] = useState(false);
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -80,53 +85,10 @@ export function Inbox({
     onDecided();
   };
 
-  const waiting = items.filter((n) => pendingApproval(n.approval_id)).length;
-
-  return (
-    <>
-      <button
-        onClick={() => setOpen(true)}
-        className="relative inline-flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-foreground"
-        title={unread ? t("nav.unread", { n: unread }) : t("nav.inbox")}
-        aria-label={t("nav.inbox")}
-      >
-        <Bell className="h-4.5 w-4.5" />
-        {unread > 0 && (
-          <span
-            className={cn(
-              "absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold",
-              waiting > 0
-                ? "bg-destructive text-destructive-foreground"
-                : "bg-primary text-primary-foreground",
-            )}
-          >
-            {unread}
-          </span>
-        )}
-      </button>
-
-      <Dialog
-        open={open}
-        onOpenChange={setOpen}
-        title={t("nav.inbox")}
-        description={
-          waiting
-            ? t("nav.waitingOnYou", { n: waiting })
-            : unread
-              ? t("nav.unread", { n: unread })
-              : t("nav.nothingWaiting")
-        }
-        className="max-w-xl"
-      >
-        <div className="flex flex-col gap-2">
-          {items.length === 0 && (
-            <p className="py-8 text-center text-sm text-muted-foreground">{t("inbox.empty")}</p>
-          )}
-
-          {items.map((n) => {
-            const approval = pendingApproval(n.approval_id);
-            const text = notificationText(n);
-            return (
+  const renderItem = (n: Notification) => {
+    const approval = pendingApproval(n.approval_id);
+    const text = notificationText(n);
+    return (
               <div
                 key={n.id}
                 className={cn(
@@ -191,8 +153,79 @@ export function Inbox({
                   )}
                 </div>
               </div>
+    );
+  };
+
+  const waiting = items.filter((n) => pendingApproval(n.approval_id)).length;
+
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        className="relative inline-flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition hover:bg-muted hover:text-foreground"
+        title={unread ? t("nav.unread", { n: unread }) : t("nav.inbox")}
+        aria-label={t("nav.inbox")}
+      >
+        <Bell className="h-4.5 w-4.5" />
+        {unread > 0 && (
+          <span
+            className={cn(
+              "absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold",
+              waiting > 0
+                ? "bg-destructive text-destructive-foreground"
+                : "bg-primary text-primary-foreground",
+            )}
+          >
+            {unread}
+          </span>
+        )}
+      </button>
+
+      <Dialog
+        open={open}
+        onOpenChange={setOpen}
+        title={t("nav.inbox")}
+        description={
+          waiting
+            ? t("nav.waitingOnYou", { n: waiting })
+            : unread
+              ? t("nav.unread", { n: unread })
+              : t("nav.nothingWaiting")
+        }
+        className="max-w-xl"
+      >
+        <div className="flex flex-col gap-2">
+          {items.length === 0 && (
+            <p className="py-8 text-center text-sm text-muted-foreground">{t("inbox.empty")}</p>
+          )}
+
+          {(() => {
+            const waitingItems = items.filter((n) => pendingApproval(n.approval_id));
+            const earlier = items.filter((n) => !pendingApproval(n.approval_id));
+            const historyOpen = waitingItems.length === 0 || showHistory;
+            return (
+              <>
+                {waitingItems.length > 0 && earlier.length > 0 && (
+                  <p className="px-0.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {t("inbox.waitingSection")}
+                  </p>
+                )}
+                {waitingItems.map(renderItem)}
+                {waitingItems.length > 0 && earlier.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowHistory((v) => !v)}
+                    className="mt-1 self-start rounded-md px-1 py-1 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                  >
+                    {historyOpen
+                      ? t("inbox.hideHistory")
+                      : t("inbox.showHistory", { n: earlier.length })}
+                  </button>
+                )}
+                {historyOpen && earlier.map(renderItem)}
+              </>
             );
-          })}
+          })()}
 
           {unread > 0 && (
             <button

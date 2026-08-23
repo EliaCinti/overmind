@@ -322,23 +322,41 @@ pub async fn post_user_message(
     tx.commit().await?;
     state.notify(company_id);
 
-    // The agent's turn runs in the background; its reply + tasks land via notify.
-    let state2 = state.clone();
-    let company = company_id.to_string();
-    let convo = conversation_id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_agent_turn(&state2, &company, &convo, &agent).await {
-            eprintln!("agent turn for {convo} failed: {e}");
-            // Don't leave the user hanging: surface the failure as a message.
-            let _ = post_system_message(
-                &state2,
-                &company,
-                &convo,
-                &format!("The agent could not respond: {e}"),
-            )
-            .await;
-        }
-    });
+    // The agent's turn runs in the background; its reply + tasks land via
+    // notify. One turn per conversation at a time (ADR-0038 addendum): a
+    // message sent while the agent is answering does not race a second turn
+    // — it waits, and the next turn reads the whole thread, both messages in.
+    if state.begin_answering(&conversation_id) {
+        let state2 = state.clone();
+        let company = company_id.to_string();
+        let convo = conversation_id.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = run_agent_turn(&state2, &company, &convo, &agent).await {
+                    eprintln!("agent turn for {convo} failed: {e}");
+                    // Don't leave the user hanging: surface the failure as a message.
+                    let _ = post_system_message(
+                        &state2,
+                        &company,
+                        &convo,
+                        &format!("The agent could not respond: {e}"),
+                    )
+                    .await;
+                }
+                // Another turn is owed only if a message arrived that this
+                // turn did not read: the thread ends with the user's words.
+                if !state2.end_answering(&convo) {
+                    break;
+                }
+                if !last_word_is_the_users(&state2, &convo).await {
+                    state2.end_answering(&convo);
+                    break;
+                }
+            }
+            // The dots go away on the same signal the reply arrives on.
+            state2.notify(&company);
+        });
+    }
 
     Ok(conversation_id)
 }
@@ -1137,6 +1155,19 @@ pub(crate) fn agent_text(output: &str) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| output.to_string())
+}
+
+/// Is the last message in this thread the user's — i.e. unanswered?
+async fn last_word_is_the_users(state: &AppState, conversation_id: &str) -> bool {
+    let last: Option<(String,)> = sqlx::query_as(
+        "SELECT role FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    matches!(last, Some((role,)) if role == "user")
 }
 
 /// Does this company have a repository a `code` task could run in?

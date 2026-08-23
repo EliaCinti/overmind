@@ -235,6 +235,10 @@ export const en = {
     empty:
       "Nothing yet. When an agent needs you — to convene a meeting, to start a gated task — it lands here.",
     toastWaiting: "Waiting on you — click to decide",
+    waitingSection: "Waiting on you",
+    historySection: "Earlier",
+    showHistory: "Show earlier ({n})",
+    hideHistory: "Hide earlier",
     approvedBy: "Approved by {name}",
     rejectedBy: "Rejected by {name}",
   },
@@ -765,6 +769,10 @@ export const it: Dictionary = {
     empty:
       "Ancora niente. Quando un agente ha bisogno di te — per convocare una riunione, per avviare un task sotto approvazione — arriva qui.",
     toastWaiting: "Aspetta te — clicca per decidere",
+    waitingSection: "In attesa di te",
+    historySection: "Precedenti",
+    showHistory: "Mostra i precedenti ({n})",
+    hideHistory: "Nascondi i precedenti",
     approvedBy: "Approvato da {name}",
     rejectedBy: "Rifiutato da {name}",
   },

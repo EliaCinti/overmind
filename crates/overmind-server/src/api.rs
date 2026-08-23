@@ -2542,6 +2542,10 @@ async fn get_conversation(
     Ok(Json(json!({
         "conversation": { "id": id, "agent_id": agent_id, "title": title, "created_at": created_at },
         "messages": messages,
+        // Whether a turn is in flight (ADR-0038 addendum): the chat asks on
+        // every load, so the typing dots survive a page switch and vanish
+        // the moment the reply lands, whichever page you were on.
+        "answering": state.is_answering(&id),
     })))
 }
 

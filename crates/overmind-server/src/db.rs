@@ -49,9 +49,59 @@ pub struct AppState {
     /// work. `None` under an API key, where plan windows do not apply at all,
     /// and before the first run has reported one.
     plan_windows: Arc<std::sync::RwLock<crate::economy::PlanWindows>>,
+    /// Conversations with an agent turn in flight, and whether another turn
+    /// is owed once it ends (ADR-0038 addendum). In memory on purpose: a turn
+    /// does not survive a restart, so neither should the claim that one is
+    /// running — the interface asks, it does not remember.
+    answering: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 impl AppState {
+    /// Is an agent answering in this conversation (or about to, again)?
+    pub fn is_answering(&self, conversation_id: &str) -> bool {
+        self.answering
+            .lock()
+            .map(|m| m.contains_key(conversation_id))
+            .unwrap_or(false)
+    }
+
+    /// Claim the turn for a conversation. `true` when this caller should run
+    /// it; `false` when one is already in flight — the next turn is then owed,
+    /// and the caller that finishes the current one runs it.
+    pub fn begin_answering(&self, conversation_id: &str) -> bool {
+        let Ok(mut m) = self.answering.lock() else {
+            return true;
+        };
+        match m.get_mut(conversation_id) {
+            Some(owed) => {
+                *owed = true;
+                false
+            }
+            None => {
+                m.insert(conversation_id.to_string(), false);
+                true
+            }
+        }
+    }
+
+    /// Release the turn. `true` when another turn is owed (a message came in
+    /// meanwhile): the conversation stays claimed and the caller runs again.
+    pub fn end_answering(&self, conversation_id: &str) -> bool {
+        let Ok(mut m) = self.answering.lock() else {
+            return false;
+        };
+        match m.get_mut(conversation_id) {
+            Some(owed) if *owed => {
+                *owed = false;
+                true
+            }
+            _ => {
+                m.remove(conversation_id);
+                false
+            }
+        }
+    }
+
     /// A transaction that intends to write, and says so at the door (M23).
     ///
     /// `BEGIN IMMEDIATE` takes SQLite's write lock up front, where
@@ -646,6 +696,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         brains: Arc::new(Mutex::new(HashMap::new())),
         economy: Arc::new(std::sync::RwLock::new(economy)),
         plan_windows: Arc::new(std::sync::RwLock::new(Default::default())),
+        answering: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
