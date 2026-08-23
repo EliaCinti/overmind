@@ -198,6 +198,15 @@ pub enum RunnerError {
     Conflict,
     #[error("{0}")]
     Blocked(String),
+    /// Refused, but Overmind itself knows the repair (ADR-0038 addendum):
+    /// the message carries a machine-readable `remedy` the interface can
+    /// offer as a button — the user approves, Overmind acts. Never a
+    /// string-match on the English sentence.
+    #[error("{message}")]
+    Remediable {
+        message: String,
+        remedy: serde_json::Value,
+    },
     #[error("agent is over its monthly budget")]
     OverBudget,
     #[error("git error: {0}")]
@@ -488,10 +497,17 @@ pub async fn start_task(
             .map(|(name, _, _, _)| name)
             .collect();
         if !visual.is_empty() {
-            return Err(RunnerError::Blocked(format!(
-                "this task carries material to look at ({}) and this agent is not characterized for visual work",
-                visual.join(", ")
-            )));
+            return Err(RunnerError::Remediable {
+                message: format!(
+                    "this task carries material to look at ({}) and this agent is not characterized for visual work",
+                    visual.join(", ")
+                ),
+                // The repair Overmind can apply itself: one traits patch.
+                remedy: serde_json::json!({
+                    "kind": "grant_multimodal",
+                    "agent_id": agent_id,
+                }),
+            });
         }
     }
 

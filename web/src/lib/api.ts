@@ -395,11 +395,18 @@ export interface AuditEvent {
   actor_name: string | null;
 }
 
+/** A machine-readable repair riding on a refusal (ADR-0038 addendum): the
+ *  interface offers it as a button; the user approves; Overmind acts. */
+export type Remedy = { kind: "grant_multimodal"; agent_id: string } | { kind: string };
+
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Present when the server knows the repair. */
+  remedy?: Remedy;
+  constructor(status: number, message: string, remedy?: Remedy) {
     super(message);
     this.status = status;
+    this.remedy = remedy;
   }
 }
 
@@ -416,13 +423,15 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
       window.dispatchEvent(new Event("overmind:unauthorized"));
     }
     let message = res.statusText;
+    let remedy: Remedy | undefined;
     try {
       const data = await res.json();
       if (data?.error) message = data.error;
+      if (data?.remedy?.kind) remedy = data.remedy as Remedy;
     } catch {
       // keep statusText
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, remedy);
   }
   const text = await res.text();
   return (text ? JSON.parse(text) : null) as T;
@@ -588,6 +597,10 @@ export const api = {
     req<{ id: string }>("POST", `/companies/${companyId}/meetings/${meetingId}/resume`, {}),
   /** The whole hand of an agent already hired (ADR-0036): validated against
    *  the registry, recorded as a config revision, held from the next run on. */
+  /** Edit characterization after hire — the hire's own TraitsPatch, validated
+   *  and revisioned (ADR-0038 addendum). Also how a remedy is applied. */
+  patchAgentTraits: (agentId: string, patch: Partial<AgentTraits>) =>
+    req<{ id: string; traits: AgentTraits }>("POST", `/agents/${agentId}/traits`, patch),
   setAgentTools: (agentId: string, tools: string[]) =>
     req<{ id: string; traits: AgentTraits }>("POST", `/agents/${agentId}/tools`, { tools }),
   reassignAgent: (agentId: string, body: { reports_to?: string | null; title?: string }) =>

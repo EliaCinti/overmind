@@ -116,3 +116,22 @@ set — are its own attachments **plus the posted files of its birth thread**
 the project's folder in the owner's hands, and the cost of an extra file in
 the run directory is nothing next to a modeler drawing a house from prose.
 
+## Addendum (same night): an error Overmind can repair arrives with the repair
+
+The multimodal gate did its job — it refused to hand a sketch to an agent
+never characterized to look at one — and the owner's reaction named the
+missing half: *"si presenta il problema? bene: appare qualcosa che propone di
+sistemare, e se l'utente approva, Overmind agisce."* The same principle as the
+sign-in flow (M23) and the payer switch (ADR-0037), now generalized:
+
+- **`RunnerError::Remediable { message, remedy }`** → 409 with a
+  machine-readable `remedy` beside the message. Never a string-match on the
+  English sentence. First remedy: `grant_multimodal`.
+- **`POST /agents/{id}/traits`** — the hire's own validated `TraitsPatch`
+  applied after hire, recorded as a `patch` revision, exclusivity enforced.
+  This closes the "characterization is barely editable after hire" debt from
+  NEXT.md, and is how any traits-shaped remedy is applied.
+- The task detail shows the refusal with one button — *Characterize {name}
+  for visual work and start* — that applies the patch and retries the start.
+  `tests/remedies.rs`.
+

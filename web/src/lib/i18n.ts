@@ -419,6 +419,7 @@ export const en = {
     priorityLabel: "{p} priority",
     actions: "Actions",
     startWithAgent: "Start with agent",
+    remedyGrantMultimodal: "Characterize {name} for visual work and start",
     moveTo: "Move to {status}",
     terminal: "Terminal state — no moves.",
     noActiveAgents: "No active agents — hire one first.",
@@ -954,6 +955,7 @@ export const it: Dictionary = {
     priorityLabel: "priorità {p}",
     actions: "Azioni",
     startWithAgent: "Avvia con un agente",
+    remedyGrantMultimodal: "Caratterizza {name} per il visivo e avvia",
     // Not "Sposta in {status}": with "In corso" and "In revisione" that stacks
     // two prepositions — "Sposta in In corso". The arrow says the same thing.
     moveTo: "Sposta → {status}",

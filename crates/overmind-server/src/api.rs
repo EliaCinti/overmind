@@ -145,6 +145,7 @@ fn api_router() -> Router<AppState> {
         )
         .route("/agents/{agent_id}/budget", post(set_agent_budget))
         .route("/agents/{agent_id}/tools", post(set_agent_tools))
+        .route("/agents/{agent_id}/traits", post(patch_agent_traits))
         .route("/agents/{agent_id}/revisions", get(list_revisions))
         .route("/agents/{agent_id}/rollback", post(rollback_agent))
         .route("/companies/{company_id}/approvals", get(list_approvals))
@@ -474,6 +475,10 @@ pub enum ApiError {
     Blocked(String),
     /// No valid session (M24). Deliberately wordless beyond the status:
     /// which part of the credential was wrong is not the caller's to learn.
+    /// Refused with a repair Overmind can apply (ADR-0038 addendum): 409,
+    /// and the body carries the machine-readable `remedy` beside the message.
+    #[error("{message}")]
+    Remediable { message: String, remedy: Value },
     #[error("unauthorized")]
     Unauthorized,
     /// A valid session without the standing (M24): today, a member touching
@@ -494,6 +499,7 @@ impl From<crate::runner::RunnerError> for ApiError {
                 ApiError::Conflict("task is not available for checkout".into())
             }
             RunnerError::Blocked(msg) => ApiError::Conflict(msg),
+            RunnerError::Remediable { message, remedy } => ApiError::Remediable { message, remedy },
             RunnerError::OverBudget => ApiError::Blocked("agent is over its monthly budget".into()),
             RunnerError::Git(msg) => ApiError::Internal(msg.into()),
             RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
@@ -545,6 +551,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Invalid(_) => StatusCode::BAD_REQUEST,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Remediable { .. } => StatusCode::CONFLICT,
             ApiError::Blocked(_) => StatusCode::PAYMENT_REQUIRED,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
@@ -554,7 +561,11 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        (status, Json(json!({ "error": self.to_string() }))).into_response()
+        let mut body = json!({ "error": self.to_string() });
+        if let ApiError::Remediable { remedy, .. } = &self {
+            body["remedy"] = remedy.clone();
+        }
+        (status, Json(body)).into_response()
     }
 }
 
@@ -3629,6 +3640,59 @@ async fn set_requires_approval(
     Ok(Json(
         json!({ "id": agent_id, "requires_approval": req.requires_approval }),
     ))
+}
+
+/// Edit an agent's characterization after hire (ADR-0038 addendum): the same
+/// validated `TraitsPatch` the hire takes, applied to the current traits,
+/// recorded as a `patch` revision. This is also how a remediable refusal's
+/// repair is applied — the interface offers it, the user approves, this acts.
+async fn patch_agent_traits(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(patch): Json<TraitsPatch>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.write_tx().await?;
+    let Some((company_id, before)) = agent_snapshot_by_id(&mut tx, &agent_id).await? else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    let current: AgentTraits = serde_json::from_value(before["traits"].clone())?;
+    let traits = current.apply(patch);
+    validate_traits(&state.config.agent_tools, &traits)?;
+    refuse_second_hand(
+        &mut tx,
+        &state.config.agent_tools,
+        &company_id,
+        Some(&agent_id),
+        &traits.tools,
+    )
+    .await?;
+    sqlx::query("UPDATE agents SET traits = ? WHERE id = ?")
+        .bind(serde_json::to_string(&traits)?)
+        .bind(&agent_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some((_, after)) = agent_snapshot_by_id(&mut tx, &agent_id).await? {
+        crate::governance::record_revision(
+            &mut tx,
+            &company_id,
+            &agent_id,
+            "patch",
+            &before,
+            &after,
+        )
+        .await?;
+    }
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_REVISED,
+        &json!({ "agent_id": agent_id, "via": "traits_patch" }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": agent_id, "traits": traits })))
 }
 
 #[derive(Deserialize)]
