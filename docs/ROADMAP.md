@@ -419,6 +419,14 @@ The owner's first ask that needs a tool outside Overmind: a company that turns a
 - ✅ **The threat model says what a grant is:** a door the operator opened; the tool's process runs where the CLI runs, what it talks to is outside the cage's promise. `tools.rs` holds it.
 - **Accept (the owner's):** Blender open on his desk with the BlenderMCP addon, Overmind native, `OVERMIND_AGENT_TOOLS` naming `blender`, a company *Casa San Vito* with a modeler holding it — a sketch and the measures go in, a model comes out, and a photo of a sofa in the chat moves it under the window. `docs/examples/agent-tools.blender.json` is the registry to start from.
 
+## M29 — Who pays is asked `in-progress`
+Opened during M28's acceptance walk, from the owner's own desk: Overmind run natively inherited `ANTHROPIC_API_KEY` from his shell, and the org chart told him his plan was not paying and to go *unset* a variable. Wrong place, wrong remedy — the product knows the fix and can apply it. [ADR-0037](adr/0037-who-pays-is-asked.md).
+
+- ✅ **The remedy is a button, applied by the server.** `POST /api/economy/pay-with {"with":"plan"}` keeps the key out of every command that runs as the agent — run, turn, probe, sign-in — and asks the CLI again who pays; `"detected"` undoes it. Refused (`409`, with the reason) when the key would still pay from somewhere the environment does not reach, so the choice only exists where it is also true.
+- ✅ **Remembered as a file, read per spawn** (`<data-dir>/pay-with-plan`, like the stored token): survives a restart, no migration, withdrawing takes effect on the next run.
+- ✅ **Said on every page:** `/api/health` carries `pay_with`; the top bar shows *Paying: API key* / *Paying: Max plan* (warning colour when a key overrides a login); the offer is a card beside the sign-in notice — *Let the plan pay* / *Keep the key*; the undo lives in the org chart's economy line. `tests/who_pays.rs` + `sandbox::tests`.
+- **Accept (the owner's):** the native instance started with the key in the shell, the card offered the plan, one click, the badge reads *Paying: Max plan*, and a chat turn with the CEO is billed to the plan (the CLI's own `auth status` agrees after a restart).
+
 ## What comes next
 The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
 

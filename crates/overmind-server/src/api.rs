@@ -240,6 +240,7 @@ fn api_router() -> Router<AppState> {
         .route("/claude-auth", get(claude_auth_status))
         .route("/claude-auth/start", post(claude_auth_start))
         .route("/claude-auth/code", post(claude_auth_code))
+        .route("/economy/pay-with", post(pay_with))
 }
 
 #[derive(serde::Deserialize)]
@@ -402,6 +403,56 @@ async fn claude_auth_code(
 /// Whether organizational memory (Wadachi/MCP) is wired up at all — for the UI
 /// badge. Server-wide: what a *given* company's brain is doing is
 /// `GET /companies/{id}/brain` (ADR-0024).
+#[derive(Deserialize)]
+struct PayWith {
+    /// `plan` or `detected` (ADR-0037).
+    with: String,
+}
+
+/// Let the plan pay — or go back to whatever the probe finds (ADR-0037).
+///
+/// Choosing the plan keeps `ANTHROPIC_API_KEY` out of every command that runs
+/// as the agent, then asks the CLI again who pays. If the answer is still a
+/// key — it lives somewhere the environment does not reach, a settings file
+/// or an `apiKeyHelper` — the choice is withdrawn and the request refused:
+/// a setting that disagrees with who is billed is a setting that will cost
+/// someone money, and ADR-0030 exists to prevent that.
+async fn pay_with(
+    State(state): State<AppState>,
+    Json(req): Json<PayWith>,
+) -> Result<Json<Value>, ApiError> {
+    let plan = match req.with.as_str() {
+        "plan" => true,
+        "detected" => false,
+        other => {
+            return Err(ApiError::Invalid(format!(
+                "pay with \"plan\" or \"detected\", not \"{other}\""
+            )));
+        }
+    };
+    crate::economy::prefer_plan(&state.config, plan).map_err(|e| ApiError::Internal(e.into()))?;
+    let economy = crate::economy::detect(&state.config).await;
+    if plan && economy.is_metered() {
+        crate::economy::prefer_plan(&state.config, false)
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        return Err(ApiError::Conflict(
+            "the key still pays: it is not coming from the environment Overmind controls \
+             (a settings file or an apiKeyHelper, most likely), so the plan cannot be made to pay from here"
+                .into(),
+        ));
+    }
+    state.set_economy(economy.clone());
+    eprintln!(
+        "economy: chosen pay_with={} — now paying with {}",
+        crate::economy::pay_with_slug(&state.config),
+        crate::economy::describe(&economy)
+    );
+    Ok(Json(json!({
+        "economy": crate::economy::as_json(&economy),
+        "pay_with": crate::economy::pay_with_slug(&state.config),
+    })))
+}
+
 async fn memory_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "enabled": state.memory.is_enabled(),
@@ -536,6 +587,9 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         // once and words the budget accordingly — a cap in dollars promises
         // something under a key that it cannot promise under a plan.
         "economy": crate::economy::as_json(&state.economy()),
+        // Whether the person chose who pays (ADR-0037): `plan` when they asked
+        // the plan to, `detected` when the economy is whatever the probe found.
+        "pay_with": crate::economy::pay_with_slug(&state.config),
         // Where each of the plan's windows stands, as last reported. Empty
         // under an API key, where windows do not apply, and empty before the
         // first run says anything — a window we have not heard about is absent

@@ -140,6 +140,52 @@ pub fn read(status: &Value) -> Economy {
     }
 }
 
+// ---------- who pays, when both could (ADR-0037) ----------
+
+/// Where the person's choice to let the plan pay is kept.
+///
+/// A file in the data dir, like the stored OAuth token, and for the same
+/// reasons: it has to survive a restart, it is read per spawn so revoking it
+/// takes effect on the next run rather than the next boot, and it needs no
+/// migration. Its presence is the whole setting.
+pub fn plan_marker(config: &Config) -> std::path::PathBuf {
+    config.data_dir.join("pay-with-plan")
+}
+
+/// Has the person asked for the plan to pay?
+pub fn plan_is_preferred(config: &Config) -> bool {
+    plan_marker(config).exists()
+}
+
+/// Record (or withdraw) the choice. The consequence lives in
+/// [`crate::sandbox`]: while the marker exists, no command that runs as the
+/// agent carries `ANTHROPIC_API_KEY`, and the CLI — with nothing overriding
+/// its login — bills the plan.
+pub fn prefer_plan(config: &Config, on: bool) -> std::io::Result<()> {
+    let marker = plan_marker(config);
+    if on {
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&marker, "plan\n")
+    } else {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+}
+
+/// The choice as the API words it: `plan` when chosen, `detected` otherwise
+/// (ADR-0030's rule — the economy is whatever the probe found).
+pub fn pay_with_slug(config: &Config) -> &'static str {
+    if plan_is_preferred(config) {
+        "plan"
+    } else {
+        "detected"
+    }
+}
+
 /// Ask the adapter CLI how it is authenticated.
 ///
 /// **Run as the agent, not as the server.** In the image the server is root and

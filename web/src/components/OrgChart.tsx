@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
-import type { Agent, AgentBudget, Economy, OrgProposal, PlanWindow } from "../lib/api";
+import type { Agent, AgentBudget, Economy, OrgProposal, PayWith, PlanWindow } from "../lib/api";
 import { PLAN_WINDOWS } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
@@ -15,6 +15,8 @@ export function OrgChart({
   agents,
   budgets,
   economy,
+  payWith,
+  onPayerChanged,
   planWindows,
   proposal,
   onChanged,
@@ -25,6 +27,9 @@ export function OrgChart({
   budgets: AgentBudget[];
   /** How the server pays, so a cap is read as what it is (ADR-0030). */
   economy: Economy | null;
+  /** Whether the person chose the plan (ADR-0037) — undone from here. */
+  payWith: PayWith;
+  onPayerChanged: () => void;
   /** Where each of the plan's windows stands, as last reported. */
   planWindows: Record<string, PlanWindow>;
   /** A team the CEO drew up and you have not answered yet (M15). */
@@ -53,7 +58,14 @@ export function OrgChart({
         )}
         {proposal && <OrgProposalPanel proposal={proposal} onChanged={onChanged} />}
 
-        {active.length > 0 && <EconomyNote economy={economy} planWindows={planWindows} />}
+        {active.length > 0 && (
+          <EconomyNote
+            economy={economy}
+            payWith={payWith}
+            onPayerChanged={onPayerChanged}
+            planWindows={planWindows}
+          />
+        )}
 
         {/* The human owner is the root of the chart. */}
         <div className="mb-2 flex items-center gap-3 rounded-lg border border-border bg-card p-3.5 shadow-soft">
@@ -295,13 +307,27 @@ function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy 
  */
 function EconomyNote({
   economy,
+  payWith,
+  onPayerChanged,
   planWindows,
 }: {
   economy: Economy | null;
+  payWith: PayWith;
+  onPayerChanged: () => void;
   planWindows: Record<string, PlanWindow>;
 }) {
   const t = useT();
+  const [undoing, setUndoing] = useState(false);
   if (!economy) return null;
+  const undo = async () => {
+    setUndoing(true);
+    try {
+      await api.payWith("detected");
+    } finally {
+      setUndoing(false);
+      onPayerChanged();
+    }
+  };
   const what =
     economy.kind === "key"
       ? t("economy.key")
@@ -322,6 +348,21 @@ function EconomyNote({
         <span className="font-medium">{what}</span> · {means}
       </p>
       {economy.kind === "subscription" && <PlanLifeline windows={planWindows} />}
+      {payWith === "plan" && (
+        // The choice is named where the money is read, with its undo: a
+        // setting that can be made from the product is undone from it too.
+        <p className="text-[11px] text-muted-foreground">
+          {t("economy.payerPlanChosen")}{" "}
+          <button
+            type="button"
+            className="underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+            onClick={undo}
+            disabled={undoing}
+          >
+            {t("economy.backToKey")}
+          </button>
+        </p>
+      )}
       {economy.kind === "key" && economy.overrides_login && (
         // Nothing is broken here, which is exactly why it goes unnoticed: the
         // work runs, the plan sits unused, and the bill arrives later. The CLI
