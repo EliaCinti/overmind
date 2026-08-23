@@ -227,6 +227,8 @@ docker compose pull && docker compose up   # the published image → http://loca
 docker compose exec --user agent overmind claude setup-token
 ```
 
+Both at once — a key exported in your shell *and* a claude.ai login (the usual state of a developer's machine, and of Overmind run natively)? The key wins and your plan sits unused. Overmind says so at the top of every page and offers **Let the plan pay**: one click keeps the key out of the agents' environment, the CLI is asked again who pays, and the org chart reads *Covered by a Max subscription*. Refused with the reason if the key lives somewhere the environment does not reach ([ADR-0037](docs/adr/0037-who-pays-is-asked.md)).
+
 Open the browser, **create the owner account** (the first run offers exactly that), found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is. The DB, worktrees, brains and the agent's sign-in persist on named volumes across restarts.
 
 To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover swapping the agent CLI (`OVERMIND_AGENT_CMD`) or the memory server (`OVERMIND_MEMORY_CMD`) for your own. Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time: `docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`.

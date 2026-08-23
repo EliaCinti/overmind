@@ -437,19 +437,45 @@ fn inject_oauth_token<C: CommandEnv>(config: &Config, cmd: &mut C) {
     }
 }
 
+/// Who pays (ADR-0037): while the person has chosen the plan, the key stays
+/// out of the agent's environment. The server never calls the API itself, so
+/// it loses nothing; the CLI, with nothing overriding its login, bills the
+/// plan. Applied to every command that runs *as the agent* — the probe, the
+/// caged run, the blocking sign-in — because a single path that still
+/// carried the key would be a single path that still billed it.
+fn keep_key_away<C: CommandEnv>(config: &Config, cmd: &mut C) {
+    if crate::economy::plan_is_preferred(config) {
+        cmd.remove_env("ANTHROPIC_API_KEY");
+    }
+}
+
+/// Everything a command needs to run with the agent's credentials and not one
+/// credential more.
+fn credentials<C: CommandEnv>(config: &Config, cmd: &mut C) {
+    inject_oauth_token(config, cmd);
+    keep_key_away(config, cmd);
+}
+
 /// The two Command types, one env call. A trait beats duplicating the
 /// injection rule until the copies disagree.
 trait CommandEnv {
     fn set_env(&mut self, k: &str, v: &str);
+    fn remove_env(&mut self, k: &str);
 }
 impl CommandEnv for Command {
     fn set_env(&mut self, k: &str, v: &str) {
         self.env(k, v);
     }
+    fn remove_env(&mut self, k: &str) {
+        self.env_remove(k);
+    }
 }
 impl CommandEnv for std::process::Command {
     fn set_env(&mut self, k: &str, v: &str) {
         self.env(k, v);
+    }
+    fn remove_env(&mut self, k: &str) {
+        self.env_remove(k);
     }
 }
 
@@ -484,7 +510,7 @@ pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
             cmd.pre_exec(move || crate::landlock::restrict(rules.as_raw_fd()));
         }
     }
-    inject_oauth_token(config, &mut cmd);
+    credentials(config, &mut cmd);
     cmd
 }
 
@@ -532,7 +558,7 @@ pub fn as_agent(config: &Config, program: &str) -> Command {
     if let Some(user) = agent_user(config) {
         drop_to(&mut cmd, config, user);
     }
-    inject_oauth_token(config, &mut cmd);
+    credentials(config, &mut cmd);
     cmd
 }
 
@@ -551,7 +577,7 @@ pub fn as_agent_std(config: &Config, program: &str) -> std::process::Command {
             cmd.env("HOME", home);
         }
     }
-    inject_oauth_token(config, &mut cmd);
+    credentials(config, &mut cmd);
     cmd
 }
 
@@ -968,5 +994,52 @@ mod tests {
             "echo hi",
         );
         assert_eq!(cmd.as_std().get_program(), "sh");
+    }
+
+    fn fresh_data_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "overmind-sandbox-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("data dir");
+        dir
+    }
+
+    fn key_is_removed(cmd: &std::process::Command) -> bool {
+        cmd.get_envs()
+            .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none())
+    }
+
+    /// ADR-0037: once the person chose the plan, every command that runs as
+    /// the agent — the probe, the caged run, the blocking sign-in — starts
+    /// without the key. The choice is a file in the data dir, read per spawn
+    /// like the stored token, so it survives a restart and needs no migration.
+    #[test]
+    fn when_the_plan_is_chosen_the_key_stays_out_of_the_agents_hands() {
+        let cfg = Config {
+            sandbox: false,
+            data_dir: fresh_data_dir(),
+            ..Config::default()
+        };
+        crate::economy::prefer_plan(&cfg, true).expect("choose the plan");
+        assert!(key_is_removed(as_agent(&cfg, "claude").as_std()));
+        assert!(key_is_removed(&as_agent_std(&cfg, "claude")));
+        let run = cfg.data_dir.join("run");
+        assert!(key_is_removed(
+            command(&cfg, &Cage { run_dir: &run }, "true").as_std()
+        ));
+    }
+
+    #[test]
+    fn without_the_choice_the_environment_is_left_alone() {
+        let cfg = Config {
+            sandbox: false,
+            data_dir: fresh_data_dir(),
+            ..Config::default()
+        };
+        assert!(!key_is_removed(as_agent(&cfg, "claude").as_std()));
+        crate::economy::prefer_plan(&cfg, true).expect("choose");
+        crate::economy::prefer_plan(&cfg, false).expect("and change your mind");
+        assert!(!key_is_removed(as_agent(&cfg, "claude").as_std()));
     }
 }

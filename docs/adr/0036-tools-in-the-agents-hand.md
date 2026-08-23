@@ -36,7 +36,7 @@ Conversational turns have it even tighter: they get no MCP config at all.
      stripped before the per-run config is written; it exists so the hire
      dialog and the prompt can say what a tool *is* in one line.
 
-2. **Tools are granted per agent, as a structured trait.** `tools: ["blender"]`
+2. **Tools are granted per agent, as a structured trait — at hire or afterwards.** `tools: ["blender"]`
    joins `AgentTraits` beside `permissions` and `model`, validated at every
    entry point against the registry — an unknown name is refused at the
    boundary with 400, never stored and handed to a run later (the rule
@@ -99,3 +99,16 @@ Conversational turns have it even tighter: they get no MCP config at all.
   visibly, not the cage quietly giving way.
 - The first company that uses it is the owner's house: the walk is the
   acceptance, with Blender on his desk, not mine.
+
+## Addendum (2026-08-23): granted after the fact
+
+The first live walk showed the gap at once: the CEO proposes the team and
+hires it, and the proposal carries no tools — a grant is the owner's, not the
+CEO's — so the modeler came into the world without Blender and there was no
+way to hand it over short of the API. `POST /api/agents/{id}/tools` sets the
+whole hand of an agent already hired, under the same rules as at hire
+(registry-validated, a config revision, the trait the next run reads), and the
+org chart's edit row offers the same chips as the hire dialog. The path the
+owner wanted — *tell the CEO everything, then hand the one tool to the one
+agent* — now exists.
+

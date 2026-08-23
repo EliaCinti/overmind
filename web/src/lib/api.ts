@@ -462,6 +462,9 @@ export interface PlanWindow {
   health: "allowed" | "warning" | "exhausted";
 }
 
+/** Who the person asked to pay (ADR-0037). */
+export type PayWith = "plan" | "detected";
+
 export type Economy =
   | {
       kind: "key";
@@ -527,11 +530,19 @@ export const api = {
     >("GET", "/claude-auth"),
   claudeAuthCode: (code: string) => req<void>("POST", "/claude-auth/code", { code }),
 
+  /** Let the plan pay, or go back to whatever the probe finds (ADR-0037).
+   *  Refused (409) when the key would still pay — it lives outside the
+   *  environment Overmind controls — so a choice never disagrees with the bill. */
+  payWith: (with_: PayWith) =>
+    req<{ economy: Economy; pay_with: PayWith }>("POST", "/economy/pay-with", { with: with_ }),
+
   health: () =>
     req<{
       status: string;
       version: string;
       economy: Economy;
+      /** `plan` when the person chose the plan (ADR-0037), `detected` otherwise. */
+      pay_with: PayWith;
       /** Keyed by window name (`five_hour`, `seven_day`); a window nobody has
        *  reported yet is simply absent. */
       plan_windows: Record<string, PlanWindow>;
@@ -573,6 +584,10 @@ export const api = {
     }),
   resumeMeeting: (companyId: string, meetingId: string) =>
     req<{ id: string }>("POST", `/companies/${companyId}/meetings/${meetingId}/resume`, {}),
+  /** The whole hand of an agent already hired (ADR-0036): validated against
+   *  the registry, recorded as a config revision, held from the next run on. */
+  setAgentTools: (agentId: string, tools: string[]) =>
+    req<{ id: string; traits: AgentTraits }>("POST", `/agents/${agentId}/tools`, { tools }),
   reassignAgent: (agentId: string, body: { reports_to?: string | null; title?: string }) =>
     req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
   pauseAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/pause`),

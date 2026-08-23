@@ -13,6 +13,7 @@ import type {
   Task,
   View,
   Economy,
+  PayWith,
   PlanWindow,
 } from "./lib/api";
 import { api } from "./lib/api";
@@ -26,6 +27,7 @@ import { Chat } from "./components/Chat";
 import { Meetings } from "./components/Meetings";
 import { Memory } from "./components/Memory";
 import { OrgChart } from "./components/OrgChart";
+import { TwoRoads } from "./components/OrgProposal";
 import { TaskDetail } from "./components/TaskDetail";
 import { Toaster } from "./components/Toaster";
 import { HireAgentDialog } from "./components/HireAgentDialog";
@@ -37,6 +39,7 @@ import { InviteDialog } from "./components/InviteDialog";
 import { DeleteCompanyDialog } from "./components/DeleteCompanyDialog";
 import { MembersDialog } from "./components/MembersDialog";
 import { SignInNotice } from "./components/SignInNotice";
+import { PayerNotice } from "./components/PayerNotice";
 import { Spinner } from "./components/ui/primitives";
 
 const LAST_COMPANY = "overmind-last-company";
@@ -76,6 +79,8 @@ export default function App() {
   const serverLast = useRef<string | null>(null);
   /** Where each plan window stands; refreshed on every live change. */
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
+  /** Whether the person chose who pays (ADR-0037). */
+  const [payWith, setPayWith] = useState<PayWith>("detected");
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("chat");
@@ -100,6 +105,40 @@ export default function App() {
     setHireManager(managerId);
     setHireOpen(true);
   };
+
+  /**
+   * The first step is a choice (M29). A company that holds its CEO and nobody
+   * else, with nothing proposed yet, does not open on the chat — it opens on
+   * the two roads the org chart offers, and nothing else is reachable until
+   * one is taken: tell the CEO the idea, or build the team yourself. The
+   * owner asked for exactly the org chart's card, verbatim, as the gate.
+   * Remembered per company for this tab, so a reload mid-conversation does
+   * not ask again; a fresh visit to a still-empty company does.
+   */
+  const [roadTaken, setRoadTaken] = useState<Record<string, true>>(() => {
+    try {
+      return JSON.parse(sessionStorage.getItem("overmind.roadTaken") ?? "{}");
+    } catch {
+      return {};
+    }
+  });
+  const takeRoad = (id: string) => {
+    const next = { ...roadTaken, [id]: true as const };
+    setRoadTaken(next);
+    try {
+      sessionStorage.setItem("overmind.roadTaken", JSON.stringify(next));
+    } catch {
+      /* storage can be full or forbidden; the gate then simply asks again */
+    }
+  };
+  const activeAgents = agents.filter((a) => a.status !== "terminated");
+  const ceo = activeAgents.find((a) => a.reports_to === null) ?? null;
+  const firstStep =
+    !!companyId &&
+    !!ceo &&
+    activeAgents.length === 1 &&
+    !proposals.some((p) => p.status === "proposed") &&
+    !roadTaken[companyId];
 
   // A session that expires mid-use sends you back to the door instead of
   // leaving a dead app: the API client announces every 401.
@@ -165,6 +204,7 @@ export default function App() {
       .health()
       .then((h) => {
         setEconomy(h.economy);
+        setPayWith(h.pay_with);
         setPlanWindows(h.plan_windows);
       })
       .catch(() => setEconomy(null));
@@ -313,10 +353,10 @@ export default function App() {
           onNewCompany={() => setCompanyId(null)}
           onHire={() => openHire(null)}
           onNewTask={() => setTaskOpen(true)}
-          canCreateTask={!!companyId}
+          canCreateTask={!!companyId && !firstStep}
           view={view}
           onViewChange={setView}
-          showViews={!!companyId}
+          showViews={!!companyId && !firstStep}
           onApprovalDecided={afterDecision}
           inboxSignal={inboxSignal}
           onOpenMeeting={openMeeting}
@@ -353,8 +393,26 @@ export default function App() {
         )}
 
         <SignInNotice economy={economy} onSignedIn={refreshHealth} />
+        <PayerNotice economy={economy} onChanged={refreshHealth} />
         {!companyId ? (
           <Onboarding defaultLanguage={language} onDone={afterCompanyCreated} />
+        ) : firstStep && ceo ? (
+          <main className="flex flex-1 items-center justify-center overflow-auto px-6 pb-8">
+            <div className="w-full max-w-3xl">
+              <TwoRoads
+                ceoName={ceo.name}
+                onTalkToCeo={() => {
+                  takeRoad(companyId);
+                  setView("chat");
+                }}
+                onHire={() => {
+                  takeRoad(companyId);
+                  setView("org");
+                  openHire(ceo.id);
+                }}
+              />
+            </div>
+          </main>
         ) : (
           <main className="flex flex-1 flex-col overflow-hidden pt-4">
             {view === "chat" ? (
@@ -382,6 +440,8 @@ export default function App() {
                 agents={agents}
                 budgets={budgets}
                 economy={economy}
+                payWith={payWith}
+                onPayerChanged={refreshHealth}
                 planWindows={planWindows}
                 proposal={proposals.find((p) => p.status === "proposed") ?? null}
                 onChanged={bump}

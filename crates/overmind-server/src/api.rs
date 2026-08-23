@@ -144,6 +144,7 @@ fn api_router() -> Router<AppState> {
             post(set_requires_approval),
         )
         .route("/agents/{agent_id}/budget", post(set_agent_budget))
+        .route("/agents/{agent_id}/tools", post(set_agent_tools))
         .route("/agents/{agent_id}/revisions", get(list_revisions))
         .route("/agents/{agent_id}/rollback", post(rollback_agent))
         .route("/companies/{company_id}/approvals", get(list_approvals))
@@ -240,6 +241,7 @@ fn api_router() -> Router<AppState> {
         .route("/claude-auth", get(claude_auth_status))
         .route("/claude-auth/start", post(claude_auth_start))
         .route("/claude-auth/code", post(claude_auth_code))
+        .route("/economy/pay-with", post(pay_with))
 }
 
 #[derive(serde::Deserialize)]
@@ -402,6 +404,56 @@ async fn claude_auth_code(
 /// Whether organizational memory (Wadachi/MCP) is wired up at all — for the UI
 /// badge. Server-wide: what a *given* company's brain is doing is
 /// `GET /companies/{id}/brain` (ADR-0024).
+#[derive(Deserialize)]
+struct PayWith {
+    /// `plan` or `detected` (ADR-0037).
+    with: String,
+}
+
+/// Let the plan pay — or go back to whatever the probe finds (ADR-0037).
+///
+/// Choosing the plan keeps `ANTHROPIC_API_KEY` out of every command that runs
+/// as the agent, then asks the CLI again who pays. If the answer is still a
+/// key — it lives somewhere the environment does not reach, a settings file
+/// or an `apiKeyHelper` — the choice is withdrawn and the request refused:
+/// a setting that disagrees with who is billed is a setting that will cost
+/// someone money, and ADR-0030 exists to prevent that.
+async fn pay_with(
+    State(state): State<AppState>,
+    Json(req): Json<PayWith>,
+) -> Result<Json<Value>, ApiError> {
+    let plan = match req.with.as_str() {
+        "plan" => true,
+        "detected" => false,
+        other => {
+            return Err(ApiError::Invalid(format!(
+                "pay with \"plan\" or \"detected\", not \"{other}\""
+            )));
+        }
+    };
+    crate::economy::prefer_plan(&state.config, plan).map_err(|e| ApiError::Internal(e.into()))?;
+    let economy = crate::economy::detect(&state.config).await;
+    if plan && economy.is_metered() {
+        crate::economy::prefer_plan(&state.config, false)
+            .map_err(|e| ApiError::Internal(e.into()))?;
+        return Err(ApiError::Conflict(
+            "the key still pays: it is not coming from the environment Overmind controls \
+             (a settings file or an apiKeyHelper, most likely), so the plan cannot be made to pay from here"
+                .into(),
+        ));
+    }
+    state.set_economy(economy.clone());
+    eprintln!(
+        "economy: chosen pay_with={} — now paying with {}",
+        crate::economy::pay_with_slug(&state.config),
+        crate::economy::describe(&economy)
+    );
+    Ok(Json(json!({
+        "economy": crate::economy::as_json(&economy),
+        "pay_with": crate::economy::pay_with_slug(&state.config),
+    })))
+}
+
 async fn memory_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "enabled": state.memory.is_enabled(),
@@ -536,6 +588,9 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         // once and words the budget accordingly — a cap in dollars promises
         // something under a key that it cannot promise under a plan.
         "economy": crate::economy::as_json(&state.economy()),
+        // Whether the person chose who pays (ADR-0037): `plan` when they asked
+        // the plan to, `detected` when the economy is whatever the probe found.
+        "pay_with": crate::economy::pay_with_slug(&state.config),
         // Where each of the plan's windows stands, as last reported. Empty
         // under an API key, where windows do not apply, and empty before the
         // first run says anything — a window we have not heard about is absent
@@ -3528,6 +3583,66 @@ async fn set_requires_approval(
     Ok(Json(
         json!({ "id": agent_id, "requires_approval": req.requires_approval }),
     ))
+}
+
+#[derive(Deserialize)]
+struct SetTools {
+    /// The whole hand, not a delta: what this agent holds after the call.
+    tools: Vec<String>,
+}
+
+/// Put tools in the hand of an agent who is already hired — or take them out
+/// (ADR-0036). The CEO proposes a team and hires it without tools; the person
+/// then grants Blender to the one modeler from the org chart. Same rules as at
+/// hire: names are validated against the operator's registry (an unknown one
+/// is 400 and nothing changes), the grant is the agent's trait, and the change
+/// is a config revision like any other characterization change.
+async fn set_agent_tools(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<SetTools>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.write_tx().await?;
+    let Some((company_id, before)) = agent_snapshot_by_id(&mut tx, &agent_id).await? else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    let mut traits: AgentTraits = serde_json::from_value(before["traits"].clone())?;
+    let mut hand: Vec<String> = Vec::new();
+    for t in req.tools {
+        let t = t.trim().to_string();
+        if !t.is_empty() && !hand.contains(&t) {
+            hand.push(t);
+        }
+    }
+    traits.tools = hand.clone();
+    validate_traits(&state.config.agent_tools, &traits)?;
+    sqlx::query("UPDATE agents SET traits = ? WHERE id = ?")
+        .bind(serde_json::to_string(&traits)?)
+        .bind(&agent_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some((_, after)) = agent_snapshot_by_id(&mut tx, &agent_id).await? {
+        crate::governance::record_revision(
+            &mut tx,
+            &company_id,
+            &agent_id,
+            "tools",
+            &before,
+            &after,
+        )
+        .await?;
+    }
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_REVISED,
+        &json!({ "agent_id": agent_id, "tools": hand }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": agent_id, "traits": traits })))
 }
 
 #[derive(Deserialize)]
