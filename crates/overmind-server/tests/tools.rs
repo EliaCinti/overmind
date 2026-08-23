@@ -279,3 +279,80 @@ async fn the_prompt_names_the_granted_tools() {
         "the prompt names the tool and says what it is: {prompt}"
     );
 }
+
+/// A tool can be put in the hand of an agent who is already hired — the CEO
+/// proposes the team, the person grants Blender afterwards — and taken away
+/// again. The grant is a characterization change like any other: validated
+/// against the registry, visible on the agent, recorded as a config revision.
+#[tokio::test]
+async fn a_tool_can_be_granted_to_an_agent_already_hired() {
+    let env = setup(Some(registry()), "#!/bin/sh\ntrue\n").await;
+    let (_, a) = hire(&env, "Modeler", json!([])).await;
+    let agent = a["id"].as_str().expect("agent id").to_string();
+    assert_eq!(a["traits"]["tools"], json!([]));
+
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/tools"),
+        Some(json!({ "tools": ["probe"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["traits"]["tools"], json!(["probe"]));
+
+    let (_, list) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/agents", env.company),
+        None,
+    )
+    .await;
+    let held = list
+        .as_array()
+        .or_else(|| list["agents"].as_array())
+        .expect("agents")
+        .iter()
+        .find(|x| x["id"] == agent)
+        .map(|x| x["traits"]["tools"].clone());
+    assert_eq!(
+        held,
+        Some(json!(["probe"])),
+        "the grant is on the agent: {list}"
+    );
+
+    // Unknown names are refused here too, and nothing changes.
+    let (s, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/tools"),
+        Some(json!({ "tools": ["lathe"] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // The change is history: a revision was recorded for it.
+    let (_, revs) = send(
+        &env.app,
+        "GET",
+        &format!("/api/agents/{agent}/revisions"),
+        None,
+    )
+    .await;
+    let revs = revs["revisions"].as_array().cloned().unwrap_or_default();
+    assert!(
+        revs.iter().any(|r| r["source"] == "tools"),
+        "a 'tools' revision exists: {revs:?}"
+    );
+
+    // And it can be taken away.
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/tools"),
+        Some(json!({ "tools": [] })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["traits"]["tools"], json!([]));
+}

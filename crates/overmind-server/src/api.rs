@@ -144,6 +144,7 @@ fn api_router() -> Router<AppState> {
             post(set_requires_approval),
         )
         .route("/agents/{agent_id}/budget", post(set_agent_budget))
+        .route("/agents/{agent_id}/tools", post(set_agent_tools))
         .route("/agents/{agent_id}/revisions", get(list_revisions))
         .route("/agents/{agent_id}/rollback", post(rollback_agent))
         .route("/companies/{company_id}/approvals", get(list_approvals))
@@ -3582,6 +3583,66 @@ async fn set_requires_approval(
     Ok(Json(
         json!({ "id": agent_id, "requires_approval": req.requires_approval }),
     ))
+}
+
+#[derive(Deserialize)]
+struct SetTools {
+    /// The whole hand, not a delta: what this agent holds after the call.
+    tools: Vec<String>,
+}
+
+/// Put tools in the hand of an agent who is already hired — or take them out
+/// (ADR-0036). The CEO proposes a team and hires it without tools; the person
+/// then grants Blender to the one modeler from the org chart. Same rules as at
+/// hire: names are validated against the operator's registry (an unknown one
+/// is 400 and nothing changes), the grant is the agent's trait, and the change
+/// is a config revision like any other characterization change.
+async fn set_agent_tools(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(req): Json<SetTools>,
+) -> Result<Json<Value>, ApiError> {
+    let mut tx = state.write_tx().await?;
+    let Some((company_id, before)) = agent_snapshot_by_id(&mut tx, &agent_id).await? else {
+        return Err(ApiError::NotFound("agent"));
+    };
+    let mut traits: AgentTraits = serde_json::from_value(before["traits"].clone())?;
+    let mut hand: Vec<String> = Vec::new();
+    for t in req.tools {
+        let t = t.trim().to_string();
+        if !t.is_empty() && !hand.contains(&t) {
+            hand.push(t);
+        }
+    }
+    traits.tools = hand.clone();
+    validate_traits(&state.config.agent_tools, &traits)?;
+    sqlx::query("UPDATE agents SET traits = ? WHERE id = ?")
+        .bind(serde_json::to_string(&traits)?)
+        .bind(&agent_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some((_, after)) = agent_snapshot_by_id(&mut tx, &agent_id).await? {
+        crate::governance::record_revision(
+            &mut tx,
+            &company_id,
+            &agent_id,
+            "tools",
+            &before,
+            &after,
+        )
+        .await?;
+    }
+    audit::append(
+        &mut tx,
+        Some(&company_id),
+        None,
+        event_kind::CONFIG_REVISED,
+        &json!({ "agent_id": agent_id, "tools": hand }),
+    )
+    .await?;
+    tx.commit().await?;
+    state.notify(&company_id);
+    Ok(Json(json!({ "id": agent_id, "traits": traits })))
 }
 
 #[derive(Deserialize)]

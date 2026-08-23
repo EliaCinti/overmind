@@ -584,6 +584,10 @@ export const api = {
     }),
   resumeMeeting: (companyId: string, meetingId: string) =>
     req<{ id: string }>("POST", `/companies/${companyId}/meetings/${meetingId}/resume`, {}),
+  /** The whole hand of an agent already hired (ADR-0036): validated against
+   *  the registry, recorded as a config revision, held from the next run on. */
+  setAgentTools: (agentId: string, tools: string[]) =>
+    req<{ id: string; traits: AgentTraits }>("POST", `/agents/${agentId}/tools`, { tools }),
   reassignAgent: (agentId: string, body: { reports_to?: string | null; title?: string }) =>
     req<{ id: string }>("POST", `/agents/${agentId}/reassign`, body),
   pauseAgent: (agentId: string) => req<unknown>("POST", `/agents/${agentId}/pause`),

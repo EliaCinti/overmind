@@ -1,11 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
-import type { Agent, AgentBudget, Economy, OrgProposal, PayWith, PlanWindow } from "../lib/api";
+import type { Agent, AgentBudget, Economy, OrgProposal, PayWith, PlanWindow, Tool } from "../lib/api";
 import { PLAN_WINDOWS } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
+import { Chip } from "./ui/controls";
 import { cn } from "../lib/utils";
 import { useT, useFormats } from "../lib/i18n";
 import { FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
@@ -203,6 +204,9 @@ function Node({
           </div>
           <p className="text-xs text-muted-foreground">
             {agent.archetype} · {t(`autonomy.${agent.traits.autonomy}`)}
+            {(agent.traits.tools?.length ?? 0) > 0 && (
+              <> · {t("org.holds", { tools: (agent.traits.tools ?? []).join(", ") })}</>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
@@ -450,6 +454,34 @@ function EditRow({
   const [manager, setManager] = useState(agent.reports_to ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Tools (ADR-0036): what the operator declared, granted to this agent after
+  // the fact — the CEO hires the team, the person hands Blender to the one
+  // modeler. Absent when nothing is declared, like in the hire dialog.
+  const [registry, setRegistry] = useState<Tool[]>([]);
+  const [held, setHeld] = useState<string[]>(agent.traits.tools ?? []);
+  const [toolsNote, setToolsNote] = useState<string | null>(null);
+  useEffect(() => {
+    api
+      .listTools()
+      .then(setRegistry)
+      .catch(() => setRegistry([]));
+  }, []);
+  const toggleTool = async (name: string) => {
+    const next = held.includes(name) ? held.filter((x) => x !== name) : [...held, name];
+    setToolsNote(null);
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.setAgentTools(agent.id, next);
+      setHeld(r.traits.tools ?? next);
+      setToolsNote(t("org.toolsSaved"));
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t("common.failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Run a governance action, then refresh; keeps the panel open so several
   // actions can be taken in a row.
@@ -508,6 +540,26 @@ function EditRow({
           </select>
         </label>
       </div>
+      {registry.length > 0 && (
+        <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+          <span>
+            {t("org.tools")}
+            <span className="ml-1.5 text-[11px] text-muted-foreground/70">{t("org.toolsHint")}</span>
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {registry.map((tool) => (
+              <Chip
+                key={tool.name}
+                active={held.includes(tool.name)}
+                onClick={() => !busy && toggleTool(tool.name)}
+              >
+                <span title={tool.description ?? tool.command}>{tool.name}</span>
+              </Chip>
+            ))}
+            {toolsNote && <span className="text-[11px] text-primary">{toolsNote}</span>}
+          </div>
+        </div>
+      )}
       {error && <p className="text-xs text-destructive">{error}</p>}
 
       {/* Governance actions */}
