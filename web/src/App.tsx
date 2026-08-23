@@ -361,8 +361,6 @@ export default function App() {
           inboxSignal={inboxSignal}
           onOpenMeeting={openMeeting}
           connected={connected}
-          economy={economy}
-          payWith={payWith}
           tick={tick}
           language={language}
           onChangeLanguage={changeLanguage}

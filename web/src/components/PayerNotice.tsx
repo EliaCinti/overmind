@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CreditCard, Loader2 } from "lucide-react";
 import type { Economy } from "../lib/api";
 import { api } from "../lib/api";
@@ -27,8 +27,16 @@ export function PayerNotice({ economy, onChanged }: { economy: Economy | null; o
     | { step: "dismissed" }
   >({ step: "idle" });
 
-  // Success outlives its cause: once the plan pays, `economy` stops being a
-  // key and this card would vanish before the person read the good news.
+  // Success outlives its cause — once the plan pays, `economy` stops being a
+  // key and this card would vanish before the person read the good news —
+  // but not by much: a sentence that stays after it is read becomes
+  // furniture, so it leaves on its own.
+  useEffect(() => {
+    if (flow.step !== "done") return;
+    const id = window.setTimeout(() => setFlow({ step: "dismissed" }), 6000);
+    return () => window.clearTimeout(id);
+  }, [flow.step]);
+
   if (flow.step === "done") {
     return (
       <Shell>

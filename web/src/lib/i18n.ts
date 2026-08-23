@@ -319,11 +319,7 @@ export const en = {
     keyOverridesLogin: "You are signed in with a subscription, and it is not paying.",
     keyOverridesLoginFix:
       "An API key takes precedence over a claude.ai login. Overmind can let the plan pay instead — the offer is at the top of the page.",
-    payerKey: "Paying: API key",
-    payerPlan: "Paying: {plan} plan",
     payerPlanChosen: "You chose the plan; the key is kept out of the agents' environment.",
-    payerUnknown: "Paying: unknown",
-    payerOverridden: "A claude.ai login is signed in, but the API key is paying.",
     letPlanPay: "Let the plan pay",
     letPlanPayBody:
       "Overmind can keep ANTHROPIC_API_KEY out of the agents' environment and ask the CLI again who pays. Nothing else changes; the choice survives a restart and can be undone from the org chart.",
@@ -845,11 +841,7 @@ export const it: Dictionary = {
     keyOverridesLogin: "Hai l'accesso con un abbonamento, e non è lui che sta pagando.",
     keyOverridesLoginFix:
       "Una chiave API ha la precedenza su un login claude.ai. Overmind può far pagare il piano al suo posto: l'offerta è in cima alla pagina.",
-    payerKey: "Paga: chiave API",
-    payerPlan: "Paga: piano {plan}",
     payerPlanChosen: "Hai scelto il piano: la chiave resta fuori dall'ambiente degli agenti.",
-    payerUnknown: "Paga: non si sa",
-    payerOverridden: "C'è un login claude.ai, ma sta pagando la chiave API.",
     letPlanPay: "Fai pagare il piano",
     letPlanPayBody:
       "Overmind può tenere ANTHROPIC_API_KEY fuori dall'ambiente degli agenti e richiedere alla CLI chi paga. Non cambia altro; la scelta sopravvive a un riavvio e si annulla dall'organico.",

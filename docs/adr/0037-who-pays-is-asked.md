@@ -52,13 +52,16 @@ words: *Overmind should ask, and on approval, do it itself.*
    startup probe already honours it, so a restarted server reports the plan
    paying without anyone re-choosing.
 
-4. **Said on every page.** `GET /api/health` gains `pay_with: "plan" |
-   "detected"`; the top bar carries a three-word badge — *Paying: API key* /
-   *Paying: Max plan* — in the warning colour when a key is overriding a
-   login. The offer itself is a card at the top of whichever page the person
-   is on, beside the sign-in notice, with two buttons: *Let the plan pay* and
-   *Keep the key*. The undo sits where the money is read, in the org chart's
-   economy line.
+4. **Said on every page — when it matters.** `GET /api/health` gains
+   `pay_with: "plan" | "detected"`. The offer is a card at the top of
+   whichever page the person is on, beside the sign-in notice, with two
+   buttons: *Let the plan pay* and *Keep the key*; its success line leaves on
+   its own after a few seconds. The resting state — who pays when nothing is
+   wrong — stays where the money is read, the org chart's economy line, which
+   also names the choice and carries its undo. A permanent badge in the top
+   bar was built and taken out the same day: the owner found the bar already
+   full, and a fact that is only worth acting on in one state does not earn a
+   place in every state.
 
 5. **Any session may choose.** Like the sign-in flow, this is an
    instance-level fact about the box, and the wall (M24) already limits the

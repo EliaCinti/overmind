@@ -227,7 +227,7 @@ docker compose pull && docker compose up   # the published image → http://loca
 docker compose exec --user agent overmind claude setup-token
 ```
 
-Both at once — a key exported in your shell *and* a claude.ai login (the usual state of a developer's machine, and of Overmind run natively)? The key wins and your plan sits unused. Overmind says so at the top of every page and offers **Let the plan pay**: one click keeps the key out of the agents' environment, the CLI is asked again who pays, and the top bar reads *Paying: Max plan*. Refused with the reason if the key lives somewhere the environment does not reach ([ADR-0037](docs/adr/0037-who-pays-is-asked.md)).
+Both at once — a key exported in your shell *and* a claude.ai login (the usual state of a developer's machine, and of Overmind run natively)? The key wins and your plan sits unused. Overmind says so at the top of every page and offers **Let the plan pay**: one click keeps the key out of the agents' environment, the CLI is asked again who pays, and the org chart reads *Covered by a Max subscription*. Refused with the reason if the key lives somewhere the environment does not reach ([ADR-0037](docs/adr/0037-who-pays-is-asked.md)).
 
 Open the browser, **create the owner account** (the first run offers exactly that), found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is. The DB, worktrees, brains and the agent's sign-in persist on named volumes across restarts.
 

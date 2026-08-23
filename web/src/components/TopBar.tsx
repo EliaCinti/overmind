@@ -8,7 +8,6 @@ import {
   ShieldAlert,
   Wifi,
   WifiOff,
-  CreditCard,
   BrainCircuit,
   Plug,
   LogOut,
@@ -17,7 +16,7 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
-import type { Company, Economy, LanguageCode, PayWith, View } from "../lib/api";
+import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
 import { Button } from "./ui/button";
 import { Segmented } from "./ui/controls";
@@ -42,8 +41,6 @@ export function TopBar({
   inboxSignal,
   onOpenMeeting,
   connected,
-  economy,
-  payWith,
   tick,
   language,
   onChangeLanguage,
@@ -68,10 +65,6 @@ export function TopBar({
   inboxSignal: number;
   onOpenMeeting: (meetingId: string) => void;
   connected: boolean;
-  /** Who pays, on every page (ADR-0037): the bill is not a property of the
-   *  org chart, and this is the one line that reads the same everywhere. */
-  economy: Economy | null;
-  payWith: PayWith;
   tick: number;
   language: LanguageCode;
   onChangeLanguage: (code: LanguageCode) => void;
@@ -147,7 +140,6 @@ export function TopBar({
         )}
         <MemoryIndicator companyId={companyId} />
         <AuditIndicator tick={tick} />
-        <PayerBadge economy={economy} payWith={payWith} />
         <ConnectionDot connected={connected} />
         {companyId && (
           <>
@@ -241,42 +233,6 @@ function Logo() {
       <circle cx="152" cy="110" r="23" fill="#9d7bff" />
       <circle cx="152" cy="110" r="8.5" fill="#f0c07a" />
     </svg>
-  );
-}
-
-/** Who pays, in three words, with the warning colour when a key is billing a
- *  person who signed in with a plan. */
-function PayerBadge({ economy, payWith }: { economy: Economy | null; payWith: PayWith }) {
-  const t = useT();
-  if (!economy) return null;
-  const overridden = economy.kind === "key" && economy.overrides_login;
-  const label =
-    economy.kind === "key"
-      ? t("economy.payerKey")
-      : economy.kind === "subscription"
-        ? t("economy.payerPlan", { plan: economy.plan ?? "" }).replace(/\s{2,}/g, " ")
-        : t("economy.payerUnknown");
-  const title = overridden
-    ? t("economy.payerOverridden")
-    : payWith === "plan"
-      ? t("economy.payerPlanChosen")
-      : economy.kind === "key"
-        ? t("economy.keyMeaning")
-        : economy.kind === "subscription"
-          ? t("economy.subscriptionMeaning")
-          : t("economy.unknownMeaning");
-  return (
-    <span
-      className={cn(
-        "hidden items-center gap-1.5 rounded-full px-2 py-1 text-xs sm:inline-flex",
-        overridden ? "text-[var(--color-status-in_review)]" : "text-muted-foreground",
-      )}
-      title={title}
-      aria-label={title}
-    >
-      <CreditCard className="h-3.5 w-3.5" />
-      {label}
-    </span>
   );
 }
 
