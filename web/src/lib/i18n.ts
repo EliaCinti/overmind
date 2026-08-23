@@ -452,6 +452,10 @@ export const en = {
     strictness: "Review strictness",
     budget: "Monthly budget · {amount}",
     model: "Model",
+    tools: "Tools",
+    toolsHint:
+      "MCP servers the operator declared on this machine. Granted per agent and written into the run's own configuration — an agent holds exactly what you grant here, nothing it finds.",
+    previewTools: " Holds the tools: {tools}.",
     brief: "Custom brief",
     briefHint:
       "Added on top of the structured config. It can add guidance but never override the enforced limits above.",
@@ -963,6 +967,10 @@ export const it: Dictionary = {
     strictness: "Severità in revisione",
     budget: "Budget mensile · {amount}",
     model: "Modello",
+    tools: "Strumenti",
+    toolsHint:
+      "Server MCP dichiarati dall'operatore su questa macchina. Concessi per agente e scritti nella configurazione del run — un agente ha esattamente ciò che concedi qui, niente che trova da sé.",
+    previewTools: " Ha gli strumenti: {tools}.",
     brief: "Brief personalizzato",
     briefHint:
       "Si aggiunge alla configurazione strutturata. Può dare indicazioni, ma non può mai scavalcare i limiti imposti qui sopra.",

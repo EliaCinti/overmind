@@ -106,8 +106,8 @@ First run claims the instance (argon2id, hashed sessions). Then <strong>invites<
 Attach files to chat and tasks; agents produce <strong>artifacts</strong> you download from the task; meeting transcripts are kept. <code>knowledge</code> tasks need no repository; <code>code</code> tasks get a worktree and a diff.
 </td>
 <td align="center">
-<h3>🔌 Bring Your Own Agent — and MCP both ways</h3>
-Any agent CLI via <code>OVERMIND_AGENT_CMD</code> (Claude Code by default). Overmind is also an MCP <em>server</em>: file tasks from your editor with a labelled, revocable token — filing is a request, starting stays yours.
+<h3>🔌 Bring Your Own Agent — and MCP in every direction</h3>
+Any agent CLI via <code>OVERMIND_AGENT_CMD</code> (Claude Code by default). <strong>Tools in the agent's hand:</strong> declare MCP servers on the box (Blender via BlenderMCP, a database, GitHub), grant them per agent in the hire dialog — an agent holds exactly what it was granted. And Overmind is an MCP <em>server</em> too: file tasks from your editor with a labelled, revocable token.
 </td>
 </tr>
 </table>
@@ -299,6 +299,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_DATA_DIR` | Worktrees, brains, artifacts, attachments (default `./overmind-data`) |
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: the Claude Code CLI, `claude -p … --output-format stream-json --verbose`). A custom adapter is never interrogated for how it pays |
 | `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory; the image sets `wadachi`; empty = off deliberately) |
+| `OVERMIND_AGENT_TOOLS` | A file of MCP servers agents *may* be granted, in the CLI's `{"mcpServers": …}` shape — e.g. Blender via BlenderMCP ([example](docs/examples/agent-tools.blender.json)). Declared here by the operator, granted per agent in the hire dialog; an agent holds exactly what it was granted ([ADR-0036](docs/adr/0036-tools-in-the-agents-hand.md)) |
 | `OVERMIND_MEMORY_POOL` | Concurrent memory connections (default `4`) |
 | `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |
 | `OVERMIND_SANDBOX` | `off` empties the whole set of cage mechanisms — agents become read-only (default on) |

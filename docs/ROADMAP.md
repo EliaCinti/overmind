@@ -410,6 +410,15 @@ Twenty-six milestones closed by tests and live acceptance, a README and a site t
 - **Declared permissions are not policed** (`repo:write`, `web:read`, …) — honest by design until M10 sandboxing.
 - **No quorum on meeting requests** — one agent convenes. Deliberate: seconding would burn an adapter turn per invitee *before* the human answers. Mitigated by the M13.5 limits instead.
 
+## M28 — Tools in the agent's hand `in-progress`
+The owner's first ask that needs a tool outside Overmind: a company that turns a sketch of his new house into a Blender model — **one** agent driving Blender through BlenderMCP, the others (engineer, architect, stylist, furnisher) analysing, researching, proposing. Impossible by design until now: every run's MCP config held exactly the memory endpoint, under `--strict-mcp-config` (ADR-0027), and conversational turns had none at all. [ADR-0036](adr/0036-tools-in-the-agents-hand.md) — it jumped the queue in [NEXT.md](NEXT.md) because a real need named it.
+
+- ✅ **Declared by the operator, granted per agent.** `OVERMIND_AGENT_TOOLS` names a file in the CLI's own `{"mcpServers": …}` shape (plus our optional `"descriptions"`), read once at startup and listed at `GET /api/tools`; a tool is a command the server will spawn, which is what makes it the operator's to declare. `tools: ["blender"]` joins the agent's traits — structured, **enforced** (the server writes the definition into the per-run file or it does not), validated against the registry at every entry point (an unknown name is 400, never stored), versioned with config revisions like every characterization change. Per agent on purpose: one Blender, one socket, one hand on it.
+- ✅ **Written where the CLI looks, and nowhere else.** The task run's MCP config is the memory endpoint plus the granted servers; a conversational turn now gets its own file — granted servers only, no memory token — so refining the model from the chat reaches Blender. `--strict-mcp-config` is unchanged; a custom `OVERMIND_AGENT_CMD` still receives nothing. The agent is told what it holds, in its own prompt: *"Tools granted to you: blender — Blender, via BlenderMCP."*
+- ✅ **In the hire dialog**, the *Tools* field appears only when the operator declared something — a box with no tools never promises one — and the preview says *Holds the tools: blender*.
+- ✅ **The threat model says what a grant is:** a door the operator opened; the tool's process runs where the CLI runs, what it talks to is outside the cage's promise. `tools.rs` holds it.
+- **Accept (the owner's):** Blender open on his desk with the BlenderMCP addon, Overmind native, `OVERMIND_AGENT_TOOLS` naming `blender`, a company *Casa San Vito* with a modeler holding it — a sketch and the measures go in, a model comes out, and a photo of a sofa in the chat moves it under the window. `docs/examples/agent-tools.blender.json` is the registry to start from.
+
 ## What comes next
 The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
 

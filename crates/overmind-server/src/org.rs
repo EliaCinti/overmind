@@ -342,6 +342,7 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
             };
             let agent = crate::api::hire(
                 &mut tx,
+                &state.config.agent_tools,
                 &company_id,
                 &crate::api::HireAgent {
                     name: name.clone(),
@@ -375,6 +376,7 @@ pub async fn accept(state: &AppState, proposal_id: &str) -> Result<Vec<String>, 
                 let (member_id, name, archetype, domain, title, _rt, brief) = *m;
                 let agent = crate::api::hire(
                     &mut tx,
+                    &state.config.agent_tools,
                     &company_id,
                     &crate::api::HireAgent {
                         name: name.clone(),

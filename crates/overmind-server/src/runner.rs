@@ -92,6 +92,9 @@ pub(crate) struct Persona {
     /// (ADR-0021). Empty for the general domain, which adds nothing.
     pub domain_context: String,
     pub brief: Option<String>,
+    /// The line naming the tools this agent holds (ADR-0036), already
+    /// worded; empty when none were granted.
+    pub tools_line: String,
 }
 
 impl Persona {
@@ -118,6 +121,7 @@ impl Persona {
         {
             s.push_str(&format!("\nYour brief: {brief}"));
         }
+        s.push_str(&self.tools_line);
         s.push_str("\n\nWork in role: bring the judgement your role is hired for, and say so when the task strays outside it.");
         s
     }
@@ -166,12 +170,14 @@ async fn load_persona(state: &AppState, agent_id: &str) -> Option<Persona> {
             })
         })
         .unwrap_or_default();
+    let tools_line = tools_line(state, &trait_tools(&traits));
     Some(Persona {
         name,
         role: title.unwrap_or(archetype_name),
         focus_areas,
         domain_context,
         brief,
+        tools_line,
     })
 }
 
@@ -646,6 +652,44 @@ pub(crate) fn trait_multimodal(traits_json: &str) -> bool {
 /// Which model runs this agent. Falls back to the catalog default rather than
 /// to nothing: a traits blob we cannot read is a reason to run the agent
 /// plainly, not a reason to invoke the CLI with an empty `--model`.
+/// The tools an agent holds (ADR-0036), read off its traits. Unreadable
+/// traits yield none -- the same graceful reading every trait helper does.
+pub(crate) fn trait_tools(traits_json: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(traits_json)
+        .ok()
+        .and_then(|v| {
+            v.get("tools").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// The line that tells an agent what it holds (ADR-0036): a granted tool is
+/// something it is *meant* to use, not something it discovers in a menu.
+/// Empty when nothing was granted.
+pub(crate) fn tools_line(state: &AppState, tools: &[String]) -> String {
+    let named: Vec<String> = tools
+        .iter()
+        .filter(|t| state.config.agent_tools.contains(t))
+        .map(|t| match state.config.agent_tools.description(t) {
+            Some(d) => format!("{t} — {d}"),
+            None => t.clone(),
+        })
+        .collect();
+    if named.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nTools granted to you (MCP servers, already connected): {}. Use them when the work calls for them.",
+            named.join("; ")
+        )
+    }
+}
+
 pub(crate) fn trait_model(traits_json: &str) -> String {
     serde_json::from_str::<Value>(traits_json)
         .ok()
@@ -1030,34 +1074,56 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
 /// It lives in the system temp dir rather than the run directory: for a `code`
 /// task the run directory is a git worktree, and a token file there is one
 /// `git add -A` away from being committed.
-struct AgentMcpConfig {
-    path: PathBuf,
-    token: String,
+pub(crate) struct AgentMcpConfig {
+    pub(crate) path: PathBuf,
+    /// The run's memory token -- `None` when the file carries only granted
+    /// tools (memory off, or a conversational turn, which has no session).
+    pub(crate) token: Option<String>,
 }
 
 impl AgentMcpConfig {
-    /// `None` when there is no memory to reach — the agent then gets no MCP
-    /// config at all, which is the same graceful degradation as an empty
-    /// `OVERMIND_MEMORY_CONTEXT` (ADR-0003, rule 6).
-    fn write(state: &AppState, session_id: &str) -> Option<Self> {
-        if !state.memory.is_enabled() {
-            return None;
+    /// The file for a conversational turn (ADR-0036): granted tools only, no
+    /// memory endpoint -- a turn has no session and therefore no token. `None`
+    /// when the agent holds no tools, so a turn that needs nothing gets
+    /// exactly what it got before.
+    pub(crate) fn write_for_turn(state: &AppState, id: &str, tools: &[String]) -> Option<Self> {
+        Self::write_with(state, id, tools, false)
+    }
+
+    fn write_with(state: &AppState, id: &str, tools: &[String], with_memory: bool) -> Option<Self> {
+        let memory = with_memory && state.memory.is_enabled();
+        let mut servers = serde_json::Map::new();
+        // Granted tools (ADR-0036): the operator declared them, the company
+        // granted them to this agent, and nothing else gets in -- the CLI
+        // runs with --strict-mcp-config over exactly this file.
+        for name in tools {
+            if let Some(def) = state.config.agent_tools.servers.get(name) {
+                servers.insert(name.clone(), def.clone());
+            }
         }
-        // v4, not the v7 used for ids elsewhere: v7 encodes its creation time
-        // in the leading bits, and a secret should not tell you when it was
-        // minted. The entropy of v7 would have been sufficient; being
-        // predictable in *any* dimension is not a property to hand a token.
-        let token = uuid::Uuid::new_v4().to_string();
-        let path = std::env::temp_dir().join(format!("overmind-mcp-{session_id}.json"));
-        let body = json!({
-            "mcpServers": {
-                "overmind": {
+        let mut token = None;
+        if memory {
+            // v4, not the v7 used for ids elsewhere: v7 encodes its creation
+            // time in the leading bits, and a secret should not tell you when
+            // it was minted. The entropy of v7 would have been sufficient;
+            // being predictable in *any* dimension is not a property to hand
+            // a token.
+            let t = uuid::Uuid::new_v4().to_string();
+            servers.insert(
+                "overmind".into(),
+                json!({
                     "type": "http",
                     "url": format!("{}/mcp", state.config.self_url.trim_end_matches('/')),
-                    "headers": { "Authorization": format!("Bearer {token}") }
-                }
-            }
-        });
+                    "headers": { "Authorization": format!("Bearer {t}") }
+                }),
+            );
+            token = Some(t);
+        }
+        if servers.is_empty() {
+            return None;
+        }
+        let path = std::env::temp_dir().join(format!("overmind-mcp-{id}.json"));
+        let body = json!({ "mcpServers": servers });
         std::fs::write(&path, body.to_string()).ok()?;
         // Before anyone can read it: the token is the run's identity.
         #[cfg(unix)]
@@ -1066,6 +1132,14 @@ impl AgentMcpConfig {
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
         Some(Self { path, token })
+    }
+
+    /// The file for a task run: the memory endpoint (ADR-0027) plus the
+    /// agent's granted tools (ADR-0036). `None` when there is neither -- the
+    /// agent then gets no MCP config at all, which is the same graceful
+    /// degradation as an empty `OVERMIND_MEMORY_CONTEXT` (ADR-0003, rule 6).
+    fn write(state: &AppState, session_id: &str, tools: &[String]) -> Option<Self> {
+        Self::write_with(state, session_id, tools, true)
     }
 }
 
@@ -1081,10 +1155,10 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     };
     // The agent's own door to memory (ADR-0027). Held for the whole run: when
     // this binding drops, the file goes and the token stops working.
-    let mcp = AgentMcpConfig::write(&ctx.state, &ctx.session_id);
-    if let Some(m) = &mcp {
+    let mcp = AgentMcpConfig::write(&ctx.state, &ctx.session_id, &trait_tools(&ctx.agent_traits));
+    if let Some(token) = mcp.as_ref().and_then(|m| m.token.as_ref()) {
         let _ = sqlx::query("UPDATE agent_task_sessions SET mcp_token = ? WHERE id = ?")
-            .bind(&m.token)
+            .bind(token)
             .bind(&ctx.session_id)
             .execute(&ctx.state.pool)
             .await;

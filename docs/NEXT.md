@@ -16,12 +16,14 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 
 ## The order, and why
 
-### M28 — A week of use *(the owner's milestone)*
-Not a development milestone: the owner uses Overmind for real work for a week, does the **two-machine walk over Tailscale** with a friend (closes M24 and M25), has the friend install it on a fresh machine with `docker compose pull && up` (closes M27), and writes down every friction **in the order it bit**. Those frictions are the backlog for M29+, ahead of anything below — the roadmap's own doctrine since M23: *dogfood first, then fix what actually hurt.*
+> **23 Aug:** *Tools in the agent's hand* jumped the queue as **M28** — a real need named it (a Blender company for the owner's house, ADR-0036), which is exactly the rule at the bottom of this file. The milestones below keep their names; their numbers shift by one when they open.
+
+### A week of use *(the owner's milestone)*
+Not a development milestone: the owner uses Overmind for real work for a week, does the **two-machine walk over Tailscale** with a friend (closes M24 and M25), has the friend install it on a fresh machine with `docker compose pull && up` (closes M27), and writes down every friction **in the order it bit**. Those frictions are the backlog for what follows, ahead of anything below — the roadmap's own doctrine since M23: *dogfood first, then fix what actually hurt.*
 
 **Accept:** M23, M24, M25, M27 marked `done` on the owner's word; a list of frictions, ranked.
 
-### M29 — Backup and restore
+### Backup and restore
 Today's incident, turned into a verb. One API and one button: **export** a company — or the whole instance — as a single archive (the database, every brain, the subscription token, attachments and artifacts), and **restore** it into a fresh instance. The archive is what you keep on another disk; the restore is what makes the image disposable. Plus the documented, tested recovery of a Docker volume gone bad.
 
 - Export is consistent: taken inside a read transaction (SQLite backup API), brains copied after the database, the audit chain verified before the archive is sealed and the verification written into it.
@@ -30,22 +32,22 @@ Today's incident, turned into a verb. One API and one button: **export** a compa
 
 **Accept:** export on one machine, restore on another, the door, the companies, the memories and the chain all intact; the threat model gains a row.
 
-### M30 — From diff to landed
+### From diff to landed
 The loop's last step. After review, a person can **land** a code run: merge its branch into the workspace's default ref (fast-forward or merge commit, the repo's history kept honest), or — when the repository has a remote and `gh` is signed in — **open a pull request** with the task's brief as the description and the diff as the body. Both are the human's verb, audited with the actor; an agent never lands its own work. Conflicts are reported, not resolved by a machine.
 
 **Accept:** a code task completes, the diff is reviewed, *Land* merges it into the default branch and the board shows it; with a remote, *Open a PR* produces a PR whose description names the task. Held by tests against a real local repository.
 
-### M31 — The browser walk, in CI
+### The browser walk, in CI
 Every acceptance walk that has ever been done by hand, done by a machine on every pull request: the door (claim, login, invite, sign-up), onboarding (found, language, skip repo), the company (delete by name), members, a gated task through the inbox with the actor's name, the org view's life-line. Playwright against the real server with a stub adapter — no API key, no money — on the Linux runner; screenshots on failure. The wiki's guides become executable.
 
 **Accept:** the walk is a CI job, green on a PR that changes nothing and red on one that breaks the door.
 
-### M32 — The chain, seen
+### The chain, seen
 A page for the audit chain: the events of a company, each with its actor's name, kind, time and payload; the verify result at the top; filters by kind and actor. And a **history** of approvals and meetings — decided, by whom, when — so the inbox can stay a place for what is pending. The thing the product is proudest of, finally visible without `curl`.
 
 **Accept:** the page shows the chain and says "verified"; break the chain in the test and the page names the block.
 
-### M33 — Overmind in your pocket
+### Overmind in your pocket
 The owner's ask, and the right shape for it. A person who runs a company of agents is mostly *away from it* — and what reaches them is a decision: approve a start, allow a meeting, answer the CEO, glance at the board. That is a phone's job. Overmind is already reachable from a phone over Tailscale (iOS and Android have it), with no cloud in between; the hard part of "an app" is done. The rest comes in stages, cheapest and most honest first:
 
 - **A · HTTPS on the tailnet, verified.** A service worker and push need a secure context, and the documented way to reach Overmind today is plain HTTP on the tailnet address. `tailscale serve` gives the machine an HTTPS name and a certificate for free; verify it against the door (cookie `Secure`, `OVERMIND_COOKIE_SECURE=on`), the WebSocket's origin guard and the live updates — and write the result into the wiki, where today it is only promised for a reverse proxy.
@@ -55,7 +57,7 @@ The owner's ask, and the right shape for it. A person who runs a company of agen
 
 **Accept:** from a phone on the tailnet, over HTTPS: sign in, get a push that a run waits, approve it, see the board move — without an app store. D has its own acceptance when it opens.
 
-### M34 — The door on the open internet
+### The door on the open internet
 M33 reaches you and the two friends on your tailnet. Reaching *more* people — a team, a phone on a cellular network, someone you will never add to a tailnet — means a port on the internet, and there the security stops being "the network is mine" and becomes "the door holds on its own". The principle that does not move: **never a cloud of ours in the middle.** The server stays yours; the phone and the others come in through the same door. What changes is how much that door has to hold, and what it is honest to say about it.
 
 - **A · The ways to widen reach, cheapest and safest first, each verified and written down.** *Share the tailnet*: invite a device into it (Tailscale node sharing; identity stays at the network layer, nothing public). *Tailscale Funnel*: a public HTTPS name through Tailscale's relay, TLS terminated for you, the door carrying the whole weight — no certificate to own, a bandwidth ceiling to know about. *A VPS with Caddy*: a domain you own, TLS by Caddy, `OVERMIND_COOKIE_SECURE=on`, the image pulled from GHCR — a compose file with Caddy in it, ready to copy. Three doors, one server, your data still on it.
