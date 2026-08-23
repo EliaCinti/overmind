@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
+import { Markdown } from "./Markdown";
 import { AlertTriangle, Ban, Check, Gavel, Loader2, Play, Users, Wallet, X } from "lucide-react";
 import type { Meeting, MeetingDetail, MeetingStatus } from "../lib/api";
 import { api } from "../lib/api";
@@ -233,7 +234,7 @@ export function Meetings({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-medium text-muted-foreground">{t.agent_name}</p>
-                    <p className="whitespace-pre-wrap text-sm leading-relaxed">{t.content}</p>
+                    <Markdown text={t.content} className="text-sm leading-relaxed" />
                   </div>
                 </motion.div>
               ))}
@@ -254,7 +255,7 @@ export function Meetings({
                     {t("meetings.decision")}
                   </p>
                 </div>
-                <p className="mt-1.5 whitespace-pre-wrap text-sm">{detail.meeting.decision}</p>
+                <Markdown text={detail.meeting.decision} className="mt-1.5 text-sm" />
                 <p className="mt-2 text-xs text-muted-foreground">
                   {t("meetings.carried")} · {timeAgo(detail.meeting.decided_at)}
                 </p>

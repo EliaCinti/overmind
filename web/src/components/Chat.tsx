@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
+import { Markdown } from "./Markdown";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ArrowUpRight, Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
 import type { Agent, Attachment, Message } from "../lib/api";
@@ -40,13 +41,29 @@ export function Chat({
   // about eight, then it scrolls. A pasted brief used to sit in a single
   // row you could not read back; measured on the owner's first message to
   // his CEO.
+  //
+  // Where the browser can size a field to its content (`field-sizing:
+  // content`, with the CSS min/max below), it does, and nothing here touches
+  // the height — the box follows every keystroke and the send that empties
+  // it. Elsewhere the height is measured: reset, read, clamp; and an empty
+  // draft goes straight back to the stylesheet's one line rather than to a
+  // measurement, because a measurement of an empty box is the one that
+  // proved unreliable (the field stayed tall after the first send).
   const draftRef = useRef<HTMLTextAreaElement>(null);
+  const browserSizes = useMemo(
+    () => typeof CSS !== "undefined" && CSS.supports("field-sizing", "content"),
+    [],
+  );
   useLayoutEffect(() => {
     const el = draftRef.current;
-    if (!el) return;
+    if (!el || browserSizes) return;
+    if (!draft) {
+      el.style.height = "";
+      return;
+    }
     el.style.height = "0px";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [draft]);
+  }, [draft, browserSizes]);
 
   // Who you can talk to; the CEO is the org leader (reports to the human).
   const candidates = useMemo(() => agents.filter((a) => a.status === "active"), [agents]);
@@ -269,7 +286,7 @@ export function Chat({
                 : t("chat.placeholder", { name: agent?.name ?? t("chat.theAgent") })
             }
             className={cn(
-              "min-h-11 flex-1 resize-none overflow-y-auto border border-input bg-background px-4 py-2.5 text-sm leading-relaxed",
+              "min-h-11 max-h-[200px] flex-1 resize-none overflow-y-auto border border-input bg-background px-4 py-2.5 text-sm leading-relaxed [field-sizing:content]",
               draft.includes("\n") || draft.length > 80 ? "rounded-2xl" : "rounded-3xl",
               "placeholder:text-muted-foreground/60 transition-all duration-200",
               "focus-visible:outline-none focus-visible:border-primary",
@@ -382,13 +399,15 @@ function MessageRow({
         {message.content && (
           <div
             className={cn(
-              "whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
+              "rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
               isUser
-                ? "rounded-br-sm bg-primary text-primary-foreground"
+                ? "whitespace-pre-wrap rounded-br-sm bg-primary text-primary-foreground"
                 : "rounded-tl-sm border border-border bg-card text-card-foreground",
             )}
           >
-            {message.content}
+            {/* The person's words as typed; the agent's as the Markdown they
+                are written in. */}
+            {isUser ? message.content : <Markdown text={message.content} />}
           </div>
         )}
       </div>

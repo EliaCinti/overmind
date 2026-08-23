@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
+import { Markdown } from "./Markdown";
 import { X, Play, GitBranch, CircleDollarSign, Bot, ChevronRight, Paperclip } from "lucide-react";
 import type {
   Agent,
@@ -279,7 +280,7 @@ function Inner({
                 thing a person read after a run. */}
             {session.said ? (
               <>
-                <p className="text-sm leading-relaxed whitespace-pre-wrap">{session.said}</p>
+                <Markdown text={session.said} className="text-sm leading-relaxed" />
                 <details className="text-xs">
                   <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
                     {t("task.rawOutput")}
