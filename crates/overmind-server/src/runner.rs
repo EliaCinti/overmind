@@ -47,9 +47,16 @@ const MAX_INLINE_BYTES: u64 = 256 * 1024;
 
 /// Files attached to this task, as `(filename, mime, size, absolute path)`.
 async fn task_inputs(state: &AppState, task_id: &str) -> Vec<(String, String, i64, String)> {
+    // The task's own files, plus the files of the thread it was born in
+    // (ADR-0038): the CEO's description says "read the sketch", so the
+    // sketch has to be there. Only posted files (message_id set) ride —
+    // a staged upload nobody sent is nobody's input.
     sqlx::query_as(
         "SELECT filename, mime, size_bytes, path FROM attachments
-         WHERE task_id = ? ORDER BY created_at",
+         WHERE task_id = ?1
+            OR (message_id IS NOT NULL AND conversation_id IS NOT NULL
+                AND conversation_id = (SELECT conversation_id FROM tasks WHERE id = ?1))
+         ORDER BY created_at",
     )
     .bind(task_id)
     .fetch_all(&state.pool)

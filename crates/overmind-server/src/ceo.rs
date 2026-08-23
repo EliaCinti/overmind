@@ -837,8 +837,8 @@ async fn run_agent_turn(
             planned_kind
         };
         sqlx::query(
-            "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, assignee_agent_id, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?)",
+            "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, assignee_agent_id, conversation_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?, ?)",
         )
         .bind(&task_id)
         .bind(company_id)
@@ -847,6 +847,7 @@ async fn run_agent_turn(
         .bind(description)
         .bind(kind)
         .bind(assignee.as_deref())
+        .bind(conversation_id)
         .bind(now())
         .bind(now())
         .execute(&mut *tx)

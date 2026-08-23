@@ -2432,9 +2432,14 @@ async fn list_task_attachments(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // The task's own files plus its birth-thread's (ADR-0038) — the same
+    // set the run receives, so what the interface lists is what the agent got.
     let rows: Vec<(String, String, String, i64, String)> = sqlx::query_as(
         "SELECT id, filename, mime, size_bytes, created_at FROM attachments
-         WHERE task_id = ? ORDER BY created_at",
+         WHERE task_id = ?1
+            OR (message_id IS NOT NULL AND conversation_id IS NOT NULL
+                AND conversation_id = (SELECT conversation_id FROM tasks WHERE id = ?1))
+         ORDER BY created_at",
     )
     .bind(&task_id)
     .fetch_all(&state.pool)

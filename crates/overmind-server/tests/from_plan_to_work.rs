@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -309,5 +309,88 @@ async fn a_task_planned_for_an_agent_that_only_proposes_waits_for_you() {
             .iter()
             .all(|a| a["type"] != "task_start"),
         "no approval was filed"
+    );
+}
+
+/// A multipart upload of one file, the shape a browser sends.
+async fn upload(app: &axum::Router, uri: &str, filename: &str, bytes: &[u8]) -> Value {
+    const BOUNDARY: &str = "----overmindtestboundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .expect("build upload");
+    let response = app.clone().oneshot(request).await.expect("router responds");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
+/// The files a task's chat carried ride into the task (ADR-0038, measured:
+/// the CEO's task told the modeler to read the sketch, and the run directory
+/// was empty — the sketch lived on the conversation, the run copies only the
+/// task's own attachments). A task born from a conversation lists — and its
+/// run receives — that conversation's files.
+#[tokio::test]
+async fn a_task_born_from_a_chat_carries_the_chats_files() {
+    let env = setup(PLAN_FOR_TOBIA).await;
+    hire(&env, "Tobia", "propose_only", json!(["probe"])).await;
+    let att = upload(
+        &env.app,
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/attachments",
+            env.company, env.ceo
+        ),
+        "BozzaCasa.jpeg",
+        b"not really a jpeg",
+    )
+    .await;
+    let att_id = att["id"].as_str().expect("attachment id").to_string();
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company, env.ceo
+        ),
+        Some(json!({ "content": "Here is the sketch. Build the house.", "attachment_ids": [att_id] })),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {v}");
+    let task = wait_for_a_task(&env).await;
+    let (_, listed) = send(
+        &env.app,
+        "GET",
+        &format!(
+            "/api/tasks/{}/attachments",
+            task["id"].as_str().expect("id")
+        ),
+        None,
+    )
+    .await;
+    let names: Vec<&str> = listed["attachments"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|x| x["filename"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        names.contains(&"BozzaCasa.jpeg"),
+        "the sketch rides into the task: {listed}"
     );
 }

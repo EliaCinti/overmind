@@ -99,3 +99,20 @@ second message sent before the reply started a second, concurrent turn.
 - The inbox shows what waits on you alone; everything decided or informative
   stays as the record, one toggle away (shown outright when nothing waits).
 
+## Addendum (same evening): the chat's files ride into the task
+
+The first run that reached Blender built a coherent house — laid out wrong,
+because the modeler never saw the sketch. The CEO's task said *read
+`BozzaCasa.jpeg` and `lettura-schizzo-misure.md` first*; both lived on the
+chat thread, and a run copies only the **task's** attachments, so the run
+directory was empty and the agent reconstructed the plan from textual hints
+(and said so, to its credit, in its summary).
+
+Tasks gain the thread they were born in (`tasks.conversation_id`, set by the
+CEO's plan, NULL for hand-made tasks). A task's inputs — what the run copies
+in, and what `GET /tasks/{id}/attachments` lists, kept deliberately the same
+set — are its own attachments **plus the posted files of its birth thread**
+(staged uploads nobody sent do not count). Coarse on purpose: the thread is
+the project's folder in the owner's hands, and the cost of an extra file in
+the run directory is nothing next to a modeler drawing a house from prose.
+
