@@ -11,7 +11,7 @@ import type {
   TaskSessionRef,
   TaskStatus,
 } from "../lib/api";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { STATUS_VAR, TRANSITIONS } from "../lib/status";
 import { Button } from "./ui/button";
 import { Badge, Dot, Spinner } from "./ui/primitives";
@@ -87,6 +87,11 @@ function Inner({
   const [artifacts, setArtifacts] = useState<Artifact[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** A refusal that arrived with its repair (ADR-0038 addendum): the button
+   *  applies it and retries what was refused. */
+  const [remedy, setRemedy] = useState<{ kind: string; agent_id?: string; retry: () => void } | null>(
+    null,
+  );
   const [pickAgent, setPickAgent] = useState(false);
 
   // A knowledge task delivers documents instead of a diff (ADR-0017) — but
@@ -123,14 +128,18 @@ function Inner({
 
   const activeAgents = agents.filter((a) => a.status === "active");
 
-  const act = async (fn: () => Promise<unknown>) => {
+  const act = async (fn: () => Promise<unknown>, retry?: () => void) => {
     setBusy(true);
     setError(null);
+    setRemedy(null);
     try {
       await fn();
       onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : t("task.actionFailed"));
+      if (e instanceof ApiError && e.remedy?.kind && retry) {
+        setRemedy({ ...(e.remedy as { kind: string; agent_id?: string }), retry });
+      }
     } finally {
       setBusy(false);
     }
@@ -138,7 +147,29 @@ function Inner({
 
   const start = (agentId: string) => {
     setPickAgent(false);
-    act(() => api.startTask(task.id, agentId));
+    act(
+      () => api.startTask(task.id, agentId),
+      () => start(agentId),
+    );
+  };
+
+  const applyRemedy = async () => {
+    if (!remedy) return;
+    if (remedy.kind === "grant_multimodal" && remedy.agent_id) {
+      const agentId = remedy.agent_id;
+      const retry = remedy.retry;
+      setBusy(true);
+      setError(null);
+      setRemedy(null);
+      try {
+        await api.patchAgentTraits(agentId, { multimodal: true });
+        onChanged();
+        retry();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : t("task.actionFailed"));
+        setBusy(false);
+      }
+    }
   };
 
   const transition = (to: TaskStatus) => act(() => api.transitionTask(task.id, to));
@@ -239,7 +270,18 @@ function Inner({
               </motion.div>
             )}
           </AnimatePresence>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && (
+            <div className="flex flex-col gap-2">
+              <p className="text-sm text-destructive">{error}</p>
+              {remedy?.kind === "grant_multimodal" && (
+                <Button size="sm" variant="primary" disabled={busy} onClick={applyRemedy}>
+                  {t("task.remedyGrantMultimodal", {
+                    name: agents.find((a) => a.id === remedy.agent_id)?.name ?? t("chat.theAgent"),
+                  })}
+                </Button>
+              )}
+            </div>
+          )}
         </section>
 
         {/* Session */}
