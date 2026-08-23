@@ -54,6 +54,11 @@ impl TaskStatus {
                 | (Todo, InProgress)
                 | (Todo, Blocked)
                 | (Todo, Cancelled)
+                // Back to the queue: a task that must be redone — a run that
+                // missed its inputs, a status moved by hand — returns to
+                // `todo`, where the start (and its approval gate) lives.
+                | (InProgress, Todo)
+                | (InReview, Todo)
                 | (InProgress, InReview)
                 | (InProgress, Blocked)
                 | (InProgress, Cancelled)
@@ -368,6 +373,11 @@ mod tests {
             (Blocked, Todo),
             (Blocked, InProgress),
             (Blocked, Cancelled),
+            // Back to the queue (measured 23 Aug 2026): a completed run that
+            // must be redone had no road back — the owner bounced between
+            // "in corso" and a Start button that only exists on "da fare".
+            (InProgress, Todo),
+            (InReview, Todo),
         ];
         for (from, to) in valid {
             assert!(

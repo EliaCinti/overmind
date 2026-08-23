@@ -37,8 +37,8 @@ export const STATUS_VAR: Record<TaskStatus, string> = {
 export const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   backlog: ["todo", "cancelled"],
   todo: ["in_progress", "blocked", "cancelled"],
-  in_progress: ["in_review", "blocked", "cancelled"],
-  in_review: ["in_progress", "done", "cancelled"],
+  in_progress: ["todo", "in_review", "blocked", "cancelled"],
+  in_review: ["todo", "in_progress", "done", "cancelled"],
   blocked: ["todo", "in_progress", "cancelled"],
   done: [],
   cancelled: [],
