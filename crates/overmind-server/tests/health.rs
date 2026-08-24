@@ -47,3 +47,53 @@ async fn unknown_route_returns_404() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+/// The SPA's HTML is never cached (measured: after a deploy, Safari kept
+/// serving the old bundle from cache and a fixed bug looked unfixed — the
+/// owner hard-reloaded to see it). Hashed assets may cache forever; the
+/// document that names them must not.
+#[tokio::test]
+async fn the_spa_document_is_served_with_no_cache() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let web_dir =
+        std::env::temp_dir().join(format!("overmind-web-{}", uuid::Uuid::now_v7().simple()));
+    std::fs::create_dir_all(&web_dir).expect("web dir");
+    std::fs::write(web_dir.join("index.html"), "<html>app</html>").expect("index");
+    let state = overmind_server::init_with(
+        "sqlite::memory:",
+        overmind_server::Config {
+            web_dir: web_dir.clone(),
+            agent_cmd: Some("/usr/bin/true".into()),
+            data_dir: web_dir.join("data"),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init");
+    let app = overmind_server::app(state);
+    for uri in ["/", "/some/spa/route"] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("responds");
+        let cache = res
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            cache.contains("no-cache"),
+            "{uri}: the document must revalidate, got {cache:?}"
+        );
+    }
+}
