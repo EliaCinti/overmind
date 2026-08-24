@@ -3,7 +3,7 @@ import { motion } from "motion/react";
 import { Markdown } from "./Markdown";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ArrowUpRight, Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
-import type { Agent, Attachment, Message } from "../lib/api";
+import type { Activity, Agent, Attachment, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
 import { useT } from "../lib/i18n";
@@ -35,6 +35,8 @@ export function Chat({
   const [files, setFiles] = useState<File[]>([]);
   const [sending, setSending] = useState(false);
   const [pending, setPending] = useState(false); // agent turn in flight
+  /** What the turn is doing right now (ADR-0039), when it said. */
+  const [activity, setActivity] = useState<Activity | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   // The composer grows with what is being written — one line at rest, up to
@@ -90,6 +92,7 @@ export function Chat({
         // addendum): the dots survive a page switch, and vanish on the same
         // live signal the reply arrives on.
         setPending(r.answering);
+        setActivity(r.activity ?? null);
       })
       .catch(() => {});
     return () => {
@@ -102,6 +105,25 @@ export function Chat({
   useLayoutEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, pending]);
+
+  // While a turn is answering, ask again every couple of seconds: the
+  // narration (ADR-0039) changes without a websocket event of its own.
+  useEffect(() => {
+    if (!pending || !currentId) return;
+    const id = window.setInterval(() => {
+      api
+        .getConversation(companyId, currentId)
+        .then((r) => {
+          setActivity(r.activity ?? null);
+          if (!r.answering) {
+            setPending(false);
+            setMessages(r.messages);
+          }
+        })
+        .catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [pending, currentId, companyId]);
 
   function switchTo(id: string) {
     if (id === currentId) return;
@@ -222,7 +244,7 @@ export function Chat({
             <MessageRow key={m.id} message={m} agent={agent} companyId={companyId} />
           ))
         )}
-        {pending && <Typing agent={agent} />}
+        {pending && <Typing agent={agent} activity={activity} />}
         <div ref={bottomRef} />
       </div>
 
@@ -445,8 +467,20 @@ function AttachmentView({ companyId, att }: { companyId: string; att: Attachment
   );
 }
 
-function Typing({ agent }: { agent: Agent | null }) {
-  const fallbackAgentName = useT()("chat.agent");
+function Typing({ agent, activity }: { agent: Agent | null; activity: Activity | null }) {
+  const t = useT();
+  const fallbackAgentName = t("chat.agent");
+  // The narration line (ADR-0039): which tool, or the first words. Beats
+  // three dots for a two-minute Blender call — the person sees work, not
+  // silence.
+  const line =
+    activity?.kind === "tool"
+      ? activity.server
+        ? t("chat.activityToolOf", { tool: activity.tool, server: activity.server })
+        : t("chat.activityTool", { tool: activity.tool })
+      : activity?.kind === "text"
+        ? t("chat.activityText", { preview: activity.preview })
+        : null;
   return (
     <div className="flex gap-3">
       <Avatar name={agent?.name ?? fallbackAgentName} />
@@ -459,6 +493,7 @@ function Typing({ agent }: { agent: Agent | null }) {
             transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
           />
         ))}
+        {line && <span className="ml-2 text-xs italic text-muted-foreground">{line}</span>}
       </div>
     </div>
   );

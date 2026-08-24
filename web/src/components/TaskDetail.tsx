@@ -113,6 +113,19 @@ function Inner({
     };
   }, [task.id, tick]);
 
+  // A running session narrates (ADR-0039): ask again every couple of seconds
+  // while it runs, so "something is happening" is visible, not assumed.
+  useEffect(() => {
+    if (!session || session.status !== "running") return;
+    const id = window.setInterval(() => {
+      api
+        .getSession(session.id)
+        .then(setSession)
+        .catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [session?.id, session?.status]);
+
   // Load whatever the latest run delivered.
   useEffect(() => {
     if (!session) {
@@ -293,6 +306,18 @@ function Inner({
               </h3>
               <SessionStatus status={session.status} />
             </div>
+            {session.status === "running" && session.activity && (
+              <p className="text-xs italic text-muted-foreground">
+                {session.activity.kind === "tool"
+                  ? session.activity.server
+                    ? t("chat.activityToolOf", {
+                        tool: session.activity.tool,
+                        server: session.activity.server,
+                      })
+                    : t("chat.activityTool", { tool: session.activity.tool })
+                  : t("chat.activityText", { preview: session.activity.preview })}
+              </p>
+            )}
 
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
               {session.branch && (
