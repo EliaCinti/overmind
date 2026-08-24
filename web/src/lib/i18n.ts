@@ -243,6 +243,9 @@ export const en = {
     showHistory: "Show earlier ({n})",
     hideHistory: "Hide earlier",
     approvedBy: "Approved by {name}",
+    showAll: "Show all",
+    showLess: "Show less",
+    viewProposal: "View the proposal",
     rejectedBy: "Rejected by {name}",
   },
   /**
@@ -785,6 +788,9 @@ export const it: Dictionary = {
     showHistory: "Mostra i precedenti ({n})",
     hideHistory: "Nascondi i precedenti",
     approvedBy: "Approvato da {name}",
+    showAll: "Mostra tutto",
+    showLess: "Mostra meno",
+    viewProposal: "Vedi la proposta",
     rejectedBy: "Rifiutato da {name}",
   },
   notif: {

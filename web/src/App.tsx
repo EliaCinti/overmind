@@ -360,6 +360,7 @@ export default function App() {
           onApprovalDecided={afterDecision}
           inboxSignal={inboxSignal}
           onOpenMeeting={openMeeting}
+          onOpenOrg={() => setView("org")}
           connected={connected}
           tick={tick}
           language={language}

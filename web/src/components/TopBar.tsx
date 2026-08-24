@@ -40,6 +40,7 @@ export function TopBar({
   onApprovalDecided,
   inboxSignal,
   onOpenMeeting,
+  onOpenOrg,
   connected,
   tick,
   language,
@@ -64,6 +65,7 @@ export function TopBar({
   onApprovalDecided: (approvalId?: string) => void;
   inboxSignal: number;
   onOpenMeeting: (meetingId: string) => void;
+  onOpenOrg: () => void;
   connected: boolean;
   tick: number;
   language: LanguageCode;
@@ -136,6 +138,7 @@ export function TopBar({
             onDecided={onApprovalDecided}
             openSignal={inboxSignal}
             onOpenMeeting={onOpenMeeting}
+            onOpenOrg={onOpenOrg}
           />
         )}
         <MemoryIndicator companyId={companyId} />
