@@ -40,9 +40,15 @@ export function Dialog({
                   "max-h-[calc(100vh-4rem)] overflow-hidden flex flex-col",
                   className,
                 )}
-                initial={{ opacity: 0, scale: 0.96, y: "-46%" }}
-                animate={{ opacity: 1, scale: 1, y: "-50%" }}
-                exit={{ opacity: 0, scale: 0.97, y: "-46%" }}
+                // Pixel deltas, not percentages: Tailwind v4 centres with the
+                // CSS `translate` property, and a motion translateY(-50%) on
+                // `transform` COMPOSES with it — the dialog rose by 100% of
+                // its height and a tall inbox started above the screen
+                // (measured: bounding box y = -245px). The classes centre;
+                // motion only nudges.
+                initial={{ opacity: 0, scale: 0.96, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.97, y: 8 }}
                 transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
               >
                 <div className="flex items-start justify-between gap-4 border-b border-border px-6 py-4">
