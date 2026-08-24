@@ -73,6 +73,18 @@ pub fn start_task_summary(code: &str, title: &str) -> String {
     }
 }
 
+/// The quiet chip a compaction leaves in the thread (ADR-0040).
+pub fn chat_compacted_notice(code: &str, covered: usize) -> String {
+    match code {
+        "it" => format!(
+            "Conversazione compattata: {covered} messaggi precedenti riassunti (e salvati in memoria). Il filo resta leggibile qui."
+        ),
+        _ => format!(
+            "Conversation compacted: {covered} earlier messages summarized (and stored to memory). The thread stays readable here."
+        ),
+    }
+}
+
 /// The meeting-request approval's summary, in the company's language.
 pub fn meeting_request_summary(code: &str, convener: &str, topic: &str) -> String {
     match code {

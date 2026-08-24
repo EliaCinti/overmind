@@ -338,6 +338,8 @@ pub mod event_kind {
     pub const AGENT_TERMINATED: &str = "agent.terminated";
     pub const CONFIG_REVISED: &str = "agent.config_revised";
     pub const CONFIG_ROLLED_BACK: &str = "agent.config_rolled_back";
+    /// A conversation outgrew the turn and was compacted (ADR-0040).
+    pub const CHAT_COMPACTED: &str = "chat.compacted";
     /// A company's brain was switched on or off (ADR-0024). Auditable because
     /// turning memory off changes what every later agent knew when it acted.
     pub const BRAIN_TOGGLED: &str = "company.brain_toggled";

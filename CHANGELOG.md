@@ -17,6 +17,9 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 - **The chat knows when an agent is answering, and runs one turn at a time.** `answering` rides on the conversation, so the typing dots survive a page switch; a message sent while the agent is answering waits and is read by the next turn instead of racing a second one. The inbox shows what waits on you alone, earlier items behind a toggle.
 - **A plan the CEO wraps in a ```json fence, or pretty-prints over several lines, is found.** The parser read one line at a time; on the owner's first real brief the CEO answered with a sentence and a fenced, multi-line plan — shown raw in the chat, and the task it had planned was never opened. A balanced-brace scan (strings and escapes respected) now follows the line scan.
 
+### Added
+- **A long conversation is compacted before it drowns the turn (ADR-0040).** Past `OVERMIND_CHAT_COMPACT_CHARS` (default 60k chars) the agent writes a handoff summary of the older messages; turns then read summary + recent tail, the summary is stored to the company brain too, and a quiet chip says it happened. Messages are never deleted; a failed compaction never eats the turn.
+
 ### Changed
 - **`docs/TOOLS.md` — the complete tools manual.** Declaring, granting, the security model, a worked Blender example, other tools people attach, and a troubleshooting table; ready-made registries in `docs/examples/` (Blender, filesystem, browser). Linked from the README; the site wiki's Tools page mirrors it.
 - **The work is visible while it happens (ADR-0039).** The adapter's own stream is read as it arrives: the chat's typing bubble names the tool in use or the agent's first words, and a running task's detail shows the same live line — instead of dots and silence for twenty minutes. The inbox closes itself after the last decision instead of surfacing the decided pile, and its list scrolls.
