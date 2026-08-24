@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    }
+  },
+  "descriptions": {
+    "browser": "A real browser (Playwright): navigate, read pages, fill forms, take screenshots. Requires Node; first run downloads a browser build (allow its cache through the cage if sandboxed)."
+  }
+}

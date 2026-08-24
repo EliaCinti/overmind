@@ -284,6 +284,8 @@ Agents can hold **MCP tools** beyond Overmind's own — the first was Blender, d
 
 The tool's *process* is spawned where the CLI runs; what it talks to must be up: for Blender, the application open with the BlenderMCP addon serving on its port, and `uv` installed (`brew install uv`) with its cache allowed through the cage (`OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv:$HOME/.local/share/uv"`).
 
+**The complete manual — every step, the security model, worked examples, troubleshooting — is [`docs/TOOLS.md`](docs/TOOLS.md)**; ready-made registries to copy live in [`docs/examples/`](docs/examples/).
+
 ### Connect your editor (optional)
 
 Overmind speaks MCP, so a Claude Code session — or anything else that does — can file work into a company and read its board ([ADR-0028](docs/adr/0028-overmind-as-an-mcp-server-for-outside-callers.md)).

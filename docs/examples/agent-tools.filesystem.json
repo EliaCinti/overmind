@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/ABSOLUTE/PATH/TO/SHARED/DIR"]
+    }
+  },
+  "descriptions": {
+    "files": "Read and write files under the shared directory. Requires Node; the directory must also be writable inside the cage (OVERMIND_SANDBOX_ALLOW)."
+  }
+}
