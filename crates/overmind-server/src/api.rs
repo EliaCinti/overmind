@@ -63,6 +63,11 @@ pub fn app(state: AppState) -> Router {
     // first (M10).
     if state.config.web_dir.is_dir() {
         let index = state.config.web_dir.join("index.html");
+        // The HTML document revalidates on every load; the hashed assets it
+        // names may cache forever. Without this, Safari kept serving a
+        // deploy-old bundle from cache and a fixed bug looked unfixed —
+        // measured on the owner's machine, resolved by a hard reload nobody
+        // should need.
         router = router.fallback_service(
             tower_http::services::ServeDir::new(&state.config.web_dir)
                 .fallback(tower_http::services::ServeFile::new(index)),
@@ -88,6 +93,30 @@ pub fn app(state: AppState) -> Router {
     // not against what the machine can take.
     router
         .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+        // The SPA's HTML revalidates on every load; its hashed assets may
+        // cache forever. Applied to every text/html response (only the SPA
+        // serves any): without it, Safari kept a deploy-old bundle and a
+        // fixed bug looked unfixed until a hard reload nobody should need.
+        .layer(axum::middleware::map_response(
+            |mut res: axum::response::Response| async move {
+                let is_html = res
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|ct| ct.starts_with("text/html"));
+                if is_html
+                    && !res
+                        .headers()
+                        .contains_key(axum::http::header::CACHE_CONTROL)
+                {
+                    res.headers_mut().insert(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static("no-cache"),
+                    );
+                }
+                res
+            },
+        ))
         .with_state(state)
 }
 
