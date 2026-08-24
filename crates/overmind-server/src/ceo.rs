@@ -567,22 +567,147 @@ async fn run_agent_turn(
         "This company has NO repository connected, so every task is \"knowledge\" — research, documents, and anything done through a tool an agent holds (a tool is not a repository). Never plan \"code\" here."
     };
 
-    let history: Vec<(String, String)> = sqlx::query_as(
-        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at",
+    // The thread, as a turn reads it (ADR-0040): the latest handoff summary,
+    // if one exists, plus every message after what it covers. Without a
+    // summary this is simply the whole history.
+    let summary: Option<(String, String)> = sqlx::query_as(
+        "SELECT content, covers_until FROM conversation_summaries
+         WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
     )
     .bind(conversation_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let covers_until = summary.as_ref().map(|(_, c)| c.clone()).unwrap_or_default();
+    let mut history: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT role, content, created_at FROM messages
+         WHERE conversation_id = ? AND created_at > ? ORDER BY created_at",
+    )
+    .bind(conversation_id)
+    .bind(&covers_until)
     .fetch_all(&state.pool)
     .await?;
-    let convo_block = history
-        .iter()
-        .map(|(r, c)| transcript_turn(r, c))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut summary_text = summary.map(|(c, _)| c);
+
+    // Compact before the turn drowns (ADR-0040): when the transcript that
+    // would ride exceeds the threshold, the agent first writes a handoff
+    // summary of everything but the recent tail. Stored, audited, said to
+    // the person as a quiet chip — and every later turn starts from it.
+    let threshold = state.config.chat_compact_chars;
+    const KEEP_TAIL: usize = 6;
+    let transcript_len: usize = history.iter().map(|(_, c, _)| c.len() + 32).sum();
+    if threshold > 0 && transcript_len > threshold && history.len() > KEEP_TAIL {
+        let split = history.len() - KEEP_TAIL;
+        let head = &history[..split];
+        let head_block = head
+            .iter()
+            .map(|(r, c, _)| transcript_turn(r, c))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prior = summary_text
+            .as_deref()
+            .map(|s| format!("Summary of the conversation before that:\n{s}\n\n"))
+            .unwrap_or_default();
+        let compact_prompt = format!(
+            "You are {name}, the {role} at an AI company, tidying your own thread.\n\n{prior}Conversation to compact:\n{head_block}\n\nWrite a handoff summary of this conversation for your own future turns: every decision taken and by whom, every open question, every number, name and constraint that still matters, in the language the conversation is held in. Dense prose, no preamble, no code fences. Output ONLY the summary."
+        );
+        // Its own scratch and its own turn: the answer turn has not built
+        // either yet, and a compaction is a spend of its own on the ledger.
+        let compact_scratch = state.config.data_dir.join("chat").join(new_id());
+        tokio::fs::create_dir_all(&compact_scratch)
+            .await
+            .map_err(|e| CeoError::Invalid(format!("cannot create scratch dir: {e}")))?;
+        let compact_turn = Turn {
+            company_id,
+            agent_id,
+            kind: "chat",
+            traits: &traits,
+            activity_key: conversation_id,
+        };
+        match run_adapter(
+            state,
+            &compact_turn,
+            &compact_scratch,
+            &compact_prompt,
+            None,
+        )
+        .await
+        {
+            Ok(out) => {
+                let text = agent_text(&out).trim().to_string();
+                if !text.is_empty() {
+                    let covers = head.last().map(|(_, _, at)| at.clone()).unwrap_or_default();
+                    let mut tx = state.write_tx().await?;
+                    sqlx::query(
+                        "INSERT INTO conversation_summaries (id, conversation_id, content, covers_until, created_at)
+                         VALUES (?, ?, ?, ?, ?)",
+                    )
+                    .bind(new_id())
+                    .bind(conversation_id)
+                    .bind(&text)
+                    .bind(&covers)
+                    .bind(now())
+                    .execute(&mut *tx)
+                    .await?;
+                    audit::append(
+                        &mut tx,
+                        Some(company_id),
+                        None,
+                        event_kind::CHAT_COMPACTED,
+                        &json!({ "conversation_id": conversation_id, "covered_messages": head.len() }),
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    // The owner's ask, verbatim: "salvo tutto il necessario su
+                    // wadachi". The summary goes to the company brain too, so
+                    // what the thread learned is recallable from tasks and
+                    // meetings — not only from this chat. Best-effort, like
+                    // every memory write.
+                    state
+                        .memory_for(company_id)
+                        .await
+                        .store_memory(
+                            &format!("Conversation with {name} — handoff summary"),
+                            &text,
+                            company_id,
+                            &["chat-compaction", "conversation"],
+                            "context",
+                            None,
+                        )
+                        .await;
+                    let lang = crate::i18n::company_language(state, company_id).await;
+                    let _ = post_system_message(
+                        state,
+                        company_id,
+                        conversation_id,
+                        &crate::i18n::chat_compacted_notice(&lang, head.len()),
+                    )
+                    .await;
+                    summary_text = Some(text);
+                    history = history.split_off(split);
+                }
+            }
+            // A failed compaction must not eat the turn: the full transcript
+            // rides once more, and the next turn tries again.
+            Err(e) => eprintln!("compaction failed (turn proceeds uncompacted): {e}"),
+        }
+    }
+
+    let summary_block = summary_text
+        .map(|s| format!("Summary of the conversation so far (older turns, compacted):\n{s}\n\n"))
+        .unwrap_or_default();
+    let convo_block = format!(
+        "{summary_block}{}",
+        history
+            .iter()
+            .map(|(r, c, _)| transcript_turn(r, c))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     let last_user = history
         .iter()
         .rev()
-        .find(|(r, _)| r == "user")
-        .map(|(_, c)| c.clone())
+        .find(|(r, _, _)| r == "user")
+        .map(|(_, c, _)| c.clone())
         .unwrap_or_default();
 
     let memory_context = state

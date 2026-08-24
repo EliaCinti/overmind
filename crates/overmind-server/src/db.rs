@@ -367,6 +367,9 @@ pub struct Config {
     /// Command that launches the MCP memory server (`OVERMIND_MEMORY_CMD`);
     /// `None` disables organizational memory entirely (graceful degradation).
     pub memory_cmd: Option<String>,
+    /// Compact a conversation before a turn once its transcript exceeds this
+    /// many characters (ADR-0040). `OVERMIND_CHAT_COMPACT_CHARS`; 0 = never.
+    pub chat_compact_chars: usize,
     /// Built frontend directory (`OVERMIND_WEB_DIR`). Served at the root when
     /// it exists; absent in dev (Vite serves the UI and proxies to us).
     pub web_dir: PathBuf,
@@ -519,6 +522,7 @@ impl Default for Config {
             session_timeout_secs: 3_600,
             start_estimate_cents: 50,
             memory_cmd: None,
+            chat_compact_chars: 60_000,
             web_dir: PathBuf::from("./web/dist"),
             sandbox: true,
             sandbox_allow: Vec::new(),
@@ -565,6 +569,10 @@ impl Config {
             memory_cmd: std::env::var("OVERMIND_MEMORY_CMD")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            chat_compact_chars: std::env::var("OVERMIND_CHAT_COMPACT_CHARS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.chat_compact_chars),
             web_dir: std::env::var("OVERMIND_WEB_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.web_dir),
