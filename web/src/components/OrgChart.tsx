@@ -452,6 +452,10 @@ function EditRow({
   const t = useT();
   const [title, setTitle] = useState(agent.title ?? "");
   const [manager, setManager] = useState(agent.reports_to ?? "");
+  // The monthly cap, editable where the money is read (ADR-0012). The
+  // budget-exhausted notice says "raise its cap" — this is the control it
+  // pointed at, missing until the first agent actually hit its cap.
+  const [budget, setBudget] = useState(String(agent.traits.monthly_budget_cents / 100));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Tools (ADR-0036): what the operator declared, granted to this agent after
@@ -499,6 +503,14 @@ function EditRow({
   };
 
   const save = async () => {
+    const cents = Math.round(parseFloat(budget.replace(",", ".")) * 100);
+    if (
+      Number.isFinite(cents) &&
+      cents >= 0 &&
+      cents !== agent.traits.monthly_budget_cents
+    ) {
+      await run(api.setAgentBudget(agent.id, cents));
+    }
     await run(
       api.reassignAgent(agent.id, {
         reports_to: manager === "" ? null : manager,
@@ -521,6 +533,15 @@ function EditRow({
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder={t("org.titlePlaceholder")}
+            className="h-9"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          {t("org.monthlyCap")}
+          <Input
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+            inputMode="decimal"
             className="h-9"
           />
         </label>
