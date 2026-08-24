@@ -1117,6 +1117,7 @@ async fn spawn_adapter(
             Err(CeoError::Invalid(turn_failure(
                 out.status.code(),
                 &out.stderr,
+                &out.stdout,
             )))
         }
         Err(e) => Err(CeoError::Invalid(format!(
@@ -1134,8 +1135,17 @@ async fn spawn_adapter(
 /// is how the sandbox regression of 2026-08-13 stayed invisible for ten minutes.
 /// The task runner has kept stderr since M2 (`run_session`); this is the same
 /// courtesy for the path a human is actually watching.
-fn turn_failure(code: Option<i32>, stderr: &str) -> String {
+fn turn_failure(code: Option<i32>, stderr: &str, stdout: &str) -> String {
     let said = clamp_agent_text(stderr);
+    // The CLI puts some refusals on stdout — "Invalid API key · Please run
+    // /login" arrived there while the interface reported "said nothing on
+    // stderr" (measured 24 Aug 2026, an expired login). When stderr is
+    // silent, stdout is the witness.
+    let said = if said.is_empty() {
+        clamp_agent_text(stdout)
+    } else {
+        said
+    };
     let how = match code {
         Some(0) => "the agent produced no output".to_string(),
         Some(c) => format!("the agent exited with code {c}"),
@@ -1310,6 +1320,23 @@ mod tests {
     /// M10 smoke run — one line, with the agent's prose *and* its plan nested
     /// inside `.result` as a string.
     const REAL_CHAT: &str = include_str!("../tests/fixtures/claude-code-chat-result.json");
+
+    /// Measured 24 Aug 2026: the CLI's session had expired, every turn died
+    /// with exit 1, and the interface said "said nothing on stderr" — while
+    /// the reason ("Invalid API key · Please run /login") sat on stdout,
+    /// unread. When stderr is silent, stdout is the witness.
+    #[test]
+    fn a_failure_that_spoke_on_stdout_is_quoted() {
+        let said = turn_failure(Some(1), "", "Invalid API key \u{b7} Please run /login\n");
+        assert!(said.contains("Invalid API key"), "{said}");
+        assert!(!said.contains("said nothing"), "{said}");
+        // stderr still wins when both spoke.
+        let said = turn_failure(Some(1), "real reason", "stdout noise");
+        assert!(said.contains("real reason"), "{said}");
+        // and true silence is still called what it is.
+        let said = turn_failure(Some(1), "", "");
+        assert!(said.contains("said nothing"), "{said}");
+    }
 
     #[test]
     fn a_plan_is_found_inside_the_real_envelope() {
