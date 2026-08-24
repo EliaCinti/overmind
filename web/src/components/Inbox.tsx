@@ -5,6 +5,7 @@ import { api } from "../lib/api";
 import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { useFormats, useNotificationText, useT } from "../lib/i18n";
+import { Markdown } from "./Markdown";
 import { cn } from "../lib/utils";
 
 /**
@@ -19,6 +20,7 @@ export function Inbox({
   onDecided,
   openSignal,
   onOpenMeeting,
+  onOpenOrg,
 }: {
   companyId: string;
   tick: number;
@@ -27,6 +29,8 @@ export function Inbox({
   /** Bumped when something elsewhere (a toast) asks for the inbox. */
   openSignal: number;
   onOpenMeeting: (meetingId: string) => void;
+  /** Jump to the org view — where a proposed team is actually read. */
+  onOpenOrg: () => void;
 }) {
   const t = useT();
   const { timeAgo } = useFormats();
@@ -38,6 +42,8 @@ export function Inbox({
   // Everything decided or merely informative is still the record (ADR-0020)
   // — one toggle away, and shown outright when nothing is waiting.
   const [showHistory, setShowHistory] = useState(false);
+  /** Long bodies fold at ~6 lines; ids the person opened stay open. */
+  const [expanded, setExpanded] = useState<Record<string, true>>({});
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -112,9 +118,38 @@ export function Inbox({
                   <KindIcon kind={n.kind} />
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium">{text.title}</p>
-                    <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
-                      {text.body}
-                    </p>
+                    {(() => {
+                      // Rendered as the Markdown it is written in (a team
+                      // proposal arrives as a list), folded past ~6 lines so
+                      // a long request never hides the buttons — "Show all"
+                      // opens it in place (measured: a 1,000-character
+                      // proposal was unreadable in the card).
+                      const long = text.body.length > 360 || text.body.split("\n").length > 6;
+                      const open = !!expanded[n.id] || !long;
+                      return (
+                        <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          <div className={open ? "" : "line-clamp-6"}>
+                            <Markdown text={text.body} />
+                          </div>
+                          {long && (
+                            <button
+                              type="button"
+                              className="mt-1 text-[11px] text-primary underline underline-offset-2 hover:opacity-80"
+                              onClick={() =>
+                                setExpanded((e) => {
+                                  const next = { ...e };
+                                  if (next[n.id]) delete next[n.id];
+                                  else next[n.id] = true;
+                                  return next;
+                                })
+                              }
+                            >
+                              {open ? t("inbox.showLess") : t("inbox.showAll")}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <p className="mt-1.5 text-[11px] text-muted-foreground/70">
                       {timeAgo(n.created_at)}
                       {(() => {
@@ -128,6 +163,18 @@ export function Inbox({
                 </div>
 
                 <div className="mt-2.5 flex items-center justify-end gap-1.5">
+                  {n.subject_type === "org_proposal" && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setOpen(false);
+                        onOpenOrg();
+                      }}
+                    >
+                      {t("inbox.viewProposal")}
+                    </Button>
+                  )}
                   {n.subject_type === "meeting" && n.subject_id && (
                     <Button
                       size="sm"
