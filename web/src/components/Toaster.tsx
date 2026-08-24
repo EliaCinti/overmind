@@ -18,11 +18,32 @@ export function Toaster({
   onDismiss: (id: string) => void;
   onOpen: () => void;
 }) {
+  const t = useT();
+  // The stack is bottom-anchored, so it grows *upward* — and approval toasts
+  // are sticky, so several of them used to grow past the top of the screen:
+  // the last one always visible, the first unreachable (measured). At most
+  // three are shown; the rest compact into one summary chip that opens the
+  // inbox, and the container can never exceed the viewport.
+  const visible = toasts.slice(-3);
+  const hidden = toasts.length - visible.length;
   return (
-    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
+    <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex max-h-[calc(100vh-2rem)] w-80 flex-col justify-end gap-2 overflow-hidden">
       <AnimatePresence initial={false}>
-        {toasts.map((t) => (
-          <Toast key={t.id} toast={t} onDismiss={onDismiss} onOpen={onOpen} />
+        {hidden > 0 && (
+          <motion.button
+            key="more"
+            layout
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onOpen}
+            className="pointer-events-auto self-end rounded-full border border-border bg-card px-3 py-1.5 text-xs text-muted-foreground shadow-pop transition hover:text-foreground"
+          >
+            {t("inbox.toastMore", { n: hidden })}
+          </motion.button>
+        )}
+        {visible.map((x) => (
+          <Toast key={x.id} toast={x} onDismiss={onDismiss} onOpen={onOpen} />
         ))}
       </AnimatePresence>
     </div>

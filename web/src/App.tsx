@@ -259,7 +259,7 @@ export default function App() {
           // meeting is decided, "waiting on you" is a lie on screen.
           ...current.filter((t) => t.id !== notification.id && !sameSubject(t, notification)),
           notification,
-        ].slice(-4),
+        ].slice(-6),
       );
       setTick((n) => n + 1);
     },
