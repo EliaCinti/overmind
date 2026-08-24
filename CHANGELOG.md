@@ -18,6 +18,7 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 - **A plan the CEO wraps in a ```json fence, or pretty-prints over several lines, is found.** The parser read one line at a time; on the owner's first real brief the CEO answered with a sentence and a fenced, multi-line plan — shown raw in the chat, and the task it had planned was never opened. A balanced-brace scan (strings and escapes respected) now follows the line scan.
 
 ### Changed
+- **The work is visible while it happens (ADR-0039).** The adapter's own stream is read as it arrives: the chat's typing bubble names the tool in use or the agent's first words, and a running task's detail shows the same live line — instead of dots and silence for twenty minutes. The inbox closes itself after the last decision instead of surfacing the decided pile, and its list scrolls.
 - **Agents' words render as the Markdown they are written in** — chat replies, meeting turns and decisions, what a task's session said: headings, lists, tables, code; raw HTML is never interpreted, links open in a new tab.
 - **The chat composer grows with the draft** — one line at rest, about eight at most, then it scrolls; it returns to one line when the message is sent (`field-sizing: content` where the browser has it, measured elsewhere).
 - **The first step is a choice:** a company holding only its CEO opens on the two-roads card (*tell the CEO the idea / build the team yourself*) and nothing else until a road is taken.

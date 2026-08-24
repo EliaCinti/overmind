@@ -75,6 +75,17 @@ export function Inbox({
       await api.decideApproval(n.approval_id, decision);
       await api.readNotification(n.id).catch(() => {});
       onDecided(n.approval_id);
+      // Deciding the last thing that waited closes the inbox: what remains
+      // is history, and history is not why the dialog was opened (measured:
+      // after an approval the decided pile popped up, half clipped).
+      const stillWaiting = items.some(
+        (x) =>
+          x.id !== n.id &&
+          x.approval_id &&
+          x.approval_id !== n.approval_id &&
+          approvals.some((a) => a.id === x.approval_id && a.status === "pending"),
+      );
+      if (!stillWaiting) setOpen(false);
     } finally {
       setBusy(null);
     }
@@ -194,7 +205,7 @@ export function Inbox({
         }
         className="max-w-xl"
       >
-        <div className="flex flex-col gap-2">
+        <div className="flex max-h-[65vh] flex-col gap-2 overflow-y-auto pr-1">
           {items.length === 0 && (
             <p className="py-8 text-center text-sm text-muted-foreground">{t("inbox.empty")}</p>
           )}

@@ -9,7 +9,6 @@
 //! conversation with the org leader.
 
 use std::process::Stdio;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -700,6 +699,7 @@ async fn run_agent_turn(
         agent_id,
         kind: "chat",
         traits: &traits,
+        activity_key: conversation_id,
     };
     let output = match run_adapter(state, &turn, &scratch, &prompt, memory_context.as_deref()).await
     {
@@ -935,6 +935,10 @@ pub(crate) struct Turn<'a> {
     /// What the ledger will call this spend: `chat` or `meeting`.
     pub kind: &'a str,
     pub traits: &'a str,
+    /// Where this turn's live narration is filed (ADR-0039): the
+    /// conversation id for chat, the meeting id for meetings. Empty = nobody
+    /// is watching this turn live, narrate nowhere.
+    pub activity_key: &'a str,
 }
 
 /// Run the configured agent adapter with a prompt, in `cwd`, and return its raw
@@ -996,7 +1000,16 @@ pub(crate) async fn run_adapter(
     // is what remains under the cap once *other* work in flight is counted, and
     // not this turn's own placeholder counted against itself.
     let ceiling = check.headroom();
-    let outcome = spawn_adapter(state, cwd, prompt, traits, memory_context, ceiling).await;
+    let outcome = spawn_adapter(
+        state,
+        turn.activity_key,
+        cwd,
+        prompt,
+        traits,
+        memory_context,
+        ceiling,
+    )
+    .await;
 
     // Whatever happened, the money is spent and the hold must go: a reservation
     // that outlives its turn is a leak only a restart would clear.
@@ -1023,6 +1036,7 @@ pub(crate) async fn run_adapter(
 /// The spawn itself, with no opinion about budgets.
 async fn spawn_adapter(
     state: &AppState,
+    activity_key: &str,
     cwd: &std::path::Path,
     prompt: &str,
     traits: &str,
@@ -1085,26 +1099,30 @@ async fn spawn_adapter(
     let child = cmd
         .spawn()
         .map_err(|e| CeoError::Invalid(format!("failed to spawn agent: {e}")))?;
-    let waited = tokio::time::timeout(
-        Duration::from_secs(state.config.session_timeout_secs),
-        child.wait_with_output(),
+    // Drained line by line so the turn narrates itself while it happens
+    // (ADR-0039): the conversation names the tool in use, the chat shows it.
+    let drained = crate::runner::drain_narrating(
+        state,
+        activity_key,
+        child,
+        state.config.session_timeout_secs,
     )
     .await;
-    match waited {
-        Ok(Ok(out)) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            if out.status.success() && !stdout.trim().is_empty() {
-                return Ok(stdout);
+    state.clear_activity(activity_key);
+    match drained {
+        Ok(Some(out)) => {
+            if out.status.success() && !out.stdout.trim().is_empty() {
+                return Ok(out.stdout);
             }
             Err(CeoError::Invalid(turn_failure(
                 out.status.code(),
-                &String::from_utf8_lossy(&out.stderr),
+                &out.stderr,
             )))
         }
-        Ok(Err(e)) => Err(CeoError::Invalid(format!(
+        Err(e) => Err(CeoError::Invalid(format!(
             "failed to read agent output: {e}"
         ))),
-        Err(_) => Err(CeoError::Invalid("agent turn timed out".into())),
+        Ok(None) => Err(CeoError::Invalid("agent turn timed out".into())),
     }
 }
 

@@ -54,6 +54,11 @@ pub struct AppState {
     /// does not survive a restart, so neither should the claim that one is
     /// running — the interface asks, it does not remember.
     answering: Arc<Mutex<HashMap<String, bool>>>,
+    /// What each in-flight run is doing right now (ADR-0039), keyed by the
+    /// conversation id (chat turns) or session id (task runs). In memory for
+    /// the same reason `answering` is: narration of a process that does not
+    /// survive a restart.
+    activity: Arc<Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 impl AppState {
@@ -287,6 +292,25 @@ impl AppState {
     pub fn set_economy(&self, economy: crate::economy::Economy) {
         if let Ok(mut slot) = self.economy.write() {
             *slot = economy;
+        }
+    }
+
+    /// What this run is doing right now, if it said (ADR-0039).
+    pub fn activity(&self, key: &str) -> Option<serde_json::Value> {
+        self.activity.lock().ok()?.get(key).cloned()
+    }
+
+    /// Record the run's current activity — one narration line, latest wins.
+    pub fn set_activity(&self, key: &str, activity: serde_json::Value) {
+        if let Ok(mut m) = self.activity.lock() {
+            m.insert(key.to_string(), activity);
+        }
+    }
+
+    /// The run ended, however it ended: the narration goes with it.
+    pub fn clear_activity(&self, key: &str) {
+        if let Ok(mut m) = self.activity.lock() {
+            m.remove(key);
         }
     }
 
@@ -715,6 +739,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         economy: Arc::new(std::sync::RwLock::new(economy)),
         plan_windows: Arc::new(std::sync::RwLock::new(Default::default())),
         answering: Arc::new(Mutex::new(HashMap::new())),
+        activity: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

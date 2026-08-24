@@ -355,11 +355,19 @@ export interface Conversation {
   created_at: string;
 }
 
+/** What a run is doing right now (ADR-0039): a tool in use, or a first line
+ *  of what the agent is saying. Structured — the interface words it. */
+export type Activity =
+  | { kind: "tool"; tool: string; server?: string }
+  | { kind: "text"; preview: string };
+
 export interface Session {
   id: string;
   task_id: string;
   agent_id: string;
   status: string;
+  /** Present while running, when the agent narrated (ADR-0039). */
+  activity?: Activity | null;
   branch: string;
   workspace_path: string;
   base_sha: string | null;
@@ -740,6 +748,8 @@ export const api = {
       messages: Message[];
       /** A turn is in flight (ADR-0038 addendum): show the dots. */
       answering: boolean;
+      /** What the turn is doing right now, when it said (ADR-0039). */
+      activity?: Activity | null;
     }>("GET", `/companies/${companyId}/agents/${agentId}/conversation`),
   postMessage: (companyId: string, agentId: string, content: string, attachmentIds?: string[]) =>
     req<{ conversation_id: string }>(

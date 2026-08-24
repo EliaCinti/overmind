@@ -2132,6 +2132,7 @@ async fn get_session(
             .fetch_optional(&state.pool)
             .await?;
     Ok(Json(json!({
+        "activity": state.activity(&session_id),
         "id": session_id,
         "task_id": task_id,
         "agent_id": agent_id,
@@ -2599,6 +2600,8 @@ async fn get_conversation(
         // every load, so the typing dots survive a page switch and vanish
         // the moment the reply lands, whichever page you were on.
         "answering": state.is_answering(&id),
+        // What the turn is doing right now (ADR-0039), when it said.
+        "activity": state.activity(&id),
     })))
 }
 

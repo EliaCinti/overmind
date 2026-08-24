@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -226,6 +225,123 @@ pub struct StartOutcome {
     pub session_id: String,
     pub branch: String,
     pub workspace_path: String,
+}
+
+/// Read one stream-json line for what the agent is doing right now
+/// (ADR-0039). `assistant` events carry either a tool call or words; both are
+/// a narration worth a line. Returned structured, never as an English
+/// sentence — the interface words it in the person's language.
+pub(crate) fn activity_in(line: &str) -> Option<serde_json::Value> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let content = v.get("message")?.get("content")?.as_array()?;
+    // The last block wins: a message that says a word and then calls a tool
+    // is doing the tool.
+    for block in content.iter().rev() {
+        match block.get("type").and_then(Value::as_str) {
+            Some("tool_use") => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                // MCP names arrive as `mcp__server__tool_name`.
+                let (server, tool) = match name.strip_prefix("mcp__") {
+                    Some(rest) => match rest.split_once("__") {
+                        Some((srv, t)) => (Some(srv.to_string()), t.replace('_', " ")),
+                        None => (None, rest.replace('_', " ")),
+                    },
+                    None => (None, name.replace('_', " ")),
+                };
+                let mut out = serde_json::json!({ "kind": "tool", "tool": tool });
+                if let Some(srv) = server {
+                    out["server"] = serde_json::json!(srv);
+                }
+                return Some(out);
+            }
+            Some("text") => {
+                let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                let preview: String = text.trim().chars().take(120).collect();
+                if !preview.is_empty() {
+                    return Some(serde_json::json!({ "kind": "text", "preview": preview }));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What draining a narrated child produced: the same shape
+/// `wait_with_output` gave, so both call sites keep their behaviour.
+pub(crate) struct Drained {
+    pub status: std::process::ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Wait for the child while reading its stdout line by line, narrating each
+/// line's activity under `key` (ADR-0039). On timeout the child is killed and
+/// `None` is returned. The narration is cleared by the caller — the run's end
+/// clears it, however it ends.
+pub(crate) async fn drain_narrating(
+    state: &AppState,
+    key: &str,
+    mut child: tokio::process::Child,
+    timeout_secs: u64,
+) -> std::io::Result<Option<Drained>> {
+    use tokio::io::AsyncBufReadExt;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let state2 = state.clone();
+    let key2 = key.to_string();
+    let out_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(stdout) = stdout {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(activity) = activity_in(&line) {
+                    state2.set_activity(&key2, activity);
+                }
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+        buf
+    });
+    let err_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        if let Some(stderr) = stderr {
+            let mut lines = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+        buf
+    });
+    let waited =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
+    match waited {
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            out_task.abort();
+            err_task.abort();
+            Ok(None)
+        }
+        Ok(Err(e)) => {
+            out_task.abort();
+            err_task.abort();
+            Err(e)
+        }
+        Ok(Ok(status)) => {
+            let stdout = out_task.await.unwrap_or_default();
+            let stderr = err_task.await.unwrap_or_default();
+            Ok(Some(Drained {
+                status,
+                stdout,
+                stderr,
+            }))
+        }
+    }
 }
 
 fn now() -> String {
@@ -1448,17 +1564,19 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     };
 
     let timeout_secs = ctx.state.config.session_timeout_secs;
-    let waited =
-        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
-    match waited {
-        Err(_elapsed) => Outcome::TimedOut { timeout_secs },
-        Ok(Err(e)) => Outcome::Infra {
+    // Drained line by line so the run narrates itself while it happens
+    // (ADR-0039); the narration is cleared with the run, however it ends.
+    let drained = drain_narrating(&ctx.state, &ctx.session_id, child, timeout_secs).await;
+    ctx.state.clear_activity(&ctx.session_id);
+    match drained {
+        Ok(None) => Outcome::TimedOut { timeout_secs },
+        Err(e) => Outcome::Infra {
             error: format!("failed to read agent output: {e}"),
             release: false,
         },
-        Ok(Ok(out)) => {
-            let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        Ok(Some(out)) => {
+            let mut output = out.stdout;
+            let stderr = out.stderr;
             if !stderr.trim().is_empty() {
                 output.push_str("\n--- stderr ---\n");
                 output.push_str(stderr.trim());
