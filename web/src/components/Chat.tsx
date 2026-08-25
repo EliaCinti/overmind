@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { Markdown } from "./Markdown";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { ArrowUpRight, Check, ChevronDown, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
+import { ArrowUpRight, Check, ChevronDown, Loader2, Paperclip, SendHorizontal, Sparkles, X } from "lucide-react";
 import type { Activity, Agent, Attachment, Message } from "../lib/api";
 import { ApiError, api } from "../lib/api";
 import { Button } from "./ui/button";
@@ -467,12 +467,14 @@ function AttachmentView({ companyId, att }: { companyId: string; att: Attachment
   );
 }
 
+/** The waiting bubble, redesigned to the owner's spec (ADR-0039): a quiet
+ *  spinner while the agent works, the three dots only when it is actually
+ *  writing its reply (the narration says words are flowing), and beneath the
+ *  bubble a single truncated line naming what is happening — Claude-style. */
 function Typing({ agent, activity }: { agent: Agent | null; activity: Activity | null }) {
   const t = useT();
   const fallbackAgentName = t("chat.agent");
-  // The narration line (ADR-0039): which tool, or the first words. Beats
-  // three dots for a two-minute Blender call — the person sees work, not
-  // silence.
+  const writing = activity?.kind === "text";
   const line =
     activity?.kind === "tool"
       ? activity.server
@@ -480,20 +482,26 @@ function Typing({ agent, activity }: { agent: Agent | null; activity: Activity |
         : t("chat.activityTool", { tool: activity.tool })
       : activity?.kind === "text"
         ? t("chat.activityText", { preview: activity.preview })
-        : null;
+        : t("chat.activityThinking");
   return (
     <div className="flex gap-3">
       <Avatar name={agent?.name ?? fallbackAgentName} />
-      <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3.5">
-        {[0, 1, 2].map((i) => (
-          <motion.span
-            key={i}
-            className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60"
-            animate={{ opacity: [0.3, 1, 0.3] }}
-            transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
-          />
-        ))}
-        {line && <span className="ml-2 text-xs italic text-muted-foreground">{line}</span>}
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex w-fit items-center gap-1.5 rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3.5">
+          {writing ? (
+            [0, 1, 2].map((i) => (
+              <motion.span
+                key={i}
+                className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.18 }}
+              />
+            ))
+          ) : (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground/70" />
+          )}
+        </div>
+        <p className="max-w-[60ch] truncate px-1 text-xs italic text-muted-foreground/80">{line}</p>
       </div>
     </div>
   );
