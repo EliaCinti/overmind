@@ -39,13 +39,16 @@ export function Board({
           const items = byStatus(col);
           const tone = STATUS_VAR[col];
           return (
-            <div key={col} className="flex w-80 shrink-0 flex-col">
+            <div key={col} className="flex max-h-full w-80 shrink-0 flex-col">
               <div className="mb-3 flex items-center gap-2 px-1">
                 <span className="h-2.5 w-2.5 rounded-full" style={{ background: tone }} />
                 <h2 className="text-sm font-semibold">{t(`status.${col}`)}</h2>
                 <span className="mono text-xs text-muted-foreground">{items.length}</span>
               </div>
-              <div className="flex flex-1 flex-col gap-2.5 rounded-lg bg-muted/40 p-2.5">
+              {/* The column scrolls inside itself: with 25 tasks in `todo`
+                  the page used to grow to a wall (measured on the owner's
+                  board). The count in the header says what the eye cannot. */}
+              <div className="flex flex-1 flex-col gap-2.5 overflow-y-auto rounded-lg bg-muted/40 p-2.5">
                 {items.map((item) => (
                   <motion.div
                     key={item.id}
