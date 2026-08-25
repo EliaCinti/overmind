@@ -394,3 +394,49 @@ async fn a_task_born_from_a_chat_carries_the_chats_files() {
         "the sketch rides into the task: {listed}"
     );
 }
+
+/// The CEO reads the board before planning (measured 25 Aug 2026: every
+/// conversation round reopened the same lineages — three budget frames, two
+/// feasibility dossiers — because the prompt never said what was already
+/// open). The turn's prompt carries the open tasks, with status and
+/// assignee, and the instruction not to duplicate them.
+#[tokio::test]
+async fn the_ceo_sees_the_open_board_before_planning() {
+    let env = setup(NO_PLAN).await;
+    hire(&env, "Tobia", "propose_only", json!([])).await;
+    let (s, t) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company),
+        Some(json!({ "title": "Telaio di budget per capitoli", "execution_kind": "knowledge" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{t}");
+
+    tell_the_ceo(&env, "Serve un piano dei costi.").await;
+    let log = env.root.join("prompt.log");
+    let mut prompt = String::new();
+    for _ in 0..150 {
+        prompt = std::fs::read_to_string(&log).unwrap_or_default();
+        if !prompt.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let board = prompt
+        .split("Open tasks on the board")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        board.contains("Telaio di budget per capitoli"),
+        "the open task is named: {prompt}"
+    );
+    assert!(
+        board.contains("backlog") || board.contains("todo"),
+        "with its status: {board}"
+    );
+    assert!(
+        prompt.contains("do not open a duplicate"),
+        "and the instruction is spoken: {prompt}"
+    );
+}
