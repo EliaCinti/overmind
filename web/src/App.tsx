@@ -81,6 +81,10 @@ export default function App() {
   const [planWindows, setPlanWindows] = useState<Record<string, PlanWindow>>({});
   /** Whether the person chose who pays (ADR-0037). */
   const [payWith, setPayWith] = useState<PayWith>("detected");
+  /** An agent's word is waiting in the chat (ADR-0041): shown as a dot on
+   *  the Chat tab, cleared the moment you look. Seen-watermark per company,
+   *  per tab, in sessionStorage. */
+  const [chatDot, setChatDot] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState<View>("chat");
@@ -234,6 +238,34 @@ export default function App() {
     if (companyId) loadCompany(companyId);
   }, [companyId, loadCompany, tick]);
 
+  // The chat dot (ADR-0041): with the view elsewhere, ask the leader's
+  // thread whether its last word is an agent's newer than the watermark.
+  // Looking clears it — entering the chat stamps the watermark.
+  useEffect(() => {
+    if (!companyId) return;
+    const key = `overmind.chatSeen.${companyId}`;
+    if (view === "chat") {
+      try {
+        sessionStorage.setItem(key, new Date().toISOString());
+      } catch {
+        /* the dot then re-arms, which is merely noisy */
+      }
+      setChatDot(false);
+      return;
+    }
+    const leader = agents.find((a) => a.status === "active" && a.reports_to === null);
+    if (!leader) return;
+    api
+      .getConversation(companyId, leader.id)
+      .then((r) => {
+        const last = r.messages[r.messages.length - 1];
+        if (!last || last.role === "user") return setChatDot(false);
+        const seen = sessionStorage.getItem(key) ?? "";
+        setChatDot(last.created_at > seen);
+      })
+      .catch(() => {});
+  }, [companyId, view, tick, agents]);
+
   // Keep the open task's data in sync with refetched tasks.
   const openTaskId = openTask?.id;
   useEffect(() => {
@@ -357,6 +389,7 @@ export default function App() {
           view={view}
           onViewChange={setView}
           showViews={!!companyId && !firstStep}
+          chatDot={chatDot}
           onApprovalDecided={afterDecision}
           inboxSignal={inboxSignal}
           onOpenMeeting={openMeeting}

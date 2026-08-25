@@ -37,6 +37,7 @@ export function TopBar({
   view,
   onViewChange,
   showViews,
+  chatDot,
   onApprovalDecided,
   inboxSignal,
   onOpenMeeting,
@@ -62,6 +63,8 @@ export function TopBar({
   view: View;
   onViewChange: (v: View) => void;
   showViews: boolean;
+  /** An agent wrote in the chat and nobody has looked yet (ADR-0041). */
+  chatDot: boolean;
   onApprovalDecided: (approvalId?: string) => void;
   inboxSignal: number;
   onOpenMeeting: (meetingId: string) => void;
@@ -120,7 +123,7 @@ export function TopBar({
             value={view}
             onChange={onViewChange}
             options={[
-              { value: "chat", label: t("nav.chat") },
+              { value: "chat", label: t("nav.chat"), dot: chatDot },
               { value: "board", label: t("nav.board") },
               { value: "meetings", label: t("nav.meetings") },
               { value: "org", label: t("nav.org") },

@@ -34,7 +34,7 @@ export function Segmented<T extends string>({
   value,
   onChange,
 }: {
-  options: { value: T; label: string }[];
+  options: { value: T; label: string; dot?: boolean }[];
   value: T;
   onChange: (v: T) => void;
 }) {
@@ -46,7 +46,7 @@ export function Segmented<T extends string>({
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "rounded-full px-3 py-1.5 text-sm transition cursor-pointer",
+            "relative rounded-full px-3 py-1.5 text-sm transition cursor-pointer",
             value === opt.value
               ? // The chosen one wears the accent (owner's word): you always
                 // know which room you are in.
@@ -55,6 +55,11 @@ export function Segmented<T extends string>({
           )}
         >
           {opt.label}
+          {opt.dot && value !== opt.value && (
+            // Something unseen lives in this room (ADR-0041: an agent may
+            // now write unprompted, and a word nobody sees helps nobody).
+            <span className="absolute -right-0 -top-0 h-2 w-2 rounded-full bg-primary shadow-[0_0_0_2px_var(--color-background)]" />
+          )}
         </button>
       ))}
     </div>
