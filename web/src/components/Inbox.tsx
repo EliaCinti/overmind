@@ -67,6 +67,26 @@ export function Inbox({
     if (openSignal > 0) setOpen(true);
   }, [openSignal]);
 
+  // Looking is reading (measured 25 Aug 2026: the badge kept counting
+  // informational items — a dropped meeting, a budget notice — that the
+  // person had already seen). Opening the inbox marks everything read
+  // EXCEPT the asks still waiting on a decision: those stay unread until
+  // decided, because the badge's other job is "something waits on you".
+  useEffect(() => {
+    if (!open || items.length === 0) return;
+    const seen = items.filter((n) => !n.read_at && !pendingApproval(n.approval_id));
+    if (seen.length === 0) return;
+    Promise.all(seen.map((n) => api.readNotification(n.id).catch(() => {}))).then(() => {
+      setUnread((u) => Math.max(0, u - seen.length));
+      setItems((cur) =>
+        cur.map((n) =>
+          seen.some((x) => x.id === n.id) ? { ...n, read_at: new Date().toISOString() } : n,
+        ),
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, items.length, approvals.length]);
+
   const pendingApproval = (id: string | null) =>
     id ? approvals.find((a) => a.id === id && a.status === "pending") : undefined;
   // Who beside what (M25): once decided, the item says by whom -- a name read
@@ -163,7 +183,11 @@ export function Inbox({
                 </div>
 
                 <div className="mt-2.5 flex items-center justify-end gap-1.5">
-                  {n.subject_type === "org_proposal" && (
+                  {/* The jump is only offered while there is somewhere to
+                      jump: a decided proposal no longer renders in the Org
+                      view, so its button led to a page with nothing on it
+                      and looked broken (measured). */}
+                  {n.subject_type === "org_proposal" && pendingApproval(n.approval_id) && (
                     <Button
                       size="sm"
                       variant="ghost"
