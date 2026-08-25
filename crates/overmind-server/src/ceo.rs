@@ -505,6 +505,38 @@ async fn run_agent_turn(
     conversation_id: &str,
     agent_id: &str,
 ) -> Result<(), CeoError> {
+    run_agent_turn_inner(state, company_id, conversation_id, agent_id, None).await
+}
+
+/// An unprompted update (ADR-0041): the thread's agent is shown what finished
+/// since the person's last word and writes one short update — or answers
+/// SKIP and stays silent. No tasks are ever opened from an update the person
+/// did not ask for.
+pub(crate) async fn run_digest_turn(
+    state: &AppState,
+    company_id: &str,
+    conversation_id: &str,
+    agent_id: &str,
+    finished: &[(String, String)],
+) -> Result<(), CeoError> {
+    let rows = finished
+        .iter()
+        .map(|(title, said)| format!("- «{title}»: {said}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let block = format!(
+        "\n\nTasks that finished since your last word in this thread:\n{rows}\n\nWrite a short unprompted update for the user: what landed, and what (if anything) needs their decision next. Address them directly, in the conversation's language. Return an EMPTY tasks array — an update the user did not ask for must not open work. If nothing here is worth interrupting them for, set reply to exactly \"SKIP\"."
+    );
+    run_agent_turn_inner(state, company_id, conversation_id, agent_id, Some(&block)).await
+}
+
+async fn run_agent_turn_inner(
+    state: &AppState,
+    company_id: &str,
+    conversation_id: &str,
+    agent_id: &str,
+    digest_block: Option<&str>,
+) -> Result<(), CeoError> {
     // Who is speaking, and their role.
     let who: Option<SpeakerRow> = sqlx::query_as(
         "SELECT a.name, a.title, ar.slug, a.traits, a.custom_brief, a.reports_to
@@ -836,8 +868,9 @@ async fn run_agent_turn(
     // What this agent holds (ADR-0036), said in its own prompt.
     let tools_line = crate::runner::tools_line(state, &crate::runner::trait_tools(&traits));
 
+    let digest_line = digest_block.unwrap_or("");
     let prompt = format!(
-        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}{board_block}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\n{kinds_line} Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
+        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}{board_block}{digest_line}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\n{kinds_line} Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -899,11 +932,22 @@ async fn run_agent_turn(
         // Showing a user `permission_denials` and `ttft_ms` is how this defect
         // announced itself in the smoke run.
         .unwrap_or_else(|| agent_text(&output).trim().to_string());
-    let tasks = plan
-        .as_ref()
-        .and_then(|v| v.get("tasks").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
+    // An unprompted update may deliberately stay silent (ADR-0041): SKIP
+    // posts nothing, and the watermark the scheduler advanced stands, so the
+    // same completions are never asked about twice.
+    if digest_block.is_some() && reply.trim() == "SKIP" {
+        return Ok(());
+    }
+    let tasks = if digest_block.is_some() {
+        // Enforced, not asked: an unprompted update opens no work, whatever
+        // the model returned (ADR-0041).
+        Vec::new()
+    } else {
+        plan.as_ref()
+            .and_then(|v| v.get("tasks").and_then(Value::as_array))
+            .cloned()
+            .unwrap_or_default()
+    };
 
     // Resolve any task assignees before opening the write transaction.
     let mut resolved: Vec<(String, String, &'static str, Option<String>)> = Vec::new();

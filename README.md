@@ -328,6 +328,8 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: the Claude Code CLI, `claude -p … --output-format stream-json --verbose`). A custom adapter is never interrogated for how it pays |
 | `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory; the image sets `wadachi`; empty = off deliberately) |
 | `OVERMIND_AGENT_TOOLS` | A file of MCP servers agents *may* be granted, in the CLI's `{"mcpServers": …}` shape — e.g. Blender via BlenderMCP ([example](docs/examples/agent-tools.blender.json)). Declared here by the operator, granted per agent in the hire dialog; an agent holds exactly what it was granted, and an `"exclusive"` tool fits one hand at a time ([ADR-0036](docs/adr/0036-tools-in-the-agents-hand.md)) |
+| `OVERMIND_CEO_DIGEST` | `off` disables unprompted updates — by default, when tasks born in a chat finish after your last word there, the thread's agent writes one short update (or deliberately stays silent) ([ADR-0041](docs/adr/0041-the-ceo-writes-back-on-its-own.md)) |
+| `OVERMIND_DIGEST_DEBOUNCE_SECS` | Quiet time required before an unprompted update (default `180`) |
 | `OVERMIND_CHAT_COMPACT_CHARS` | Compact a chat before the turn once its transcript exceeds this many characters (default `60000`; `0` = never) — the agent summarizes the older messages, the summary also lands in the brain ([ADR-0040](docs/adr/0040-a-conversation-outgrows-the-turn.md)) |
 | `OVERMIND_MEMORY_POOL` | Concurrent memory connections (default `4`) |
 | `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |

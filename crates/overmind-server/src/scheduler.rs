@@ -32,6 +32,83 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
 pub async fn beat(state: &AppState) -> Result<(), RunnerError> {
     recover_orphans(state).await?;
     process_wakeups(state).await?;
+    process_digests(state).await?;
+    Ok(())
+}
+
+/// The CEO writes back on its own (ADR-0041): for each conversation where a
+/// task born in it finished *after* the person's last word there, run one
+/// digest turn — debounced, never while a turn is in flight, never twice for
+/// the same completions (the in-memory watermark advances first, so a SKIP
+/// also settles the matter).
+async fn process_digests(state: &AppState) -> Result<(), RunnerError> {
+    if !state.config.ceo_digest {
+        return Ok(());
+    }
+    let due: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT c.id, c.company_id, c.agent_id, MAX(s.finished_at), MAX(m.created_at)
+         FROM conversations c
+         JOIN tasks t ON t.conversation_id = c.id
+         JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed'
+         JOIN messages m ON m.conversation_id = c.id
+         WHERE s.finished_at IS NOT NULL
+         GROUP BY c.id
+         HAVING MAX(s.finished_at) > MAX(m.created_at)",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    for (convo, company, agent, newest_finish, last_word) in due {
+        if state.is_answering(&convo) {
+            continue;
+        }
+        // Quiet long enough? A person mid-conversation does not need an
+        // unprompted update landing between their own messages.
+        let debounce = state.config.digest_debounce_secs;
+        if debounce > 0 {
+            let quiet = chrono::DateTime::parse_from_rfc3339(&last_word)
+                .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+                .unwrap_or(i64::MAX);
+            if quiet < debounce as i64 {
+                continue;
+            }
+        }
+        if !state.digest_advance(&convo, &newest_finish) {
+            continue;
+        }
+        // What finished since the person's last word, worded by the agents'
+        // own reports (clamped: a digest reads summaries, not transcripts).
+        let finished: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
+            "SELECT t.title, COALESCE(s.output, '') FROM tasks t
+             JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed'
+             WHERE t.conversation_id = ? AND s.finished_at > ?
+             ORDER BY s.finished_at DESC LIMIT 6",
+        )
+        .bind(&convo)
+        .bind(&last_word)
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .map(|(title, output)| {
+            let said: String = crate::ceo::agent_text(&output)
+                .trim()
+                .chars()
+                .take(600)
+                .collect();
+            (title, said)
+        })
+        .collect();
+        if finished.is_empty() {
+            continue;
+        }
+        let state2 = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                crate::ceo::run_digest_turn(&state2, &company, &convo, &agent, &finished).await
+            {
+                eprintln!("digest turn for {convo} failed: {e}");
+            }
+        });
+    }
     Ok(())
 }
 
