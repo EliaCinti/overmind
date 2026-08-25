@@ -277,8 +277,12 @@ function StatusPill({ status }: { status: MeetingStatus }) {
     declined: { tone: "var(--color-muted-foreground)", Icon: Ban },
     failed: { tone: "var(--color-destructive)", Icon: AlertTriangle },
     paused: { tone: "var(--color-status-blocked)", Icon: Wallet },
+    dropped: { tone: "var(--color-muted-foreground)", Icon: Ban },
   };
-  const { tone, Icon } = map[status];
+  // A status this build does not know must degrade, never crash: the day the
+  // server learned `dropped` before the UI did, one meeting in that state
+  // unmounted the whole view (measured 25 Aug 2026).
+  const { tone, Icon } = map[status] ?? { tone: "var(--color-muted-foreground)" };
   const label = t(`meetingStatus.${status}`);
   return (
     <Badge tone={tone} className="shrink-0">

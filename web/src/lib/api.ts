@@ -205,7 +205,9 @@ export interface MemoryPage {
 
 export type MeetingStatus = "requested" | "open" | "decided" | "declined" | "failed"
   /** Out of budget mid-deliberation; waiting to be resumed (ADR-0022). */
-  | "paused";
+  | "paused"
+  /** A participant dropped it mid-session (its decline_note says who and why). */
+  | "dropped";
 
 /** A meeting an agent asked for (or you convened). */
 export interface Meeting {

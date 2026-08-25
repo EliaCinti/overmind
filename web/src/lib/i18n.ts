@@ -235,6 +235,7 @@ export const en = {
     declined: "Declined",
     failed: "Failed",
     paused: "Out of budget",
+    dropped: "Dropped mid-session",
   },
   inbox: {
     empty:
@@ -784,6 +785,7 @@ export const it: Dictionary = {
     declined: "Rifiutata",
     failed: "Fallita",
     paused: "Budget esaurito",
+    dropped: "Abbandonata in seduta",
   },
   inbox: {
     empty:
