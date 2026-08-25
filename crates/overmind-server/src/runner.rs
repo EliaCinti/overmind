@@ -231,6 +231,68 @@ pub struct StartOutcome {
 /// (ADR-0039). `assistant` events carry either a tool call or words; both are
 /// a narration worth a line. Returned structured, never as an English
 /// sentence — the interface words it in the person's language.
+/// The text delta inside a partial-message event, if this line is one.
+/// `--include-partial-messages` makes the CLI emit `stream_event` lines that
+/// wrap the API's own SSE events; the reply grows one delta at a time.
+pub fn text_delta_in(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line.trim()).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("stream_event") {
+        return None;
+    }
+    let event = v.get("event")?;
+    if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+        return None;
+    }
+    let delta = event.get("delta")?;
+    if delta.get("type").and_then(Value::as_str) != Some("text_delta") {
+        return None;
+    }
+    delta
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// What of the accumulated text is worth showing a person while it streams
+/// (ADR-0039 addendum). Chat agents answer with a JSON plan whose FIRST key
+/// is `reply` — so the readable part is the reply string as it grows, JSON
+/// syntax and escapes stripped. Prose before any JSON or fence shows as is.
+pub fn draft_reply(accum: &str) -> Option<String> {
+    if let Some(i) = accum.find("\"reply\"") {
+        let rest = accum[i + 7..].trim_start().strip_prefix(':')?.trim_start();
+        let rest = rest.strip_prefix('"')?;
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('u') => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        if let Some(ch) =
+                            u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                        {
+                            out.push(ch);
+                        }
+                    }
+                    Some(other) => out.push(other),
+                    None => break,
+                },
+                '"' => break,
+                _ => out.push(c),
+            }
+        }
+        return (!out.trim().is_empty()).then_some(out);
+    }
+    let cut = accum
+        .find("```")
+        .or_else(|| accum.find('{'))
+        .unwrap_or(accum.len());
+    let head = accum[..cut].trim();
+    (!head.is_empty()).then(|| head.to_string())
+}
+
 pub(crate) fn activity_in(line: &str) -> Option<serde_json::Value> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -295,11 +357,36 @@ pub(crate) async fn drain_narrating(
     let key2 = key.to_string();
     let out_task = tokio::spawn(async move {
         let mut buf = String::new();
+        // The reply as it streams (ADR-0039 addendum): text deltas accumulate
+        // and the readable part rides as a `draft` activity, so the chat can
+        // show the words appearing. Bounded — narration, not storage.
+        let mut accum = String::new();
         if let Some(stdout) = stdout {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(activity) = activity_in(&line) {
-                    state2.set_activity(&key2, activity);
+                if let Some(delta) = text_delta_in(&line) {
+                    if accum.len() < 64_000 {
+                        accum.push_str(&delta);
+                    }
+                    if let Some(draft) = draft_reply(&accum) {
+                        let shown: String = draft.chars().take(12_000).collect();
+                        state2.set_activity(
+                            &key2,
+                            serde_json::json!({ "kind": "draft", "text": shown }),
+                        );
+                    }
+                } else if let Some(activity) = activity_in(&line) {
+                    // A full-message text event repeats what the deltas already
+                    // narrated: never let its 120-char preview shadow a live
+                    // draft. Tool calls always win — they are new information.
+                    let is_text = activity["kind"] == "text";
+                    let is_tool = activity["kind"] == "tool";
+                    if !(is_text && !accum.is_empty()) {
+                        state2.set_activity(&key2, activity);
+                    }
+                    if is_tool {
+                        accum.clear();
+                    }
                 }
                 buf.push_str(&line);
                 buf.push('\n');
@@ -939,7 +1026,7 @@ pub(crate) fn agent_command(
     // `--verbose` is not optional here: the CLI refuses `stream-json` under
     // `--print` without it.
     let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
-                   --output-format stream-json --verbose"
+                   --output-format stream-json --verbose --include-partial-messages"
         .to_string();
     // The cap, handed to the adapter itself (ADR-0030). Since M6 the gate has
     // been *around* the run: check, reserve, spawn, record. What it could not do

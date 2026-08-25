@@ -231,3 +231,31 @@ async fn a_running_session_names_what_the_agent_is_doing() {
     }
     panic!("the session never finished");
 }
+
+/// The reply streams (ADR-0039 addendum): text deltas accumulate into a
+/// `draft` activity holding the readable reply-so-far — JSON plan syntax
+/// stripped — so the chat shows the words appearing.
+#[tokio::test]
+async fn the_reply_streams_as_a_draft() {
+    use overmind_server::runner_test_hooks as hooks;
+    // Unit-level: extraction from the plan JSON as it grows.
+    assert_eq!(
+        hooks::draft_reply("Ecco cosa penso"),
+        Some("Ecco cosa penso".into())
+    );
+    assert_eq!(
+        hooks::draft_reply("{\"reply\": \"Ciao El"),
+        Some("Ciao El".into())
+    );
+    assert_eq!(
+        hooks::draft_reply("{\"reply\": \"Riga uno.\\nRiga due\", \"tasks\": []}"),
+        Some("Riga uno.\nRiga due".into())
+    );
+    assert_eq!(hooks::draft_reply("{\"tas"), None);
+    assert_eq!(
+        hooks::text_delta_in(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Ciao"}}}"#
+        ),
+        Some("Ciao".into())
+    );
+}
