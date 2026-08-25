@@ -18,6 +18,8 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 - **A plan the CEO wraps in a ```json fence, or pretty-prints over several lines, is found.** The parser read one line at a time; on the owner's first real brief the CEO answered with a sentence and a fenced, multi-line plan — shown raw in the chat, and the task it had planned was never opened. A balanced-brace scan (strings and escapes respected) now follows the line scan.
 
 ### Added
+- **The CEO writes back on its own (ADR-0041).** When tasks born in a thread finish after your last word there, the thread's agent writes one unprompted update — or deliberately stays silent (`SKIP`), never twice for the same completions, never on top of a turn, debounced (`OVERMIND_DIGEST_DEBOUNCE_SECS`, default 180s; `OVERMIND_CEO_DIGEST=off` disables). An unprompted update opens no work.
+- **The reply appears as it is written.** `--include-partial-messages` on the adapter; the readable reply streams into a live bubble with a cursor; spinner while working, dots only while writing, one narration line beneath.
 - **The CEO reads the board before planning.** The chat turn's prompt carries the open tasks (status + assignee, newest first, capped at 40) with the instruction not to duplicate them — measured: every conversation round reopened the same lineages, three budget frames in a day.
 - **A long conversation is compacted before it drowns the turn (ADR-0040).** Past `OVERMIND_CHAT_COMPACT_CHARS` (default 60k chars) the agent writes a handoff summary of the older messages; turns then read summary + recent tail, the summary is stored to the company brain too, and a quiet chip says it happened. Messages are never deleted; a failed compaction never eats the turn.
 

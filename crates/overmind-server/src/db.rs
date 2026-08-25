@@ -59,6 +59,9 @@ pub struct AppState {
     /// the same reason `answering` is: narration of a process that does not
     /// survive a restart.
     activity: Arc<Mutex<HashMap<String, serde_json::Value>>>,
+    /// The newest task completion each conversation has been told about (or
+    /// deliberately skipped) — ADR-0041.
+    digested: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -295,6 +298,32 @@ impl AppState {
         }
     }
 
+    /// Is any turn in flight anywhere? (tests and the digest scheduler use
+    /// this to avoid stacking a turn on a turn.)
+    pub fn is_answering_anywhere(&self) -> bool {
+        self.answering
+            .lock()
+            .map(|m| !m.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Advance the digest watermark for a conversation (ADR-0041). `true`
+    /// when `up_to` is newer than what was already announced or skipped —
+    /// i.e. the caller should run a digest turn. In memory: after a restart
+    /// the worst case is one redundant ask, and SKIP handles it.
+    pub fn digest_advance(&self, conversation_id: &str, up_to: &str) -> bool {
+        let Ok(mut m) = self.digested.lock() else {
+            return false;
+        };
+        match m.get(conversation_id) {
+            Some(seen) if seen.as_str() >= up_to => false,
+            _ => {
+                m.insert(conversation_id.to_string(), up_to.to_string());
+                true
+            }
+        }
+    }
+
     /// What this run is doing right now, if it said (ADR-0039).
     pub fn activity(&self, key: &str) -> Option<serde_json::Value> {
         self.activity.lock().ok()?.get(key).cloned()
@@ -370,6 +399,13 @@ pub struct Config {
     /// Compact a conversation before a turn once its transcript exceeds this
     /// many characters (ADR-0040). `OVERMIND_CHAT_COMPACT_CHARS`; 0 = never.
     pub chat_compact_chars: usize,
+    /// The CEO writes back on its own when tasks born in a thread finish
+    /// after the person's last word there (ADR-0041). `OVERMIND_CEO_DIGEST=off`
+    /// disables it.
+    pub ceo_digest: bool,
+    /// How long a thread must have been quiet before an unprompted update
+    /// (`OVERMIND_DIGEST_DEBOUNCE_SECS`, default 180).
+    pub digest_debounce_secs: u64,
     /// Built frontend directory (`OVERMIND_WEB_DIR`). Served at the root when
     /// it exists; absent in dev (Vite serves the UI and proxies to us).
     pub web_dir: PathBuf,
@@ -523,6 +559,8 @@ impl Default for Config {
             start_estimate_cents: 50,
             memory_cmd: None,
             chat_compact_chars: 60_000,
+            ceo_digest: true,
+            digest_debounce_secs: 180,
             web_dir: PathBuf::from("./web/dist"),
             sandbox: true,
             sandbox_allow: Vec::new(),
@@ -573,6 +611,11 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.chat_compact_chars),
+            ceo_digest: std::env::var("OVERMIND_CEO_DIGEST").as_deref() != Ok("off"),
+            digest_debounce_secs: std::env::var("OVERMIND_DIGEST_DEBOUNCE_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(defaults.digest_debounce_secs),
             web_dir: std::env::var("OVERMIND_WEB_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.web_dir),
@@ -748,6 +791,7 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         plan_windows: Arc::new(std::sync::RwLock::new(Default::default())),
         answering: Arc::new(Mutex::new(HashMap::new())),
         activity: Arc::new(Mutex::new(HashMap::new())),
+        digested: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
