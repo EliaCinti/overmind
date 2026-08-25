@@ -20,6 +20,11 @@ pub mod model;
 pub mod notify;
 pub mod org;
 pub mod runner;
+/// Test-only re-exports: integration tests exercise the narration parsers
+/// without making them public API.
+pub mod runner_test_hooks {
+    pub use crate::runner::{draft_reply, text_delta_in};
+}
 pub mod sandbox;
 pub mod scheduler;
 pub mod ws;

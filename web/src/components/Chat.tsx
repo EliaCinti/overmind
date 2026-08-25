@@ -121,7 +121,7 @@ export function Chat({
           }
         })
         .catch(() => {});
-    }, 2000);
+    }, 1000);
     return () => window.clearInterval(id);
   }, [pending, currentId, companyId]);
 
@@ -244,7 +244,12 @@ export function Chat({
             <MessageRow key={m.id} message={m} agent={agent} companyId={companyId} />
           ))
         )}
-        {pending && <Typing agent={agent} activity={activity} />}
+        {pending &&
+          (activity?.kind === "draft" ? (
+            <StreamingReply agent={agent} text={activity.text} />
+          ) : (
+            <Typing agent={agent} activity={activity} />
+          ))}
         <div ref={bottomRef} />
       </div>
 
@@ -464,6 +469,36 @@ function AttachmentView({ companyId, att }: { companyId: string; att: Attachment
       <Paperclip className="h-3.5 w-3.5 text-muted-foreground" />
       <span className="max-w-[200px] truncate">{att.filename}</span>
     </a>
+  );
+}
+
+/** The reply, appearing as it is written (ADR-0039 addendum): the draft
+ *  streams into a real agent bubble with a soft cursor, and the finished
+ *  message replaces it seamlessly on the same spot. */
+function StreamingReply({ agent, text }: { agent: Agent | null; text: string }) {
+  const t = useT();
+  const fallbackAgentName = t("chat.agent");
+  return (
+    <div className="flex gap-3">
+      <Avatar name={agent?.name ?? fallbackAgentName} className="mt-6" />
+      <div className="flex max-w-[82%] min-w-0 flex-col gap-1">
+        <span className="px-1 text-xs font-medium text-muted-foreground">
+          {agent?.name ?? fallbackAgentName}
+          {agent?.title ? <span className="font-normal"> · {agent.title}</span> : null}
+        </span>
+        <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-3.5 py-2.5 text-sm leading-relaxed text-card-foreground">
+          <Markdown text={text} />
+          <motion.span
+            className="ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 rounded bg-muted-foreground/70"
+            animate={{ opacity: [1, 0.2, 1] }}
+            transition={{ duration: 0.9, repeat: Infinity }}
+          />
+        </div>
+        <p className="max-w-[60ch] truncate px-1 text-xs italic text-muted-foreground/70">
+          {t("chat.activityWriting")}
+        </p>
+      </div>
+    </div>
   );
 }
 

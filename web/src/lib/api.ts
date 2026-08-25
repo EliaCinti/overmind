@@ -359,7 +359,9 @@ export interface Conversation {
  *  of what the agent is saying. Structured — the interface words it. */
 export type Activity =
   | { kind: "tool"; tool: string; server?: string }
-  | { kind: "text"; preview: string };
+  | { kind: "text"; preview: string }
+  /** The reply as it streams: readable text so far, plan syntax stripped. */
+  | { kind: "draft"; text: string };
 
 export interface Session {
   id: string;

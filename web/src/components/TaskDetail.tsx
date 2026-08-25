@@ -315,7 +315,11 @@ function Inner({
                         server: session.activity.server,
                       })
                     : t("chat.activityTool", { tool: session.activity.tool })
-                  : t("chat.activityText", { preview: session.activity.preview })}
+                  : session.activity.kind === "draft"
+                    ? t("chat.activityText", {
+                        preview: session.activity.text.slice(0, 120),
+                      })
+                    : t("chat.activityText", { preview: session.activity.preview })}
               </p>
             )}
 
