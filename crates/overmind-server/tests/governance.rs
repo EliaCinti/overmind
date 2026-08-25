@@ -437,3 +437,67 @@ async fn config_revisions_roll_back() {
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
 }
+
+/// Deciding an approval retires its notification (measured 25 Aug 2026: the
+/// owner's bell said 6 with nothing left to do — five of them were
+/// approval.requested rows whose approvals were long decided). The decision
+/// is the read: an ask that has been answered cannot stay "unread".
+#[tokio::test]
+async fn deciding_an_approval_retires_its_notification() {
+    let env = setup(|_| {}).await;
+    let agent = hire(&env, "Gated", 100000).await;
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/approval-gate"),
+        Some(json!({ "requires_approval": true })),
+    )
+    .await;
+    let task = make_todo(&env, "Needs sign-off").await;
+    let (s, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task}/start"),
+        Some(json!({ "agent_id": agent })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "{body}");
+    let approval = body["approval_id"].as_str().expect("approval").to_string();
+
+    let (_, n) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/notifications", env.company),
+        None,
+    )
+    .await;
+    assert!(
+        n["unread"].as_i64().unwrap_or(0) >= 1,
+        "the ask is unread: {n}"
+    );
+
+    let (s, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/approvals/{approval}/decision"),
+        Some(json!({ "decision": "approve" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    let (_, n) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/notifications", env.company),
+        None,
+    )
+    .await;
+    let still: Vec<_> = n["notifications"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|x| x["approval_id"] == json!(approval) && x["read_at"].is_null())
+        .collect();
+    assert!(still.is_empty(), "the answered ask is read: {n}");
+}

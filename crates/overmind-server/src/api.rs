@@ -3963,6 +3963,15 @@ async fn decide_approval(
         .bind(&approval_id)
         .execute(&mut *tx)
         .await?;
+    // The decision is the read: an ask that has been answered cannot stay
+    // "unread" (measured: the bell said 6 with nothing left to do — five of
+    // them were asks whose approvals were long decided, approved from a
+    // toast or by someone else).
+    sqlx::query("UPDATE notifications SET read_at = ? WHERE approval_id = ? AND read_at IS NULL")
+        .bind(now())
+        .bind(&approval_id)
+        .execute(&mut *tx)
+        .await?;
     audit::append(
         &mut tx,
         Some(&company_id),
