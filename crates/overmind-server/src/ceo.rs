@@ -932,6 +932,23 @@ async fn run_agent_turn_inner(
         // Showing a user `permission_denials` and `ttft_ms` is how this defect
         // announced itself in the smoke run.
         .unwrap_or_else(|| agent_text(&output).trim().to_string());
+    // The last line of defence (measured 26 Aug 2026): a turn where the model
+    // never spoke — window exhausted at spawn — has no result envelope, so
+    // `agent_text` degrades to the raw stream itself. Bookkeeping is never a
+    // reply: say what happened instead, with the window when it was reported.
+    let reply = if looks_like_adapter_stream(&reply) {
+        match crate::economy::plan_window_in(&output) {
+            Some(w) => format!(
+                "The agent could not produce a reply: the subscription's {} window is exhausted. It resets at {}.",
+                w.window.replace('_', "-"),
+                crate::economy::reset_time(&w)
+            ),
+            None => "The agent could not produce a reply this turn (it said nothing). Try again."
+                .to_string(),
+        }
+    } else {
+        reply
+    };
     // An unprompted update may deliberately stay silent (ADR-0041): SKIP
     // posts nothing, and the watermark the scheduler advanced stands, so the
     // same completions are never asked about twice.
@@ -1411,6 +1428,24 @@ pub(crate) async fn company_has_repo(state: &AppState, company_id: &str) -> Resu
     Ok(n.0 > 0)
 }
 
+/// Does this text look like the adapter's own stream-json lines rather than
+/// anything an agent said? True when every non-empty line is a JSON object
+/// carrying a `type` field — the shape of the CLI's event stream.
+pub(crate) fn looks_like_adapter_stream(text: &str) -> bool {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let mut any = false;
+    for line in lines.by_ref() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            return false;
+        };
+        if v.get("type").is_none() {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 /// Find the last JSON object in `text` that satisfies `wanted`.
 ///
 /// Scans the agent's words *and* the raw output: a plan can arrive as its own
@@ -1524,6 +1559,26 @@ mod tests {
     /// with exit 1, and the interface said "said nothing on stderr" — while
     /// the reason ("Invalid API key · Please run /login") sat on stdout,
     /// unread. When stderr is silent, stdout is the witness.
+    /// Measured 26 Aug 2026, the first turn of a new company's CEO: the
+    /// five-hour window was exhausted, the model never said a word, and the
+    /// degradation chain dumped the adapter's raw stream — init envelope,
+    /// tool list, rate_limit_event — into the chat as if the CEO had said
+    /// it. Adapter bookkeeping is never a reply.
+    #[test]
+    fn a_wordless_turn_never_dumps_the_stream_into_the_chat() {
+        let raw = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Task\"],\"session_id\":\"s\"}\n",
+            "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed_warning\",\"rateLimitType\":\"five_hour\",\"utilization\":0.98,\"resetsAt\":1787754600}}\n"
+        );
+        assert!(looks_like_adapter_stream(raw), "the stream is recognized");
+        // A real reply is not mistaken for a stream.
+        assert!(!looks_like_adapter_stream("Ciao! Ecco la squadra."));
+        // And an envelope whose result was already unwrapped is prose.
+        assert!(!looks_like_adapter_stream(
+            "La squadra che propongo:\n- A\n- B"
+        ));
+    }
+
     #[test]
     fn a_failure_that_spoke_on_stdout_is_quoted() {
         let said = turn_failure(Some(1), "", "Invalid API key \u{b7} Please run /login\n");
