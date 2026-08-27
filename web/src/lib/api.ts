@@ -544,17 +544,26 @@ export const api = {
   claudeAuthStart: () => req<void>("POST", "/claude-auth/start"),
   claudeAuthStatus: () =>
     req<
-      | { state: "idle" }
-      | { state: "starting"; tail?: string }
-      | { state: "exchanging"; tail?: string }
-      /** `rejected` rides along when this URL replaced one whose code the CLI refused. */
-      | { state: "url_ready"; url: string; tail?: string; rejected?: string | null }
-      /** The CLI rejected the pasted code and is prompting again. */
-      | { state: "code_rejected"; tail?: string; url?: string | null }
-      /** An OAuth error made the CLI restart its flow; a fresh URL is coming. */
-      | { state: "restarting"; tail?: string }
-      | { state: "done"; economy: Economy }
-      | { state: "failed"; tail: string }
+      (
+        | { state: "idle" }
+        | { state: "starting"; tail?: string }
+        | { state: "exchanging"; tail?: string }
+        /** `rejected` rides along when this URL replaced one whose code the CLI refused. */
+        | { state: "url_ready"; url: string; tail?: string; rejected?: string | null }
+        /** The CLI rejected the pasted code and is prompting again. */
+        | { state: "code_rejected"; tail?: string; url?: string | null }
+        /** An OAuth error made the CLI restart its flow; a fresh URL is coming. */
+        | { state: "restarting"; tail?: string }
+        | { state: "done"; economy: Economy }
+        | { state: "failed"; tail: string }
+      ) & {
+        /**
+         * Seconds this machine's clock differs from the world's (UTC vs UTC —
+         * a timezone cannot fake it). Minutes of skew doom every OAuth code
+         * before it is pasted; the card says so instead of a mute 400.
+         */
+        clock_skew_secs?: number | null;
+      }
     >("GET", "/claude-auth"),
   claudeAuthCode: (code: string) => req<void>("POST", "/claude-auth/code", { code }),
 

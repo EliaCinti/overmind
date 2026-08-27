@@ -68,6 +68,11 @@ services:
       # For a subscription instead, sign in once — the volume above keeps it:
       #   docker compose exec --user agent overmind claude setup-token
       #
+      # The container SHOWS time in UTC unless told a timezone; the clock
+      # underneath is the host's either way. Set this only so logs and
+      # `date` read in your local time — it cannot fix (or break) a clock:
+      # - TZ=Europe/Rome
+      #
       # Align the agent with your host user so it can write mounted repositories:
       # - OVERMIND_AGENT_UID=1000
       # - OVERMIND_AGENT_GID=1000

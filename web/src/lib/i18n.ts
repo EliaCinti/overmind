@@ -366,6 +366,8 @@ export const en = {
     connectPlanRetry: "Try again",
     connectPlanRejected: "The CLI did not accept that code. Use the link shown now and paste a fresh code — each one works once.",
     connectPlanRestarting: "That code was refused — asking the CLI for a fresh link…",
+    connectPlanClockSkew:
+      "This machine's clock is about {n} min off the world's (UTC against UTC — not a timezone) and every code will be refused until it is fixed. Docker Desktop: quit and reopen it, its VM wakes from sleep with a frozen clock. Linux: enable time sync (timedatectl set-ntp true). Then try again.",
     left: "{pct}% left",
     ofCap: "{used} of {cap}",
     approxOfCap: "≈{used} of {cap}",
@@ -914,6 +916,8 @@ export const it: Dictionary = {
     connectPlanRetry: "Riprova",
     connectPlanRejected: "La CLI non ha accettato il codice. Usa il link mostrato adesso e incolla un codice nuovo — ognuno vale una volta sola.",
     connectPlanRestarting: "Il codice è stato rifiutato — chiedo alla CLI un link nuovo…",
+    connectPlanClockSkew:
+      "L'orologio di questa macchina è sballato di circa {n} min rispetto al mondo (UTC contro UTC — non è il fuso orario) e ogni codice verrà rifiutato finché non viene corretto. Docker Desktop: chiudilo e riaprilo, la sua VM si sveglia dallo sleep con l'orologio fermo. Linux: attiva la sincronizzazione (timedatectl set-ntp true). Poi riprova.",
     left: "{pct}% rimasto",
     ofCap: "{used} di {cap}",
     approxOfCap: "≈{used} di {cap}",

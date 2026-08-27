@@ -33,6 +33,10 @@ export function SignInNotice({
     | { step: "failed"; tail: string }
   >({ step: "idle" });
   const [code, setCode] = useState("");
+  // Seconds this machine's clock is off the world's, once the server has
+  // measured it. Minutes of skew (a Docker VM woken from host sleep) refuse
+  // every OAuth code before it is pasted — worth its own loud line.
+  const [skew, setSkew] = useState<number | null>(null);
   const polling = useRef<number | null>(null);
 
   const active =
@@ -47,6 +51,7 @@ export function SignInNotice({
     polling.current = window.setInterval(async () => {
       try {
         const s = await api.claudeAuthStatus();
+        if (typeof s.clock_skew_secs === "number") setSkew(s.clock_skew_secs);
         if (s.state === "url_ready")
           // `rejected` survives a CLI restart: the fresh URL arrives with
           // the note that the previous code was refused.
@@ -119,6 +124,16 @@ export function SignInNotice({
                 {t("economy.notSignedInBody")}
               </p>
             </div>
+
+            {/* A clock minutes off the world refuses every code before it is
+                pasted — named here, where the person is about to paste one. */}
+            {active && skew !== null && Math.abs(skew) > 120 && (
+              <p className="rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                {t("economy.connectPlanClockSkew", {
+                  n: Math.round(Math.abs(skew) / 60),
+                })}
+              </p>
+            )}
 
             {/* The guided way: the subscription, from the product. */}
             {flow.step === "idle" && (
