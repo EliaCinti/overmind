@@ -4,8 +4,17 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-27
+
+Fixes from the first fresh-machine install by someone who is not the author — the two-machine walk over Tailscale doing exactly its job.
+
 ### Fixed
+- **The subscription sign-in survives the CLI's own retry.** On an OAuth 400 the CLI says "OAuth error … Press Enter to retry" — and the retry mints a *fresh* authorization URL (new PKCE challenge), so the old link is dead. The flow used to re-offer that dead link and every code from it answered 400, forever. Now the server recognizes the shape (even with the TUI's cursor-positioned words squashed together), presses Enter for the person, scrapes the URL printed *after* the restart and offers it with an honest note. The other shape — "Invalid code", same URL — still re-offers the paste box, and a rejection is judged on everything the CLI said since the code went in, not on a single read.
+- **The sign-in narrates itself in `docker compose logs`.** Spawn, URL ready, code forwarded, refusal, retry, token stored — or exactly why not, in the CLI's own last words. When the flow stuck before, the logs had nothing to tell.
 - **The brain never sinks the ship at build time.** A first-time installer's `compose build` died on the Wadachi layer (transient network). The image now degrades in loud steps — semantic → keyword-only → no memory — and the embedding-model bake is best-effort: a slower first run, never a broken build. Company deletion also survives the week's new schema (summaries, `depends_on`, `conversation_id`).
+
+### Changed
+- **`docker-compose.yml` says out loud that `down -v` deletes everything** — database, brains, audit chain, the agent's sign-in — and carries the one-line copy that backs the volumes up until export/restore ships as a real verb.
 
 ## [0.2.0] — 2026-08-27
 
