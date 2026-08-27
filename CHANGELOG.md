@@ -4,6 +4,18 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-08-28
+
+The subscription sign-in, watched all the way through on a friend's machine. The flow reached "token created successfully" — and then declared failure.
+
+### Fixed
+- **A token the CLI printed is a token the flow keeps — whatever it looks like.** The scraper was anchored to the literal `sk-ant-oat`; on a real sign-in a TUI redraw landed *inside* that prefix and the subtype differed (`sk-ant-at01-…`), so the CLI's "✓ Long-lived authentication token created successfully" ended in "no token appeared in its output". The transcript is now walked as escape-free runs — a redraw anywhere, any `sk-ant-*` subtype, a label glued on by a cursor move: the credential is still found.
+- **No credential ever leaves the module.** The failure message above carried the unrecognized token itself into `docker compose logs` — exactly where someone debugging would paste from. Everything the flow logs or hands to the interface (failure tails, the live tail, rejection notes) now passes a scrubber that blots out anything shaped like an `sk-ant-…` credential.
+
+### Added
+- **A skewed clock is named, not suffered.** OAuth codes are minutes-lived; a machine whose clock is minutes off the world refuses every code before it is pasted (a Docker Desktop VM woken from host sleep does exactly this). At sign-in the server measures its clock against the `Date` header of the API the CLI already talks to — UTC against UTC, so a timezone cannot cry wolf — and past two minutes of skew the card and the log say so, with the remedy per platform.
+- **`docker-compose.yml` explains container time.** A commented `TZ=Europe/Rome` shows how to make logs read in local time — and says out loud that a timezone changes how time is *shown*, never what time it *is*.
+
 ## [0.2.1] — 2026-08-27
 
 Fixes from the first fresh-machine install by someone who is not the author — the two-machine walk over Tailscale doing exactly its job.
