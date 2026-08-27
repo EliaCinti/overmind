@@ -194,7 +194,15 @@ pub async fn collect_files(root: &Path, limit: usize) -> Vec<(PathBuf, u64)> {
         let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
             continue;
         };
+        // Deterministic order (name-sorted per directory): which files make
+        // the cap must not depend on filesystem hash order — a produced file
+        // either always rides or a test catches that it cannot.
+        let mut batch = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
+            batch.push(entry);
+        }
+        batch.sort_by_key(|e| e.file_name());
+        for entry in batch {
             if out.len() >= limit {
                 return out;
             }

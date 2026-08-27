@@ -218,7 +218,12 @@ async fn a_long_thread_is_compacted_before_the_turn() {
     let m = tell_and_wait(&env, "DOMANDA-FRESCA: come procediamo?").await;
 
     let prompts = answer_prompts(&env.root);
-    let p = prompts.last().expect("a turn ran");
+    // Picked by content, not by clock: two turns can share an mtime tick on a
+    // busy CI runner, and "the last file" then lies (measured: macOS CI).
+    let p = prompts
+        .iter()
+        .find(|p| p.contains("DOMANDA-FRESCA"))
+        .expect("the fresh question's turn ran");
     assert!(
         p.contains("RIASSUNTO-DI-PASSAGGIO"),
         "the summary rides in the prompt"
@@ -245,6 +250,9 @@ async fn a_long_thread_is_compacted_before_the_turn() {
         before + 1,
         "one answer turn, no re-compaction"
     );
-    let p = prompts.last().expect("turn");
-    assert!(p.contains("RIASSUNTO-DI-PASSAGGIO") && p.contains("SECONDA-DOMANDA"));
+    let p = prompts
+        .iter()
+        .find(|p| p.contains("SECONDA-DOMANDA"))
+        .expect("the second question's turn ran");
+    assert!(p.contains("RIASSUNTO-DI-PASSAGGIO"));
 }
