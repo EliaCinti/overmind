@@ -2,7 +2,7 @@
 
 All notable changes to Overmind are recorded here, newest first. Overmind is developed milestone by milestone; each entry names the milestones it ships and the decisions behind them (`docs/adr/`). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/) from `0.1.0` on — before `1.0`, minor versions may change behaviour.
 
-## [Unreleased]
+## [0.2.0] — 2026-08-27
 
 ### Added
 - **The CEO runs the floor (M30, ADR-0042).** The chat plan gains `start` (start or relaunch existing tasks by title, through the same autonomy gates) and `after` (a task waits for another, inherits its deliverables as inputs, and starts when it completes). Digests may propose starts — each lands as an approval in the inbox, never as autonomous spend.
