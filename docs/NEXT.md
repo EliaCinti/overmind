@@ -82,5 +82,35 @@ Found while the owner drove the Casa San Vito company; each is small, none is ur
 - **Duplicate attachments read twice.** The same file uploaded twice to a thread is listed twice ("BozzaCasa.jpeg, BozzaCasa.jpeg") and copied over itself in the run dir. Dedup by (filename, size) at listing time, or say "×2".
 - **A manual board move to *in progress* runs nobody.** The transition is legal but inert — either offer the start when the column changes, or say plainly that starting lives on the task.
 
+## Local models: Overmind off the meter (researched 27 Aug 2026)
+
+The owner's ask: run Overmind's agents on local LLMs — for privacy and to
+escape token windows. Research says the road is short, because the design
+already leaves it open:
+
+- **The cheap path needs no new code.** Since early 2026 llama.cpp, Ollama
+  and LM Studio all speak the **Anthropic Messages API**; the Claude Code CLI
+  follows `ANTHROPIC_BASE_URL`. Point the CLI at a local server (or a LiteLLM
+  router) and today's Overmind runs unchanged — tools, MCP memory, personas
+  and all — with `OVERMIND_ECONOMY` declared. This is the first walk to do.
+- **First-class support is one milestone ("local is an economy"):**
+  1. `OVERMIND_AGENT_ENV` (or per-model `base_url` in the catalog) so the
+     server injects the routing per run instead of the operator exporting it;
+  2. local models in the **model catalog**, so the `model` trait per agent
+     buys a **mixed fleet** — CEO on Claude, workers on Qwen — via a LiteLLM
+     route table (claude-* → Anthropic, qwen-* → llama.cpp);
+  3. a third economy kind `local`: no money, no plan windows — the honest
+     wording for caps that brake loops but bill nobody;
+  4. docs: hardware tiers (below), model picks, the router recipe.
+- **Hardware tiers** (researched Aug 2026, M5-generation Macs just announced):
+  *Basic* ~€2–3k (Mac Mini/Studio M4-class 64–128GB, or 1× RTX 5090 32GB):
+  Qwen3-30B-A3B / gpt-oss-20b class — one agent at a time, good drafts.
+  *Normal* ~€5–7k (Mac Studio M5 Max 256GB, or 2× 5090): gpt-oss-120b /
+  Qwen3-235B-A22B quantized — a small org's daily driver.
+  *Max* ~€15k+ (Mac Studio M5 Ultra 512GB, ~Oct 2026): DeepSeek-class 671B
+  at 4-bit, Kimi K2-class 1T at ~2-bit, 5–15 tok/s. Caveat that matters to
+  Overmind specifically: agent prompts are long, and unified-memory Macs pay
+  it in **prefill**; MoE models and prompt caching are the mitigations.
+
 ## How this file is used
 Pick the top milestone, write its ADR if it changes a boundary or a contract, open it in the roadmap as `in-progress`, close it the way every milestone was closed — tests, a live walk, the owner's word — and come back here to take the next one. Frictions from use jump the queue.
