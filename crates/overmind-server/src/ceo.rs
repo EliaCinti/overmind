@@ -1368,7 +1368,14 @@ fn turn_failure(code: Option<i32>, stderr: &str, stdout: &str) -> String {
     // stderr" (measured 24 Aug 2026, an expired login). When stderr is
     // silent, stdout is the witness.
     let said = if said.is_empty() {
-        clamp_agent_text(stdout)
+        // Stream-shaped stdout is never quoted whole (measured 27 Aug 2026:
+        // an auth-revoked turn dumped its event stream into the chat through
+        // this very courtesy). Distil the words inside it instead.
+        if looks_like_adapter_stream(stdout) {
+            clamp_agent_text(&assistant_words_in(stdout).unwrap_or_default())
+        } else {
+            clamp_agent_text(stdout)
+        }
     } else {
         said
     };
@@ -1454,6 +1461,40 @@ pub(crate) fn looks_like_adapter_stream(text: &str) -> bool {
         any = true;
     }
     any
+}
+
+/// The human-readable words inside a stream's assistant events, if any —
+/// the CLI reports errors as synthetic assistant text ("Invalid API key ·
+/// Please run /login"), which is the one part of a stream worth a person's
+/// eyes.
+pub(crate) fn assistant_words_in(stream: &str) -> Option<String> {
+    let mut words = Vec::new();
+    for line in stream.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("text")
+                && let Some(t) = block.get("text").and_then(Value::as_str)
+            {
+                let t = t.trim();
+                if !t.is_empty() {
+                    words.push(t.to_string());
+                }
+            }
+        }
+    }
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 /// Find the last JSON object in `text` that satisfies `wanted`.
@@ -1587,6 +1628,30 @@ mod tests {
         assert!(!looks_like_adapter_stream(
             "La squadra che propongo:\n- A\n- B"
         ));
+    }
+
+    /// Third sighting (27 Aug 2026), new door: an auth-revoked turn exits 1
+    /// with silent stderr, and the "quote stdout" courtesy (24 Aug) quoted
+    /// the whole event stream — init envelope, tool lists — into the chat.
+    /// When stdout is stream-shaped, quote the words *inside* it (the
+    /// synthetic assistant text carries the actual reason) or nothing.
+    #[test]
+    fn a_stream_shaped_stdout_is_distilled_not_quoted() {
+        let stream = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[\"Task\",\"Bash\"],\"session_id\":\"s\"}\n",
+            "{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"requesting\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Invalid API key \u{b7} Please run /login\"}]}}\n"
+        );
+        let said = turn_failure(Some(1), "", stream);
+        assert!(said.contains("Please run /login"), "{said}");
+        assert!(
+            !said.contains("\"type\""),
+            "no raw stream in the chat: {said}"
+        );
+        // A stream with no words at all degrades to honest silence.
+        let wordless = "{\"type\":\"system\",\"subtype\":\"init\",\"tools\":[]}\n";
+        let said = turn_failure(Some(1), "", wordless);
+        assert!(said.contains("said nothing"), "{said}");
     }
 
     #[test]
