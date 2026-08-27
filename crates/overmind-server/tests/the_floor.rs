@@ -451,6 +451,21 @@ async fn a_company_with_the_new_references_can_still_be_deleted() {
     .await
     .expect("summary");
 
+    // Let the pair's sessions settle: deletion rightly refuses while a
+    // session is queued or running (caught on CI, where timing differs).
+    for _ in 0..200 {
+        let live: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM agent_task_sessions WHERE status IN ('queued', 'running')",
+        )
+        .fetch_one(&env.state.pool)
+        .await
+        .expect("q");
+        if live.0 == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
     let (s, v) = send(
         &env.app,
         "DELETE",
