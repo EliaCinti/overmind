@@ -34,6 +34,11 @@ pub enum FlowState {
     UrlReady(String),
     /// A code was forwarded; waiting for the CLI to finish.
     Exchanging,
+    /// The CLI rejected the code and is prompting again (measured 27 Aug
+    /// 2026: an invalid code does not end the process — it re-prompts, the
+    /// pty stays open, and without this state the interface spun on
+    /// "checking the code" forever with no way out).
+    CodeRejected(String),
     /// The CLI exited successfully and the economy was re-detected.
     Done,
     /// The CLI exited without succeeding; the tail of its output rides along.
@@ -42,6 +47,9 @@ pub enum FlowState {
 
 pub struct Flow {
     pub state: FlowState,
+    /// The authorization URL once seen — kept so a rejected code can
+    /// re-offer the same page and paste box instead of a dead spinner.
+    url: Option<String>,
     /// Everything the CLI printed, ANSI stripped -- the failure tail comes
     /// from here, and the URL is scraped out of it.
     output: String,
@@ -256,7 +264,15 @@ pub fn start(state: &AppState) -> Result<(), String> {
     let mut slot = FLOW.lock().map_err(|_| "flow state poisoned".to_string())?;
     if let Some(f) = slot.as_mut() {
         let stale = f.started.elapsed() > Duration::from_secs(600)
-            || matches!(f.state, FlowState::Done | FlowState::Failed(_));
+            || matches!(
+                f.state,
+                FlowState::Done | FlowState::Failed(_) | FlowState::CodeRejected(_)
+            )
+            // A flow stuck mid-exchange is a flow the person cannot use:
+            // after two minutes a fresh click means "start over", not
+            // "adopt the zombie" (measured: retry adopted it, nothing moved).
+            || (matches!(f.state, FlowState::Exchanging)
+                && f.started.elapsed() > Duration::from_secs(120));
         if !stale {
             // Idempotent: the second click adopts the flow the first one
             // started, instead of being told off for it.
@@ -331,6 +347,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
 
     *slot = Some(Flow {
         state: FlowState::Starting,
+        url: None,
         output: String::new(),
         raw: String::new(),
         master: Some(master_file),
@@ -359,7 +376,16 @@ pub fn start(state: &AppState) -> Result<(), String> {
                         if matches!(f.state, FlowState::Starting)
                             && let Some(url) = find_url(&f.output)
                         {
+                            f.url = Some(url.clone());
                             f.state = FlowState::UrlReady(url);
+                        }
+                        // An invalid code does not end the CLI — it says so
+                        // and prompts again. Catch the words as they arrive,
+                        // or the interface spins on "exchanging" forever.
+                        if matches!(f.state, FlowState::Exchanging)
+                            && code_rejected_in(&strip_ansi(&chunk))
+                        {
+                            f.state = FlowState::CodeRejected(tail(&f.output, 200));
                         }
                     }
                 }
@@ -439,6 +465,9 @@ pub fn submit_code(code: &str) -> Result<(), String> {
     // carriage return glued to the end of the burst is swallowed *into* the
     // paste instead of registering as the Enter key -- measured live: the
     // prompt showed a full line of asterisks and then sat there.
+    if matches!(f.state, FlowState::Done) {
+        return Err("the sign-in already completed".into());
+    }
     master
         .write_all(code.trim().as_bytes())
         .and_then(|_| master.flush())
@@ -462,22 +491,26 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                     f.state.clone(),
                     f.started.elapsed().as_secs(),
                     tail(&f.output, 400),
+                    f.url.clone(),
                 )
             })
         })
     };
     match snapshot {
         None => serde_json::json!({ "state": "idle" }),
-        Some((FlowState::Starting, secs, t)) => {
+        Some((FlowState::Starting, secs, t, _)) => {
             serde_json::json!({ "state": "starting", "seconds": secs, "tail": t })
         }
-        Some((FlowState::UrlReady(url), _, t)) => {
+        Some((FlowState::UrlReady(url), _, t, _)) => {
             serde_json::json!({ "state": "url_ready", "url": url, "tail": t })
         }
-        Some((FlowState::Exchanging, _, t)) => {
+        Some((FlowState::Exchanging, _, t, _)) => {
             serde_json::json!({ "state": "exchanging", "tail": t })
         }
-        Some((FlowState::Done, _, _)) => {
+        Some((FlowState::CodeRejected(why), _, _, url)) => {
+            serde_json::json!({ "state": "code_rejected", "tail": why, "url": url })
+        }
+        Some((FlowState::Done, _, _, _)) => {
             // The proof is the economy, not the exit code: re-detect and let
             // the sign-in notice disappear because the CLI is now signed in.
             let economy = crate::economy::detect(&state.config).await;
@@ -487,15 +520,46 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                 "economy": crate::economy::as_json(&economy),
             })
         }
-        Some((FlowState::Failed(t), _, _)) => {
+        Some((FlowState::Failed(t), _, _, _)) => {
             serde_json::json!({ "state": "failed", "tail": t })
         }
     }
 }
 
+/// Do these CLI words mean "that code was not accepted, try again"?
+/// Matched against the words the setup-token flow actually prints; broad on
+/// purpose — a false positive re-offers the paste box, a false negative is
+/// an eternal spinner.
+pub(crate) fn code_rejected_in(chunk: &str) -> bool {
+    let lower = chunk.to_lowercase();
+    [
+        "invalid",
+        "not valid",
+        "expired",
+        "try again",
+        "denied",
+        "error",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_token;
+    use super::{code_rejected_in, find_token};
+
+    /// Measured 27 Aug 2026: a wrong code left the CLI re-prompting on an
+    /// open pty; without recognizing its words the flow spun forever and
+    /// Retry adopted the zombie.
+    #[test]
+    fn a_rejected_code_is_recognized_and_a_prompt_is_not() {
+        assert!(code_rejected_in(
+            "Invalid authorization code. Please try again:"
+        ));
+        assert!(code_rejected_in("OAuth error: code expired"));
+        assert!(!code_rejected_in("Paste the code from the browser:"));
+        assert!(!code_rejected_in("Browser didn't open? Use the url below"));
+    }
 
     /// The shape that corrupted the first stored token, reconstructed: a CSI
     /// sequence landing mid-token must be skipped, not allowed to end the

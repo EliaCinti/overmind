@@ -26,7 +26,7 @@ export function SignInNotice({
   const [flow, setFlow] = useState<
     | { step: "idle" }
     | { step: "starting" }
-    | { step: "url"; url: string }
+    | { step: "url"; url: string; rejected?: string }
     | { step: "exchanging"; tail?: string }
     | { step: "done" }
     | { step: "failed"; tail: string }
@@ -45,6 +45,11 @@ export function SignInNotice({
         const s = await api.claudeAuthStatus();
         if (s.state === "url_ready") setFlow({ step: "url", url: s.url });
         else if (s.state === "exchanging") setFlow({ step: "exchanging", tail: s.tail });
+        else if (s.state === "code_rejected")
+          // The CLI said no and is prompting again (27 Aug 2026: without
+          // this, an invalid code meant an eternal spinner): back to the
+          // paste box, same URL, with the CLI's words shown.
+          setFlow({ step: "url", url: s.url ?? "", rejected: s.tail });
         else if (s.state === "done") {
           setFlow({ step: "done" });
           onSignedIn();
@@ -126,6 +131,11 @@ export function SignInNotice({
                 >
                   {flow.url} <ArrowUpRight className="h-3 w-3 shrink-0" />
                 </a>
+                {flow.step === "url" && flow.rejected && (
+                  <p className="rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                    {t("economy.connectPlanRejected")}
+                  </p>
+                )}
                 <p className="text-xs font-medium">{t("economy.connectPlanPaste")}</p>
                 <form
                   className="flex gap-2"

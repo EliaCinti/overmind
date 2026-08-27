@@ -548,6 +548,8 @@ export const api = {
       | { state: "starting"; tail?: string }
       | { state: "exchanging"; tail?: string }
       | { state: "url_ready"; url: string; tail?: string }
+      /** The CLI rejected the pasted code and is prompting again. */
+      | { state: "code_rejected"; tail?: string; url?: string | null }
       | { state: "done"; economy: Economy }
       | { state: "failed"; tail: string }
     >("GET", "/claude-auth"),
