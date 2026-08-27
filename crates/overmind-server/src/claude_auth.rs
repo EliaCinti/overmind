@@ -78,6 +78,10 @@ pub struct Flow {
     exchange_from: usize,
     /// A refusal the person should still see once the fresh URL is up.
     rejected_note: Option<String>,
+    /// Seconds this machine's clock differs from the world's, measured once
+    /// per flow — the one fact that turns "every code answers 400" from a
+    /// mystery into a sentence.
+    skew: Option<i64>,
 }
 
 /// The one flow, if any. On `AppState` it would drag `Arc<Mutex<..>>` through
@@ -149,44 +153,125 @@ pub fn stored_token(config: &crate::db::Config) -> Option<String> {
 
 /// Scrape the token out of the CLI's **raw** output.
 ///
-/// Anchored at the token's own prefix (`sk-ant-oat`), longest run wins, and
-/// escape sequences are skipped *inside* the run rather than stripped first:
-/// the lossy cleaner ate exactly one character of the first stored token.
+/// The whole transcript is walked as escape-free runs of token characters —
+/// an escape sequence anywhere (including INSIDE the `sk-ant-` prefix) is
+/// skipped, never allowed to end the run or eat a character. Twice burned:
+/// the ANSI stripper ate the `o` of `oat01` on the first live sign-in, and
+/// on the first fresh-machine sign-in (27 Aug 2026) the anchor `sk-ant-oat`
+/// itself failed to match — a redraw had landed inside it, the CLI said
+/// "token created successfully", and the flow reported failure over a token
+/// it was holding. So: no long anchor in the raw bytes, any `sk-ant-*`
+/// subtype, longest qualifying run wins.
 fn find_token(raw: &str) -> Option<String> {
     let mut best: Option<String> = None;
-    for (i, _) in raw.match_indices("sk-ant-oat") {
-        let mut tok = String::new();
-        let mut chars = raw[i..].chars().peekable();
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                tok.push(c);
-                chars.next();
-            } else if c == '\u{1b}' {
-                // A redraw in the middle of the token: skip the sequence,
-                // keep collecting.
-                chars.next();
-                match chars.peek() {
-                    Some('[') => {
-                        chars.next();
-                        for d in chars.by_ref() {
-                            if ('@'..='~').contains(&d) {
-                                break;
-                            }
-                        }
-                    }
-                    _ => {
-                        chars.next();
-                    }
-                }
-            } else {
-                break;
+    let mut run = String::new();
+    let mut chars = raw.chars().peekable();
+    let consider = |run: &mut String, best: &mut Option<String>| {
+        // The prefix may sit mid-run: a cursor-positioned label glued to the
+        // token by a skipped escape ("token" ESC[5C "sk-ant-…") must not
+        // hide it.
+        if let Some(pos) = run.find("sk-ant-") {
+            let tok = &run[pos..];
+            if tok.len() > 40 && best.as_ref().map(|b| tok.len() > b.len()).unwrap_or(true) {
+                *best = Some(tok.to_string());
             }
         }
-        if best.as_ref().map(|b| tok.len() > b.len()).unwrap_or(true) {
-            best = Some(tok);
+        run.clear();
+    };
+    while let Some(c) = chars.next() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            run.push(c);
+        } else if c == '\u{1b}' {
+            // A redraw mid-run: skip the sequence, keep collecting.
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for d in chars.by_ref() {
+                        if ('@'..='~').contains(&d) {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+        } else {
+            consider(&mut run, &mut best);
         }
     }
-    best.filter(|t| t.len() > 40)
+    consider(&mut run, &mut best);
+    best
+}
+
+/// Blot credentials out of text that is about to be logged or shown.
+///
+/// Learned the hard way (27 Aug 2026): "its last words" on a failed token
+/// scrape carried the token itself — the one the scraper had not recognized
+/// — into `docker compose logs` and a pasted bug report. Anything shaped
+/// like a long `sk-ant-…` run is replaced before the text leaves this
+/// module; a lost character or an unknown subtype must not defeat it, so
+/// the match is the shape, not an exact prefix list.
+fn scrub_secrets(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let is_tok = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // A run of token characters containing "sk-ant" and long enough to
+        // be a credential is not for anyone's eyes.
+        if is_tok(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_tok(chars[i]) {
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            if run.len() > 20 && run.contains("sk-ant") {
+                out.push_str("sk-ant-…[redacted]");
+            } else {
+                out.push_str(&run);
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// How far this machine's clock is from the world's, in seconds — positive
+/// when this clock runs ahead, negative when it lags. Judged against the
+/// `Date` header of the API the CLI itself talks to (no new party learns
+/// anything); `None` when the check cannot run — offline is not a skew.
+///
+/// Why it lives here: OAuth codes are minutes-lived, and Docker Desktop's VM
+/// wakes from host sleep with its clock frozen at the moment of sleep. Every
+/// code then answers 400, first paste included, and nothing in the flow says
+/// why (measured 27 Aug 2026 on a friend's install — the friend's container
+/// was minutes behind the world). `curl` rather than an HTTP client crate:
+/// the image carries it already for the healthcheck, and the economy
+/// detector set the house pattern of shelling out for a fact.
+pub async fn clock_skew_secs() -> Option<i64> {
+    let out = tokio::process::Command::new("curl")
+        .args(["-sI", "-m", "5", "https://api.anthropic.com/"])
+        .output()
+        .await
+        .ok()?;
+    skew_from(
+        &String::from_utf8_lossy(&out.stdout),
+        std::time::SystemTime::now(),
+    )
+}
+
+/// The skew, from raw response headers and a local "now". Pure for the test.
+fn skew_from(headers: &str, now: std::time::SystemTime) -> Option<i64> {
+    let value = headers.lines().find_map(|l| {
+        let (name, v) = l.split_once(':')?;
+        name.trim().eq_ignore_ascii_case("date").then(|| v.trim())
+    })?;
+    let server = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let now = chrono::DateTime::<chrono::Utc>::from(now);
+    Some((now - server.with_timezone(&chrono::Utc)).num_seconds())
 }
 
 /// The first `https://` URL in the output that looks like the OAuth page.
@@ -374,8 +459,29 @@ pub fn start(state: &AppState) -> Result<(), String> {
         scan_from: 0,
         exchange_from: 0,
         rejected_note: None,
+        skew: None,
     });
     drop(slot);
+
+    // Measure the clock once per flow, off the request path. A skewed clock
+    // dooms every code before the person pastes the first one — say so in
+    // the log and hand the number to the interface.
+    tokio::spawn(async move {
+        if let Some(s) = clock_skew_secs().await {
+            if s.abs() > 120 {
+                eprintln!(
+                    "claude sign-in: this machine's clock is {}s {} the world — OAuth codes will be refused until it is fixed (Docker Desktop: restart it; its VM wakes from sleep with a frozen clock)",
+                    s.abs(),
+                    if s > 0 { "ahead of" } else { "behind" }
+                );
+            }
+            if let Ok(mut slot) = FLOW.lock()
+                && let Some(f) = slot.as_mut()
+            {
+                f.skew = Some(s);
+            }
+        }
+    });
 
     // One thread reads the pty until it closes, folding output into the slot
     // and promoting the state as landmarks appear. A thread, not a task: the
@@ -413,13 +519,16 @@ pub fn start(state: &AppState) -> Result<(), String> {
                                     eprintln!(
                                         "claude sign-in: the CLI refused the code and is re-prompting on the same URL"
                                     );
-                                    f.state = FlowState::CodeRejected(tail(&f.output, 200));
+                                    f.state = FlowState::CodeRejected(scrub_secrets(&tail(
+                                        &f.output, 200,
+                                    )));
                                 }
                                 ExchangeVerdict::Restart => {
                                     // The CLI's own retry: give it the Enter it
                                     // asked for, and scrape only what it prints
                                     // from here on — the old link is dead.
-                                    let why = tail(&f.output[f.exchange_from..], 200);
+                                    let why =
+                                        scrub_secrets(&tail(&f.output[f.exchange_from..], 200));
                                     eprintln!(
                                         "claude sign-in: OAuth error from the CLI — pressing Enter for a fresh URL ({})",
                                         why.replace('\n', " · ")
@@ -467,12 +576,14 @@ pub fn start(state: &AppState) -> Result<(), String> {
                         }
                     }
                     // A clean exit without a credential is still a failure —
-                    // and the CLI's last words are the only clue anyone has
-                    // (a token cannot be among them: none was found).
+                    // and the CLI's last words are the only clue anyone has.
+                    // SCRUBBED: "none was found" once meant "the scraper did
+                    // not recognize it", and the unrecognized token rode this
+                    // very message into the logs (27 Aug 2026).
                     None => {
                         let why = format!(
                             "the CLI finished but no token appeared in its output; its last words:\n{}",
-                            tail(&f.output, 400)
+                            scrub_secrets(&tail(&f.output, 400))
                         );
                         eprintln!("claude sign-in: {}", why.replace('\n', " · "));
                         FlowState::Failed(why)
@@ -488,6 +599,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
                     .chars()
                     .rev()
                     .collect();
+                let words = scrub_secrets(&words);
                 eprintln!(
                     "claude sign-in: the CLI exited unsuccessfully: {}",
                     words.replace('\n', " · ")
@@ -561,31 +673,35 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                 (
                     f.state.clone(),
                     f.started.elapsed().as_secs(),
-                    tail(&f.output, 400),
+                    // Scrubbed: the live tail streams the CLI's words to the
+                    // interface, and on the success path those words include
+                    // the token.
+                    scrub_secrets(&tail(&f.output, 400)),
                     f.url.clone(),
                     f.rejected_note.clone(),
+                    f.skew,
                 )
             })
         })
     };
     match snapshot {
         None => serde_json::json!({ "state": "idle" }),
-        Some((FlowState::Starting, secs, t, _, _)) => {
-            serde_json::json!({ "state": "starting", "seconds": secs, "tail": t })
+        Some((FlowState::Starting, secs, t, _, _, skew)) => {
+            serde_json::json!({ "state": "starting", "seconds": secs, "tail": t, "clock_skew_secs": skew })
         }
-        Some((FlowState::UrlReady(url), _, t, _, rejected)) => {
-            serde_json::json!({ "state": "url_ready", "url": url, "tail": t, "rejected": rejected })
+        Some((FlowState::UrlReady(url), _, t, _, rejected, skew)) => {
+            serde_json::json!({ "state": "url_ready", "url": url, "tail": t, "rejected": rejected, "clock_skew_secs": skew })
         }
-        Some((FlowState::Exchanging, _, t, _, _)) => {
-            serde_json::json!({ "state": "exchanging", "tail": t })
+        Some((FlowState::Exchanging, _, t, _, _, skew)) => {
+            serde_json::json!({ "state": "exchanging", "tail": t, "clock_skew_secs": skew })
         }
-        Some((FlowState::CodeRejected(why), _, _, url, _)) => {
-            serde_json::json!({ "state": "code_rejected", "tail": why, "url": url })
+        Some((FlowState::CodeRejected(why), _, _, url, _, skew)) => {
+            serde_json::json!({ "state": "code_rejected", "tail": why, "url": url, "clock_skew_secs": skew })
         }
-        Some((FlowState::Restarting(why), _, _, _, _)) => {
-            serde_json::json!({ "state": "restarting", "tail": why })
+        Some((FlowState::Restarting(why), _, _, _, _, skew)) => {
+            serde_json::json!({ "state": "restarting", "tail": why, "clock_skew_secs": skew })
         }
-        Some((FlowState::Done, _, _, _, _)) => {
+        Some((FlowState::Done, _, _, _, _, _)) => {
             // The proof is the economy, not the exit code: re-detect and let
             // the sign-in notice disappear because the CLI is now signed in.
             let economy = crate::economy::detect(&state.config).await;
@@ -595,8 +711,8 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                 "economy": crate::economy::as_json(&economy),
             })
         }
-        Some((FlowState::Failed(t), _, _, _, _)) => {
-            serde_json::json!({ "state": "failed", "tail": t })
+        Some((FlowState::Failed(t), _, _, _, _, skew)) => {
+            serde_json::json!({ "state": "failed", "tail": t, "clock_skew_secs": skew })
         }
     }
 }
@@ -713,6 +829,28 @@ mod tests {
         );
     }
 
+    /// A machine minutes behind the world (a Docker Desktop VM woken from
+    /// host sleep) must be measured as such from the `Date` header — and the
+    /// timezone must not be able to lie: both sides are judged in UTC.
+    #[test]
+    fn a_frozen_clock_is_measured_and_a_true_clock_reads_zero() {
+        use super::skew_from;
+        // (27 Aug 2026 is a Thursday — chrono validates the weekday, and a
+        // wrong one is a parse error, not a shrug.)
+        let headers = "HTTP/2 200\r\ndate: Thu, 27 Aug 2026 21:50:00 GMT\r\nserver: x\r\n";
+        // The machine believes it is 21:44:30 UTC — five and a half minutes
+        // behind the world.
+        let local =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_787_867_070);
+        assert_eq!(skew_from(headers, local), Some(-330));
+        // The same instant on both sides: no skew.
+        let honest =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_787_867_400);
+        assert_eq!(skew_from(headers, honest), Some(0));
+        // No Date header, no verdict — offline is not a skew.
+        assert_eq!(skew_from("HTTP/2 200\r\nserver: x\r\n", honest), None);
+    }
+
     /// After a restart the transcript holds two urls; the scrape must offer
     /// the one printed after the restart point, never the dead first one.
     #[test]
@@ -744,6 +882,51 @@ mod tests {
     #[test]
     fn a_fragment_is_not_a_token() {
         assert_eq!(find_token("sk-ant-oat01-tooshort"), None);
+    }
+
+    /// The first fresh-machine sign-in (27 Aug 2026): the CLI said "token
+    /// created successfully", but a redraw had landed INSIDE the old anchor
+    /// and the subtype differed — the flow declared failure over a token it
+    /// was holding. Escapes inside the prefix, unknown subtypes, and a label
+    /// glued on by a cursor move must all still yield the credential.
+    #[test]
+    fn a_token_survives_a_redraw_inside_its_own_prefix_and_any_subtype() {
+        let tail = "3BrYJsbWQSRjWgqoWSud8cWu6nFBNIqo9F19xKrQsFBZ";
+        // A redraw between "sk-ant-" and the subtype.
+        let raw = format!("token:\nsk-ant-\u{1b}[2Kat01-{tail}\nStore this");
+        assert_eq!(
+            find_token(&raw).as_deref(),
+            Some(&*format!("sk-ant-at01-{tail}"))
+        );
+        // The eaten-character shape: the escape lands mid-"oat01".
+        let raw = format!("sk-ant-o\u{1b}[0mat01-{tail} done");
+        assert_eq!(
+            find_token(&raw).as_deref(),
+            Some(&*format!("sk-ant-oat01-{tail}"))
+        );
+        // A cursor-positioned label glued straight onto the token.
+        let raw = format!("token\u{1b}[5Csk-ant-at01-{tail}\n");
+        assert_eq!(
+            find_token(&raw).as_deref(),
+            Some(&*format!("sk-ant-at01-{tail}"))
+        );
+    }
+
+    /// What leaves this module carries no credential: the very failure
+    /// message that once ferried an unrecognized token into the logs must
+    /// blot it out, while ordinary words pass untouched.
+    #[test]
+    fn a_credential_is_scrubbed_from_outbound_text() {
+        let text = "Your OAuth token:\nsk-ant-at01-3BrYJsbWQSRjWgqoWSud8cWu6nFBNIqo9F19xKrQsFBZ\nStore this token securely.";
+        let scrubbed = super::scrub_secrets(text);
+        assert!(!scrubbed.contains("3BrYJsbW"), "token survived: {scrubbed}");
+        assert!(scrubbed.contains("sk-ant-…[redacted]"));
+        assert!(scrubbed.contains("Store this token securely."));
+        // A bare mention of the prefix is prose, not a credential.
+        assert_eq!(
+            super::scrub_secrets("set sk-ant-… as the key"),
+            "set sk-ant-… as the key"
+        );
     }
 
     fn spawn_tethered(parent: u32, program: &str, args: &[&str]) -> std::process::Child {
