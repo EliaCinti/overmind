@@ -16,7 +16,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7c5cff?labelColor=1a1523" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/server-Rust-9d7bff?labelColor=1a1523" alt="Rust" />
   <img src="https://img.shields.io/badge/ui-React%20%2B%20TS-c9bcff?labelColor=1a1523" alt="React + TypeScript" />
-  <a href="https://github.com/EliaCinti/overmind/releases"><img src="https://img.shields.io/badge/release-0.1.1-f5b73d?labelColor=1a1523" alt="Release 0.1.1" /></a>
+  <a href="https://github.com/EliaCinti/overmind/releases"><img src="https://img.shields.io/badge/release-0.2.0-f5b73d?labelColor=1a1523" alt="Release 0.2.0" /></a>
 </p>
 
 <br/>
@@ -27,7 +27,7 @@ Open-source orchestration for teams of AI agents — **with a memory.**
 
 **If an agent is an _employee_, Overmind is the _company_ — and it remembers.**
 
-Overmind is a Rust server and a React UI that organizes AI agents into a company you actually run: a CEO you talk to, a team it proposes and you approve, an org chart with real reporting lines, tasks that produce code or documents, meetings that reach decisions, budgets enforced at checkout, an OS-level cage around every run, and a tamper-evident audit trail that says **who** did **what**. Self-hosted, one server, and — since M25 — **several people in one company**, reached over your own network.
+Overmind is a Rust server and a React UI that organizes AI agents into a company you actually run: a CEO you talk to, a team it proposes and you approve, an org chart with real reporting lines, tasks that produce code or documents, meetings that reach decisions, budgets enforced at checkout, an OS-level cage around every run, and a tamper-evident audit trail that says **who** did **what**. The CEO **runs the floor**: it starts and relaunches work, chains tasks on each other's deliverables, and writes you unprompted updates when things land — every start still behind your gates. Self-hosted, one server, and — since M25 — **several people in one company**, reached over your own network.
 
 What makes it different: Overmind is **memory-native**, and its brain is **[Wadachi](https://github.com/EliaCinti/wadachi) (轍)** — a persistent, semantically-searchable memory built for AI agents. Wadachi stores decisions with their _why_, the patterns your agents discover, and the mistakes already made, as a linked knowledge graph (a real Obsidian vault) that survives every session. Overmind ships with Wadachi as its **first-party brain**, on by default in the image; the interface stays open (any MCP memory server works) and Overmind runs perfectly without one — but plug a brain in and your organization genuinely _learns_.
 
@@ -75,7 +75,7 @@ One persistent brain per company — <strong>Wadachi</strong>, over MCP. Agents 
 </td>
 <td align="center" width="33%">
 <h3>👔 A CEO and a team</h3>
-Talk to the CEO; it proposes the org (names, roles, reporting lines) and you approve it in one click. Agents are <strong>archetype × domain</strong>: a <em>reviewer</em> in <em>security</em>, a <em>writer</em> in <em>media</em>. Specialists hand work to each other and escalate.
+Talk to the CEO; it proposes the org (names, roles, reporting lines) and you approve it in one click. It <strong>runs the floor</strong>: starts and relaunches tasks, chains them on each other's deliverables (<code>after</code>), and writes you unprompted updates — every start behind your gates. Agents are <strong>archetype × domain</strong>; specialists hand work to each other and escalate.
 </td>
 <td align="center" width="33%">
 <h3>🏛️ Meetings & decisions</h3>
@@ -351,7 +351,7 @@ Build args for the image: `CLAUDE_CODE_VERSION` (pinned agent CLI), `WADACHI_VER
 
 ## Status
 
-Pre-alpha, built in the open. Twenty-six milestones, each closed by tests and a live acceptance: company & org chart, a CEO you talk to and a team it proposes, tasks for code and documents with attachments and artifacts, meetings with bounded deliberation, heartbeats & recovery, budgets in both economies with an estimate learned from the ledger, the cage on macOS and in the container, a hash-chained audit with the actor inside, organizational memory over MCP (on by default in the image), an owner account at first run, invites and membership for several people in one company, company deletion, and a name on every decision. What's next lives in the [roadmap](docs/ROADMAP.md); what is deliberately *not* promised is in the [threat model](docs/THREAT-MODEL.md).
+Pre-alpha, built in the open. Thirty milestones, each closed by tests and a live acceptance: company & org chart, a CEO you talk to and a team it proposes, tasks for code and documents with attachments and artifacts, meetings with bounded deliberation, heartbeats & recovery, budgets in both economies with an estimate learned from the ledger, the cage on macOS and in the container, a hash-chained audit with the actor inside, organizational memory over MCP (on by default in the image), an owner account at first run, invites and membership for several people in one company, **tools in the agent's hand** (Blender was first — a real house went from hand sketch to labelled 3D floor plan), a payer you choose with one click, conversations that compact instead of drowning, live narration of every run, unprompted updates from the CEO, and — since M30 — a CEO that **runs the floor**: starts, relaunches, and chains work on its own plan, always behind your approval gates. What the first week of real use looked like is written into ADRs 0036–0042. What's next lives in the [roadmap](docs/ROADMAP.md); what is deliberately *not* promised is in the [threat model](docs/THREAT-MODEL.md).
 
 The design is documented before the code: see [VISION](docs/VISION.md), [ARCHITECTURE](docs/ARCHITECTURE.md), the [UX principles](docs/UX.md), and the [Architecture Decision Records](docs/adr/). User guides and FAQ live on the [wiki](https://overmind.eliacinti.dev/wiki).
 
