@@ -87,5 +87,12 @@ services:
     restart: unless-stopped
 
 volumes:
+  # EVERYTHING lives in these two: the database, every company's brain, the
+  # audit chain, attachments, the subscription token (overmind-data) and the
+  # agent CLI's sign-in (overmind-agent-home). `docker compose down -v`
+  # DELETES BOTH — that flag removes named volumes, and there is no undo.
+  # Until export/restore ships, back them up by copying:
+  #   docker run --rm -v overmind_overmind-data:/d -v "$PWD/backup":/b \
+  #     alpine cp -a /d/. /b/
   overmind-data:
   overmind-agent-home:

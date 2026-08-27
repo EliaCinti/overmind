@@ -39,6 +39,13 @@ pub enum FlowState {
     /// pty stays open, and without this state the interface spun on
     /// "checking the code" forever with no way out).
     CodeRejected(String),
+    /// The CLI hit an OAuth error and offered "Press Enter to retry" — the
+    /// retry mints a FRESH authorization URL (new PKCE challenge), so the old
+    /// link is dead. Enter has been pressed for the person; waiting for the
+    /// new URL to appear. (Measured 27 Aug 2026 on a friend's install: a 400
+    /// on the code exchange lands here, and re-offering the old URL loops on
+    /// 400 forever.)
+    Restarting(String),
     /// The CLI exited successfully and the economy was re-detected.
     Done,
     /// The CLI exited without succeeding; the tail of its output rides along.
@@ -62,6 +69,15 @@ pub struct Flow {
     master: Option<std::fs::File>,
     child: Option<std::process::Child>,
     started: Instant,
+    /// Byte offset into `output` from which the URL is scraped. Reset when
+    /// the CLI restarts its flow: the URL to offer is the one printed AFTER
+    /// the restart, never the first one in the transcript.
+    scan_from: usize,
+    /// Byte offset into `output` at the moment a code was submitted; the
+    /// rejection/retry recognizers read only what the CLI said after that.
+    exchange_from: usize,
+    /// A refusal the person should still see once the fresh URL is up.
+    rejected_note: Option<String>,
 }
 
 /// The one flow, if any. On `AppState` it would drag `Arc<Mutex<..>>` through
@@ -268,10 +284,11 @@ pub fn start(state: &AppState) -> Result<(), String> {
                 f.state,
                 FlowState::Done | FlowState::Failed(_) | FlowState::CodeRejected(_)
             )
-            // A flow stuck mid-exchange is a flow the person cannot use:
-            // after two minutes a fresh click means "start over", not
-            // "adopt the zombie" (measured: retry adopted it, nothing moved).
-            || (matches!(f.state, FlowState::Exchanging)
+            // A flow stuck mid-exchange (or mid-restart) is a flow the person
+            // cannot use: after two minutes a fresh click means "start over",
+            // not "adopt the zombie" (measured: retry adopted it, nothing
+            // moved).
+            || (matches!(f.state, FlowState::Exchanging | FlowState::Restarting(_))
                 && f.started.elapsed() > Duration::from_secs(120));
         if !stale {
             // Idempotent: the second click adopts the flow the first one
@@ -345,6 +362,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
     let reader = master_file.try_clone().map_err(|e| e.to_string())?;
     let token_file = token_path(&state.config);
 
+    eprintln!("claude sign-in: `claude setup-token` spawned on a pty");
     *slot = Some(Flow {
         state: FlowState::Starting,
         url: None,
@@ -353,6 +371,9 @@ pub fn start(state: &AppState) -> Result<(), String> {
         master: Some(master_file),
         child: Some(child),
         started: Instant::now(),
+        scan_from: 0,
+        exchange_from: 0,
+        rejected_note: None,
     });
     drop(slot);
 
@@ -373,19 +394,45 @@ pub fn start(state: &AppState) -> Result<(), String> {
                     {
                         f.raw.push_str(&chunk);
                         f.output.push_str(&strip_ansi(&chunk));
-                        if matches!(f.state, FlowState::Starting)
-                            && let Some(url) = find_url(&f.output)
+                        if matches!(f.state, FlowState::Starting | FlowState::Restarting(_))
+                            && let Some(url) = find_url(&f.output[f.scan_from..])
                         {
+                            eprintln!("claude sign-in: authorization URL ready");
                             f.url = Some(url.clone());
                             f.state = FlowState::UrlReady(url);
                         }
-                        // An invalid code does not end the CLI — it says so
-                        // and prompts again. Catch the words as they arrive,
-                        // or the interface spins on "exchanging" forever.
-                        if matches!(f.state, FlowState::Exchanging)
-                            && code_rejected_in(&strip_ansi(&chunk))
-                        {
-                            f.state = FlowState::CodeRejected(tail(&f.output, 200));
+                        // An invalid code does not end the CLI — it re-prompts
+                        // (same url), or hits an OAuth error and offers "Press
+                        // Enter to retry" (fresh url after the Enter). Catch
+                        // the words as they accumulate, or the interface spins
+                        // on "exchanging" forever.
+                        if matches!(f.state, FlowState::Exchanging) {
+                            match exchange_verdict(&f.output[f.exchange_from..]) {
+                                ExchangeVerdict::Wait => {}
+                                ExchangeVerdict::Rejected => {
+                                    eprintln!(
+                                        "claude sign-in: the CLI refused the code and is re-prompting on the same URL"
+                                    );
+                                    f.state = FlowState::CodeRejected(tail(&f.output, 200));
+                                }
+                                ExchangeVerdict::Restart => {
+                                    // The CLI's own retry: give it the Enter it
+                                    // asked for, and scrape only what it prints
+                                    // from here on — the old link is dead.
+                                    let why = tail(&f.output[f.exchange_from..], 200);
+                                    eprintln!(
+                                        "claude sign-in: OAuth error from the CLI — pressing Enter for a fresh URL ({})",
+                                        why.replace('\n', " · ")
+                                    );
+                                    if let Some(m) = f.master.as_mut() {
+                                        let _ = m.write_all(b"\r").and_then(|_| m.flush());
+                                    }
+                                    f.scan_from = f.output.len();
+                                    f.url = None;
+                                    f.rejected_note = Some(why.clone());
+                                    f.state = FlowState::Restarting(why);
+                                }
+                            }
                         }
                     }
                 }
@@ -407,19 +454,32 @@ pub fn start(state: &AppState) -> Result<(), String> {
                 match find_token(&f.raw) {
                     Some(tok) => {
                         if let Err(e) = write_token(&token_file, &tok) {
+                            eprintln!("claude sign-in: token could not be stored: {e}");
                             FlowState::Failed(format!(
                                 "the sign-in succeeded but the token could not be stored: {e}"
                             ))
                         } else {
+                            eprintln!(
+                                "claude sign-in: done, token stored at {}",
+                                token_file.display()
+                            );
                             FlowState::Done
                         }
                     }
-                    None => FlowState::Failed(
-                        "the CLI finished but no token appeared in its output".into(),
-                    ),
+                    // A clean exit without a credential is still a failure —
+                    // and the CLI's last words are the only clue anyone has
+                    // (a token cannot be among them: none was found).
+                    None => {
+                        let why = format!(
+                            "the CLI finished but no token appeared in its output; its last words:\n{}",
+                            tail(&f.output, 400)
+                        );
+                        eprintln!("claude sign-in: {}", why.replace('\n', " · "));
+                        FlowState::Failed(why)
+                    }
                 }
             } else {
-                let tail: String = f
+                let words: String = f
                     .output
                     .chars()
                     .rev()
@@ -428,7 +488,11 @@ pub fn start(state: &AppState) -> Result<(), String> {
                     .chars()
                     .rev()
                     .collect();
-                FlowState::Failed(tail)
+                eprintln!(
+                    "claude sign-in: the CLI exited unsuccessfully: {}",
+                    words.replace('\n', " · ")
+                );
+                FlowState::Failed(words)
             };
         }
     });
@@ -468,6 +532,10 @@ pub fn submit_code(code: &str) -> Result<(), String> {
     if matches!(f.state, FlowState::Done) {
         return Err("the sign-in already completed".into());
     }
+    eprintln!(
+        "claude sign-in: forwarding a pasted code ({} chars) to the CLI",
+        code.trim().chars().count()
+    );
     master
         .write_all(code.trim().as_bytes())
         .and_then(|_| master.flush())
@@ -477,6 +545,9 @@ pub fn submit_code(code: &str) -> Result<(), String> {
         .write_all(b"\r")
         .and_then(|_| master.flush())
         .map_err(|e| format!("could not press Enter for the CLI: {e}"))?;
+    // The recognizers judge only what the CLI says from here on — an old
+    // "Invalid code" further up the transcript must not condemn this one.
+    f.exchange_from = f.output.len();
     f.state = FlowState::Exchanging;
     Ok(())
 }
@@ -492,25 +563,29 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                     f.started.elapsed().as_secs(),
                     tail(&f.output, 400),
                     f.url.clone(),
+                    f.rejected_note.clone(),
                 )
             })
         })
     };
     match snapshot {
         None => serde_json::json!({ "state": "idle" }),
-        Some((FlowState::Starting, secs, t, _)) => {
+        Some((FlowState::Starting, secs, t, _, _)) => {
             serde_json::json!({ "state": "starting", "seconds": secs, "tail": t })
         }
-        Some((FlowState::UrlReady(url), _, t, _)) => {
-            serde_json::json!({ "state": "url_ready", "url": url, "tail": t })
+        Some((FlowState::UrlReady(url), _, t, _, rejected)) => {
+            serde_json::json!({ "state": "url_ready", "url": url, "tail": t, "rejected": rejected })
         }
-        Some((FlowState::Exchanging, _, t, _)) => {
+        Some((FlowState::Exchanging, _, t, _, _)) => {
             serde_json::json!({ "state": "exchanging", "tail": t })
         }
-        Some((FlowState::CodeRejected(why), _, _, url)) => {
+        Some((FlowState::CodeRejected(why), _, _, url, _)) => {
             serde_json::json!({ "state": "code_rejected", "tail": why, "url": url })
         }
-        Some((FlowState::Done, _, _, _)) => {
+        Some((FlowState::Restarting(why), _, _, _, _)) => {
+            serde_json::json!({ "state": "restarting", "tail": why })
+        }
+        Some((FlowState::Done, _, _, _, _)) => {
             // The proof is the economy, not the exit code: re-detect and let
             // the sign-in notice disappear because the CLI is now signed in.
             let economy = crate::economy::detect(&state.config).await;
@@ -520,7 +595,7 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                 "economy": crate::economy::as_json(&economy),
             })
         }
-        Some((FlowState::Failed(t), _, _, _)) => {
+        Some((FlowState::Failed(t), _, _, _, _)) => {
             serde_json::json!({ "state": "failed", "tail": t })
         }
     }
@@ -544,9 +619,54 @@ pub(crate) fn code_rejected_in(chunk: &str) -> bool {
     .any(|m| lower.contains(m))
 }
 
+/// Lowercased, letters and digits only. The TUI positions words with cursor
+/// moves instead of spaces, so after the ANSI strip a real transcript reads
+/// "PressEntertoretry." — matching must not depend on whitespace (measured
+/// 27 Aug 2026, verbatim from a friend's install).
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// What the CLI's words since the code was submitted mean for the flow.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ExchangeVerdict {
+    /// Nothing conclusive yet; keep reading.
+    Wait,
+    /// "Invalid code…" — the CLI re-prompts on the SAME url; re-offer the
+    /// paste box.
+    Rejected,
+    /// "OAuth error: … Press Enter to retry." — the retry regenerates the
+    /// PKCE challenge, so the CLI must be given its Enter and the NEXT url
+    /// scraped; the old one is dead.
+    Restart,
+}
+
+/// Decide from everything the CLI printed since the code went in. Reading
+/// the accumulated text (not the arriving chunk) matters twice over: the
+/// error line and the retry prompt can land in different reads, and an
+/// "OAuth error" seen alone must WAIT for its retry prompt rather than be
+/// mistaken for the same-url re-prompt shape.
+pub(crate) fn exchange_verdict(since: &str) -> ExchangeVerdict {
+    let q = squash(since);
+    if q.contains("oautherror") {
+        if q.contains("entertoretry") {
+            ExchangeVerdict::Restart
+        } else {
+            ExchangeVerdict::Wait
+        }
+    } else if code_rejected_in(since) {
+        ExchangeVerdict::Rejected
+    } else {
+        ExchangeVerdict::Wait
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{code_rejected_in, find_token};
+    use super::{ExchangeVerdict, code_rejected_in, exchange_verdict, find_token, find_url};
 
     /// Measured 27 Aug 2026: a wrong code left the CLI re-prompting on an
     /// open pty; without recognizing its words the flow spun forever and
@@ -559,6 +679,52 @@ mod tests {
         assert!(code_rejected_in("OAuth error: code expired"));
         assert!(!code_rejected_in("Paste the code from the browser:"));
         assert!(!code_rejected_in("Browser didn't open? Use the url below"));
+    }
+
+    /// Verbatim from a friend's install (27 Aug 2026), spaces already eaten
+    /// by the TUI's cursor-positioned redraw: an OAuth 400 offers "Press
+    /// Enter to retry", and the retry mints a FRESH url — this must restart
+    /// the scrape, never re-offer the old link (which loops on 400 forever).
+    #[test]
+    fn an_oauth_error_with_a_retry_prompt_restarts_the_flow() {
+        assert_eq!(
+            exchange_verdict("OAuth error: Requstfailed withstatus code 400\nPressEntertoretry."),
+            ExchangeVerdict::Restart
+        );
+        // The error line can arrive a read before its retry prompt: wait for
+        // the prompt instead of misreading the shape as a same-url re-prompt.
+        assert_eq!(
+            exchange_verdict("OAuth error: Request failed with status code 400"),
+            ExchangeVerdict::Wait
+        );
+    }
+
+    /// The same-url shape stays a rejection, and the CLI's own prompts stay
+    /// nothing at all.
+    #[test]
+    fn an_invalid_code_reoffers_the_same_url_and_a_prompt_does_nothing() {
+        assert_eq!(
+            exchange_verdict("Invalid code. Please make sure the full code was copied"),
+            ExchangeVerdict::Rejected
+        );
+        assert_eq!(
+            exchange_verdict("Paste code here if prompted > "),
+            ExchangeVerdict::Wait
+        );
+    }
+
+    /// After a restart the transcript holds two urls; the scrape must offer
+    /// the one printed after the restart point, never the dead first one.
+    #[test]
+    fn the_url_after_the_restart_wins() {
+        let before = "Open: https://claude.ai/oauth/authorize?state=OLD\n";
+        let after = "Open: https://claude.ai/oauth/authorize?state=NEW\n";
+        let output = format!("{before}OAuth error…{after}");
+        let scan_from = output.len() - after.len();
+        assert_eq!(
+            find_url(&output[scan_from..]).as_deref(),
+            Some("https://claude.ai/oauth/authorize?state=NEW")
+        );
     }
 
     /// The shape that corrupted the first stored token, reconstructed: a CSI

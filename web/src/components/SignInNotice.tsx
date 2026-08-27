@@ -28,6 +28,7 @@ export function SignInNotice({
     | { step: "starting" }
     | { step: "url"; url: string; rejected?: string }
     | { step: "exchanging"; tail?: string }
+    | { step: "restarting"; tail?: string }
     | { step: "done" }
     | { step: "failed"; tail: string }
   >({ step: "idle" });
@@ -35,7 +36,10 @@ export function SignInNotice({
   const polling = useRef<number | null>(null);
 
   const active =
-    flow.step === "starting" || flow.step === "url" || flow.step === "exchanging";
+    flow.step === "starting" ||
+    flow.step === "url" ||
+    flow.step === "exchanging" ||
+    flow.step === "restarting";
 
   // While a flow runs, follow the server's view of it.
   useEffect(() => {
@@ -43,13 +47,21 @@ export function SignInNotice({
     polling.current = window.setInterval(async () => {
       try {
         const s = await api.claudeAuthStatus();
-        if (s.state === "url_ready") setFlow({ step: "url", url: s.url });
+        if (s.state === "url_ready")
+          // `rejected` survives a CLI restart: the fresh URL arrives with
+          // the note that the previous code was refused.
+          setFlow({ step: "url", url: s.url, rejected: s.rejected ?? undefined });
         else if (s.state === "exchanging") setFlow({ step: "exchanging", tail: s.tail });
         else if (s.state === "code_rejected")
           // The CLI said no and is prompting again (27 Aug 2026: without
           // this, an invalid code meant an eternal spinner): back to the
           // paste box, same URL, with the CLI's words shown.
           setFlow({ step: "url", url: s.url ?? "", rejected: s.tail });
+        else if (s.state === "restarting")
+          // An OAuth error (a 400 on the exchange) restarts the CLI's flow:
+          // the old link is dead, a fresh one is being minted — say so
+          // instead of leaving a paste box pointed at a dead URL.
+          setFlow({ step: "restarting", tail: s.tail });
         else if (s.state === "done") {
           setFlow({ step: "done" });
           onSignedIn();
@@ -163,6 +175,19 @@ export function SignInNotice({
                     {t("economy.connectPlanSubmit")}
                   </Button>
                 </form>
+              </div>
+            )}
+            {flow.step === "restarting" && (
+              <div className="space-y-1.5">
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {t("economy.connectPlanRestarting")}
+                </p>
+                {flow.tail && (
+                  <pre className="max-h-24 overflow-auto rounded bg-muted px-2 py-1 font-mono text-[10.5px] text-muted-foreground">
+                    {flow.tail}
+                  </pre>
+                )}
               </div>
             )}
             {flow.step === "exchanging" && (
