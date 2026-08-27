@@ -2,6 +2,11 @@
 
 All notable changes to Overmind are recorded here, newest first. Overmind is developed milestone by milestone; each entry names the milestones it ships and the decisions behind them (`docs/adr/`). The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/) from `0.1.0` on — before `1.0`, minor versions may change behaviour.
 
+## [Unreleased]
+
+### Fixed
+- **The brain never sinks the ship at build time.** A first-time installer's `compose build` died on the Wadachi layer (transient network). The image now degrades in loud steps — semantic → keyword-only → no memory — and the embedding-model bake is best-effort: a slower first run, never a broken build. Company deletion also survives the week's new schema (summaries, `depends_on`, `conversation_id`).
+
 ## [0.2.0] — 2026-08-27
 
 ### Added

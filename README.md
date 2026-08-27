@@ -220,7 +220,10 @@ git clone https://github.com/EliaCinti/overmind.git && cd overmind
 export ANTHROPIC_API_KEY=sk-ant-…
 
 docker compose pull && docker compose up   # the published image → http://localhost:7070
-# (or build it from this tree: docker compose up --build)
+# (or build it from this tree: docker compose up --build — prefer `pull`:
+#  it is the tested multi-arch image and needs no toolchain. A from-source
+#  build degrades gracefully if the memory engine cannot be fetched: watch
+#  the build log for WARNING lines.)
 
 # OR: pay with a Claude subscription — sign in from the product (the notice
 # above the first screen walks you through it), or once from the shell:
