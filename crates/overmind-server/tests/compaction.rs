@@ -127,7 +127,10 @@ async fn tell_and_wait(env: &Env, text: &str) -> Vec<Value> {
     assert!(s.is_success(), "{s} {v}");
     for _ in 0..100 {
         let m = messages(env).await;
-        if m.len() > before + 1 && m.last().map(|x| x["role"] != "user").unwrap_or(false) {
+        // Specifically the agent's reply: the compaction chip is a `system`
+        // message posted mid-turn, and "anything non-user" returned early on
+        // it — the answer turn had not run yet (measured as a flake).
+        if m.len() > before + 1 && m.last().map(|x| x["role"] == "ceo").unwrap_or(false) {
             return m;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
