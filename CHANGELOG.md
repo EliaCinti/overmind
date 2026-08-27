@@ -14,6 +14,7 @@ Fixes from the first fresh-machine install by someone who is not the author — 
 - **The brain never sinks the ship at build time.** A first-time installer's `compose build` died on the Wadachi layer (transient network). The image now degrades in loud steps — semantic → keyword-only → no memory — and the embedding-model bake is best-effort: a slower first run, never a broken build. Company deletion also survives the week's new schema (summaries, `depends_on`, `conversation_id`).
 
 ### Changed
+- **The version answers without a login.** The first log line reads `overmind-server 0.2.1 listening…` (so `docker compose logs` says what is running), and `docker compose exec overmind overmind-server --version` says it on demand. `/api/health` still carries it for a signed-in caller — and stays redacted for anyone else.
 - **`docker-compose.yml` says out loud that `down -v` deletes everything** — database, brains, audit chain, the agent's sign-in — and carries the one-line copy that backs the volumes up until export/restore ships as a real verb.
 
 ## [0.2.0] — 2026-08-27
