@@ -2,6 +2,12 @@ use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // "Which version is my friend actually running?" must not require a
+    // login: `docker compose exec overmind overmind-server --version`.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("overmind-server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let db_url =
         std::env::var("OVERMIND_DB").unwrap_or_else(|_| "sqlite://overmind.sqlite".to_string());
     let state = overmind_server::init(&db_url).await?;
@@ -17,7 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.set_economy(economy.clone());
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("overmind-server listening on http://{addr} (db: {db_url})");
+    // The version in the first log line: `docker compose logs` answers
+    // "what is running here" without a login or an exec.
+    println!(
+        "overmind-server {} listening on http://{addr} (db: {db_url})",
+        env!("CARGO_PKG_VERSION")
+    );
     println!(
         "paying with: {}",
         overmind_server::economy::describe(&economy)
