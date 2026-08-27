@@ -882,6 +882,14 @@ async fn delete_company(
              OR conversation_id IN (SELECT id FROM conversations WHERE company_id = ?)",
         "DELETE FROM messages WHERE conversation_id IN
              (SELECT id FROM conversations WHERE company_id = ?)",
+        // Born after the original list (measured 27 Aug 2026, a FK failure):
+        // the thread's compaction summaries (ADR-0040)…
+        "DELETE FROM conversation_summaries WHERE conversation_id IN
+             (SELECT id FROM conversations WHERE company_id = ?)",
+        // …and the two references the tasks themselves carry — the birth
+        // thread (ADR-0038) and the dependency (M30). Cut before either
+        // parent table goes: a single DELETE promises nothing about order.
+        "UPDATE tasks SET conversation_id = NULL, depends_on = NULL WHERE company_id = ?",
         "DELETE FROM cost_events WHERE company_id = ?",
         "DELETE FROM agent_task_sessions WHERE task_id IN
              (SELECT id FROM tasks WHERE company_id = ?)",
