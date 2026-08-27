@@ -79,9 +79,24 @@ RUN if [ -n "$EXTRA_APT_PACKAGES" ]; then \
 # Pinned like the CLI; Overmind still never imports Wadachi — the coupling is
 # the protocol, and OVERMIND_MEMORY_CMD remains the way to swap providers.
 ARG WADACHI_VERSION=0.15.0
+# The brain must never sink the ship (measured 27 Aug 2026: a first-time
+# installer's `compose build` died on this layer — transient registry/network
+# trouble — and "the build failed" read as "Overmind is broken"). Degrade in
+# steps, loudly: semantic → keyword-only → no memory at all. The server
+# already survives a missing provider at runtime; the build now matches.
 RUN python3 -m venv /opt/wadachi \
-    && /opt/wadachi/bin/pip install --no-cache-dir "wadachi[semantic]==${WADACHI_VERSION}" \
-    && ln -s /opt/wadachi/bin/wadachi /usr/local/bin/wadachi
+    && { /opt/wadachi/bin/pip install --no-cache-dir "wadachi[semantic]==${WADACHI_VERSION}" \
+         || { echo "=========================================================="; \
+              echo "WARNING: wadachi[semantic] failed to install (network?)."; \
+              echo "Retrying WITHOUT semantic search (keyword-only recall)."; \
+              echo "=========================================================="; \
+              /opt/wadachi/bin/pip install --no-cache-dir "wadachi==${WADACHI_VERSION}"; } \
+         || { echo "=========================================================="; \
+              echo "WARNING: wadachi could not be installed at all."; \
+              echo "The image will run WITHOUT organizational memory."; \
+              echo "Rebuild later, or set OVERMIND_MEMORY_CMD to your own."; \
+              echo "=========================================================="; }; } \
+    && { [ -x /opt/wadachi/bin/wadachi ] && ln -s /opt/wadachi/bin/wadachi /usr/local/bin/wadachi || true; }
 
 # The embedding model, baked at build time. fastembed's default cache is
 # $TMPDIR/fastembed_cache — ephemeral here, so left alone the first recall of
@@ -90,8 +105,13 @@ RUN python3 -m venv /opt/wadachi \
 # without saying so. Baking is what pinning the CLI version was: no first run
 # changes behaviour based on what the network happened to answer.
 ENV FASTEMBED_CACHE_PATH=/opt/fastembed
+# Best-effort for the same reason: this step reaches Hugging Face, the most
+# commonly blocked host in the whole build. Without the bake, semantic recall
+# downloads the model on first use (or degrades to keyword) — a slower first
+# run, not a broken image.
 RUN /opt/wadachi/bin/python -c \
-    "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')"
+    "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-small-en-v1.5')" \
+    || echo "WARNING: embedding model could not be baked (Hugging Face unreachable?) — semantic recall will fetch it on first use or fall back to keyword search"
 
 COPY --from=server /app/target/release/overmind-server /usr/local/bin/overmind-server
 COPY --from=web /web/dist /app/web/dist
