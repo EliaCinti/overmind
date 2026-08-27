@@ -407,3 +407,56 @@ async fn a_digest_proposed_start_is_an_approval_never_a_spend() {
         "and nothing was spent unprompted"
     );
 }
+
+/// Deleting a company still works after the schema grew (measured 27 Aug
+/// 2026: FOREIGN KEY constraint failed — three references born after
+/// ADR-0034's children-first list: conversation_summaries (ADR-0040),
+/// tasks.depends_on (M30), and tasks.conversation_id (ADR-0038, the sneaky
+/// one: conversations were deleted before the tasks pointing at them).
+#[tokio::test]
+async fn a_company_with_the_new_references_can_still_be_deleted() {
+    let env = setup().await;
+    hire(&env, "Libera", "act_within_budget").await;
+    // A thread-born dependent pair (depends_on + conversation_id set)…
+    env.set_chat_plan(&json!({
+        "reply": "Apro coppia.",
+        "tasks": [
+            { "title": "Padre", "description": "x", "execution_kind": "knowledge", "assignee": "Libera" },
+            { "title": "Figlio", "description": "y", "execution_kind": "knowledge", "assignee": "Libera", "after": "Padre" }
+        ]
+    }));
+    tell_the_ceo(&env, "Vai.").await;
+    for _ in 0..150 {
+        let n: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tasks")
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("q");
+        if n.0 == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // …and a compaction summary on the thread.
+    let convo: (String,) = sqlx::query_as("SELECT id FROM conversations LIMIT 1")
+        .fetch_one(&env.state.pool)
+        .await
+        .expect("convo");
+    sqlx::query(
+        "INSERT INTO conversation_summaries (id, conversation_id, content, covers_until, created_at)
+         VALUES (?, ?, 'riassunto', '2026-01-01', '2026-01-01')",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(&convo.0)
+    .execute(&env.state.pool)
+    .await
+    .expect("summary");
+
+    let (s, v) = send(
+        &env.app,
+        "DELETE",
+        &format!("/api/companies/{}", env.company),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+}
