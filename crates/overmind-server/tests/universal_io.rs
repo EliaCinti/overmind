@@ -489,3 +489,57 @@ async fn a_code_run_hands_back_a_diff_and_a_document_without_mixing_them() {
         "the document must not leak into the diff: {diff}"
     );
 }
+
+/// A crowded thread still hands files back (measured 27 Aug 2026): every
+/// turn's scratch holds a copy of ALL the thread's attachments, and the
+/// reply-file cap counted those copies — with 34 files already in the
+/// thread, a new file the CEO wrote was never even enumerated. Rune
+/// announced `rituale-sala-senza-alcol.md`; the chat never carried it.
+#[tokio::test]
+async fn a_crowded_thread_still_hands_files_back() {
+    let (app, company_id, agent_id) = setup(HANDS_A_FILE_BACK_STUB).await;
+
+    // Crowd the thread: 25 uploads, each a distinct staged-then-posted file.
+    let mut ids = Vec::new();
+    for i in 0..25 {
+        let (_, a) = upload(
+            &app,
+            &format!("/api/companies/{company_id}/agents/{agent_id}/conversation/attachments"),
+            &format!("given-{i:02}.txt"),
+            "text/plain",
+            b"context",
+        )
+        .await;
+        ids.push(a["id"].as_str().expect("id").to_string());
+    }
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/agents/{agent_id}/conversation/messages"),
+        Some(json!({ "content": "Read all that, then give me the plan file.", "attachment_ids": ids })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    for _ in 0..120 {
+        let (_, convo) = send(
+            &app,
+            "GET",
+            &format!("/api/companies/{company_id}/agents/{agent_id}/conversation"),
+            None,
+        )
+        .await;
+        let produced = convo["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["role"] == json!("ceo"))
+            .flat_map(|m| m["attachments"].as_array().cloned().unwrap_or_default())
+            .any(|a| a["filename"] == json!("plan.csv"));
+        if produced {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the produced file drowned among the thread's copies");
+}

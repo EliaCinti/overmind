@@ -183,7 +183,17 @@ async fn collect_reply_files(
         return Vec::new();
     }
     let mut out = Vec::new();
-    for (rel, size) in crate::files::collect_files(scratch, MAX_REPLY_FILES).await {
+    // The cap bounds what the agent PRODUCED — but the scratch also holds a
+    // copy of every file the thread ever attached, and counting those copies
+    // ate the whole budget once a thread grew past twenty (measured 27 Aug
+    // 2026: the CEO announced `rituale-sala-senza-alcol.md`, the collection
+    // never enumerated far enough to see it). Enumerate past the copies;
+    // the `given` filter and the cap below still bound what is stored.
+    let scan_limit = MAX_REPLY_FILES + given.len();
+    for (rel, size) in crate::files::collect_files(scratch, scan_limit).await {
+        if out.len() >= MAX_REPLY_FILES {
+            break;
+        }
         let name = crate::files::safe_relative(&rel);
         if name.is_empty() || given.contains(&name) || size == 0 {
             continue;
