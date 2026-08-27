@@ -1,0 +1,409 @@
+//! M30 — The CEO runs the floor (ADR-0042).
+//!
+//! The owner, reading a beautiful relaunch plan the CEO had written *for him
+//! to execute by hand*: "il CEO comanda e controlla — deve proporre i
+//! rilanci, e i risultati devono passare agli agenti successivi; sempre
+//! previa mia autorizzazione." Three verbs make that real: `start` (the CEO
+//! starts or relaunches an existing task, through the same autonomy gates),
+//! `after` (a task waits for another and inherits its deliverables), and
+//! digest-proposed starts (always an approval, never a spend).
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+
+async fn send(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let builder = Request::builder().method(method).uri(uri);
+    let request = match body {
+        Some(v) => builder
+            .header("content-type", "application/json")
+            .body(Body::from(v.to_string())),
+        None => builder.body(Body::empty()),
+    }
+    .expect("build request");
+    let response = app.clone().oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read body")
+        .to_bytes();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// One stub, three voices, switched by marker strings in the prompt:
+/// chat turns answer with the plan in `PLAN_FILE`; digest turns with the
+/// plan in `DIGEST_FILE`; task runs write a deliverable and finish.
+fn stub(root: &std::path::Path) -> String {
+    format!(
+        r#"#!/bin/sh
+case "$OVERMIND_TASK_PROMPT" in
+  *"finished since your last word"*)
+    cat "{root}/digest-plan.json"
+    ;;
+  *"Respond with a SINGLE JSON"*)
+    cat "{root}/chat-plan.json"
+    ;;
+  *)
+    echo "risultato del lavoro" > consegna.md
+    echo '{{"type":"result","result":"LAVORO-FATTO","total_cost_usd":0.001,"session_id":"s"}}'
+    ;;
+esac
+"#,
+        root = root.display()
+    )
+}
+
+fn plan_line(plan: &Value) -> String {
+    json!({
+        "type": "result",
+        "result": plan.to_string(),
+        "total_cost_usd": 0.001
+    })
+    .to_string()
+}
+
+struct Env {
+    app: axum::Router,
+    state: overmind_server::AppState,
+    company: String,
+    ceo: String,
+    root: PathBuf,
+}
+
+impl Env {
+    fn set_chat_plan(&self, plan: &Value) {
+        std::fs::write(self.root.join("chat-plan.json"), plan_line(plan)).expect("plan");
+    }
+    fn set_digest_plan(&self, plan: &Value) {
+        std::fs::write(self.root.join("digest-plan.json"), plan_line(plan)).expect("plan");
+    }
+}
+
+async fn setup() -> Env {
+    let root = std::env::temp_dir().join(format!(
+        "overmind-floor-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let script = root.join("stub.sh");
+    std::fs::write(&script, stub(&root)).expect("stub");
+    let state = overmind_server::init_with(
+        "sqlite::memory:",
+        overmind_server::Config {
+            agent_cmd: Some(format!("sh {}", script.display())),
+            data_dir: root.join("data"),
+            heartbeat_ms: 1_000_000,
+            digest_debounce_secs: 0,
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init");
+    let app = overmind_server::app(state.clone());
+    let (s, co) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Floor Co" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{co}");
+    Env {
+        company: co["id"].as_str().expect("id").to_string(),
+        ceo: co["ceo"]["id"].as_str().expect("ceo").to_string(),
+        app,
+        state,
+        root,
+    }
+}
+
+async fn hire(env: &Env, name: &str, autonomy: &str) -> String {
+    let (s, a) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company),
+        Some(json!({ "name": name, "archetype": "writer",
+                     "traits": { "autonomy": autonomy } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{a}");
+    a["id"].as_str().expect("id").to_string()
+}
+
+/// A task created by hand, in `todo`, assigned.
+async fn make_task(env: &Env, title: &str, assignee: &str) -> String {
+    let (s, t) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company),
+        Some(json!({ "title": title, "execution_kind": "knowledge" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{t}");
+    let id = t["id"].as_str().expect("task").to_string();
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    sqlx::query("UPDATE tasks SET assignee_agent_id = ? WHERE id = ?")
+        .bind(assignee)
+        .bind(&id)
+        .execute(&env.state.pool)
+        .await
+        .expect("assign");
+    id
+}
+
+async fn tell_the_ceo(env: &Env, text: &str) {
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company, env.ceo
+        ),
+        Some(json!({ "content": text })),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {v}");
+}
+
+async fn task_status(env: &Env, id: &str) -> String {
+    let row: (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = ?")
+        .bind(id)
+        .fetch_one(&env.state.pool)
+        .await
+        .expect("task");
+    row.0
+}
+
+async fn wait_status(env: &Env, id: &str, wanted: &str) -> bool {
+    for _ in 0..150 {
+        if task_status(env, id).await == wanted {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+async fn pending_start_approvals(env: &Env) -> usize {
+    let (_, v) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/approvals", env.company),
+        None,
+    )
+    .await;
+    v["approvals"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|x| x["type"] == "task_start" && x["status"] == "pending")
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// The CEO starts an existing task by title: within-budget it runs at once;
+/// with-approval the start lands in the inbox; a blocked task is brought
+/// back to the queue first (a relaunch is exactly this).
+#[tokio::test]
+async fn the_ceo_starts_and_relaunches_existing_tasks() {
+    let env = setup().await;
+    let free = hire(&env, "Libera", "act_within_budget").await;
+    let gated = hire(&env, "Cauta", "act_with_approval").await;
+    let t1 = make_task(&env, "Riconciliazione metrica", &free).await;
+    let t2 = make_task(&env, "Specifica schermo", &gated).await;
+    // A blocked task — the relaunch case.
+    sqlx::query("UPDATE tasks SET status = 'blocked' WHERE id = ?")
+        .bind(&t1)
+        .execute(&env.state.pool)
+        .await
+        .expect("block");
+
+    env.set_chat_plan(&json!({
+        "reply": "Rilancio la riconciliazione e metto in fila la specifica.",
+        "tasks": [],
+        "start": ["Riconciliazione metrica", "Specifica schermo"]
+    }));
+    tell_the_ceo(&env, "Rilancia quello che serve.").await;
+
+    // The stub delivers in milliseconds, so `in_progress` can be a blink:
+    // any move off blocked/todo proves the relaunch.
+    let mut moved = false;
+    for _ in 0..150 {
+        let st = task_status(&env, &t1).await;
+        if st != "blocked" && st != "todo" {
+            moved = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        moved,
+        "the blocked task was relaunched: {}",
+        task_status(&env, &t1).await
+    );
+    let mut asked = 0;
+    for _ in 0..100 {
+        asked = pending_start_approvals(&env).await;
+        if asked >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(asked, 1, "the gated start waits in the inbox");
+    assert_eq!(task_status(&env, &t2).await, "todo");
+}
+
+/// `after`: the dependent task waits; when its dependency delivers, it
+/// inherits the deliverables as inputs and goes to work by its autonomy.
+#[tokio::test]
+async fn a_dependent_task_inherits_the_deliverable_and_starts() {
+    let env = setup().await;
+    let free = hire(&env, "Libera", "act_within_budget").await;
+    env.set_chat_plan(&json!({
+        "reply": "Apro il cancello e il dipendente.",
+        "tasks": [
+            { "title": "Il cancello", "description": "Misura.", "execution_kind": "knowledge", "assignee": "Libera" },
+            { "title": "Il dipendente", "description": "Usa le misure del cancello.", "execution_kind": "knowledge", "assignee": "Libera", "after": "Il cancello" }
+        ]
+    }));
+    tell_the_ceo(&env, "Vai.").await;
+
+    // Both exist (the turn is asynchronous: poll for them).
+    let mut ids: Vec<(String, String)> = Vec::new();
+    for _ in 0..150 {
+        ids = sqlx::query_as("SELECT id, title FROM tasks ORDER BY created_at")
+            .fetch_all(&env.state.pool)
+            .await
+            .expect("tasks");
+        if ids.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let gate = ids
+        .iter()
+        .find(|(_, t)| t == "Il cancello")
+        .expect("gate")
+        .0
+        .clone();
+    let dep = ids
+        .iter()
+        .find(|(_, t)| t == "Il dipendente")
+        .expect("dep")
+        .0
+        .clone();
+
+    // The gate runs and completes (stub finishes fast).
+    assert!(
+        wait_status(&env, &gate, "in_review").await,
+        "gate delivered"
+    );
+    // The dependent then starts on its own…
+    assert!(
+        wait_status(&env, &dep, "in_progress").await || wait_status(&env, &dep, "in_review").await,
+        "the dependent went to work: {}",
+        task_status(&env, &dep).await
+    );
+    // …and its inputs carry the gate's deliverable.
+    let (_, atts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{dep}/attachments"),
+        None,
+    )
+    .await;
+    let names: Vec<String> = atts["attachments"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x["filename"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.iter().any(|n| n.contains("consegna")),
+        "the gate's deliverable rides into the dependent: {names:?}"
+    );
+    let _ = free;
+}
+
+/// A digest may propose starts — they land as approvals, never as spend,
+/// whatever the agent's autonomy says.
+#[tokio::test]
+async fn a_digest_proposed_start_is_an_approval_never_a_spend() {
+    let env = setup().await;
+    let free = hire(&env, "Libera", "act_within_budget").await;
+    // A finished task in the thread (born from chat), so a digest is due.
+    env.set_chat_plan(&json!({
+        "reply": "Apro il lavoro.",
+        "tasks": [{ "title": "Primo lavoro", "description": "Fai.", "execution_kind": "knowledge", "assignee": "Libera" }]
+    }));
+    tell_the_ceo(&env, "Vai.").await;
+    let mut first: Option<(String,)> = None;
+    for _ in 0..150 {
+        first = sqlx::query_as("SELECT id FROM tasks LIMIT 1")
+            .fetch_optional(&env.state.pool)
+            .await
+            .expect("query");
+        if first.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let first = first.expect("the task was opened");
+    assert!(
+        wait_status(&env, &first.0, "in_review").await,
+        "first delivered"
+    );
+
+    // A second open task the digest will propose to start.
+    let follow = make_task(&env, "Il seguito", &free).await;
+    env.set_digest_plan(&json!({
+        "reply": "Il primo lavoro è consegnato. Propongo di avviare il seguito.",
+        "tasks": [],
+        "start": ["Il seguito"]
+    }));
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("beat");
+    let mut asked = 0;
+    for _ in 0..150 {
+        asked = pending_start_approvals(&env).await;
+        if asked >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(asked, 1, "the digest's start is an approval");
+    assert_eq!(
+        task_status(&env, &follow).await,
+        "todo",
+        "and nothing was spent unprompted"
+    );
+}
