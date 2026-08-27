@@ -429,6 +429,13 @@ Opened during M28's acceptance walk, from the owner's own desk: Overmind run nat
 - ✅ **From the CEO's plan to a running task** ([ADR-0038](adr/0038-from-the-ceos-plan-to-a-running-task.md)). The first brief ended with a task in `todo` and nothing moving: the CEO did not know its modeler held Blender (declared the work impossible, planned it as `code`); a `code` task needs a repository the company did not have; and a task planned for an agent that *acts with approval* asked nobody. Now the team block names what each teammate holds; the prompt says whether `code` can exist here and the server opens a repo-less `code` plan as `knowledge` (audited as `planned_kind`); and a planned task is offered by autonomy — started within budget, filed as a start approval in the inbox with approval, left for a human when propose-only. `tests/from_plan_to_work.rs`.
 - **Accept (the owner's):** the native instance started with the key in the shell, the card offered the plan, one click, the org chart reads *Covered by a max subscription* with the choice named, and a chat turn with the CEO is billed to the plan (the CLI's own `auth status` agrees after a restart). ✅ clicked 23 Aug — "sembra funzionare, ben fatto".
 
+## M30 — The CEO runs the floor `done`
+Opened from the owner's own words, reading a relaunch plan the CEO had written for *him* to execute: "il CEO comanda e controlla — deve proporre i rilanci, e i risultati devono passare agli agenti successivi; sempre previa mia autorizzazione." [ADR-0042](adr/0042-the-ceo-runs-the-floor.md).
+
+- ✅ **`start`**: the CEO's plan starts or relaunches existing open tasks by title (blocked returns to the queue first), through `offer_start`'s autonomy gates unchanged.
+- ✅ **`after`**: dependencies as data (`tasks.depends_on`, migration 0031) — the dependent waits, inherits the dependency's artifacts as inputs on completion, and is offered by its agent's autonomy. Chains of any length.
+- ✅ **Digests propose**: an unprompted turn may return `start`, and each lands as a `task_start` approval — never a spend. `tests/the_floor.rs`.
+
 ## What comes next
 The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
 

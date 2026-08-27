@@ -535,7 +535,7 @@ pub(crate) async fn run_digest_turn(
         .collect::<Vec<_>>()
         .join("\n");
     let block = format!(
-        "\n\nTasks that finished since your last word in this thread:\n{rows}\n\nWrite a short unprompted update for the user: what landed, and what (if anything) needs their decision next. Address them directly, in the conversation's language. Return an EMPTY tasks array — an update the user did not ask for must not open work. If nothing here is worth interrupting them for, set reply to exactly \"SKIP\"."
+        "\n\nTasks that finished since your last word in this thread:\n{rows}\n\nWrite a short unprompted update for the user: what landed, and what (if anything) needs their decision next. Address them directly, in the conversation's language. Return an EMPTY tasks array — an update the user did not ask for must not open work. You MAY include \"start\": [\"<title of an open task on the board>\"] for work that should logically follow: each lands as an approval in the user's inbox, never as an autonomous start. If nothing here is worth interrupting them for, set reply to exactly \"SKIP\"."
     );
     run_agent_turn_inner(state, company_id, conversation_id, agent_id, Some(&block)).await
 }
@@ -880,7 +880,7 @@ async fn run_agent_turn_inner(
 
     let digest_line = digest_block.unwrap_or("");
     let prompt = format!(
-        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}{board_block}{digest_line}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\n{kinds_line} Omit \"assignee\" to leave a task unassigned. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
+        "{persona}{brief_line}{tools_line}\n\nYour teammates:\n{team_block}{board_block}{digest_line}\n\nConversation so far:\n{convo_block}{memory_block}{decisions_block}{catalogue_block}{attach_block}\n\nRespond with a SINGLE JSON object on the LAST line of your output, and nothing after it:\n{{\"reply\": \"<your message to the user>\", \"tasks\": [{{\"title\": \"...\", \"description\": \"...\", \"execution_kind\": \"knowledge\", \"assignee\": \"<teammate name, optional>\"}}], \"escalate\": \"<optional note for the CEO>\", \"meeting\": {{\"topic\": \"...\", \"reason\": \"why the room is needed\", \"participants\": [\"<teammate name>\"], \"turn_cap\": 6}}, \"team\": {{\"summary\": \"why this shape\", \"members\": [{{\"name\": \"...\", \"archetype\": \"<function slug>\", \"domain\": \"<domain slug>\", \"title\": \"...\", \"reports_to\": \"<another member's name, or omit to report to you>\", \"brief\": \"...\", \"why\": \"why this person is on the team\"}}]}}}}\n{kinds_line} Omit \"assignee\" to leave a task unassigned. A task may carry \"after\": \"<title of another task, from this plan or open on the board>\" — it will wait, inherit that task's deliverables as inputs, and start when it completes. You may also include \"start\": [\"<title of an open task on the board>\"] to start or relaunch existing work (blocked tasks return to the queue first); use it instead of telling the user to press buttons — the same approval gates protect every start. Ask for a \"meeting\" only when the call genuinely needs colleagues in one room — a decision you should not take alone; name who must be there and say why. The human approves it before anyone meets, you may have only ONE request waiting at a time, and every request costs them an interruption — if you can take the call yourself, take it. Propose a \"team\" only when the company lacks the people for what the user described: name each hire, pick one archetype slug and one domain slug from the lists above, give them a plain-words title, say who they report to and why they are there. Nobody is hired until the user accepts, and they can drop members first. Return an empty tasks array and omit escalate/meeting/team when nothing is needed.\n\nTo hand the user a file — a document, a chart, a data file, a standalone code snippet, anything — write it into your current directory before you finish; it is attached to your reply. Any format. Files you were given are already here, so use a new name for anything you produce.{language}"
     );
 
     // Run the adapter in a throwaway scratch dir.
@@ -977,7 +977,15 @@ async fn run_agent_turn_inner(
     };
 
     // Resolve any task assignees before opening the write transaction.
-    let mut resolved: Vec<(String, String, &'static str, Option<String>)> = Vec::new();
+    // (title, description, kind, assignee id, dependency title)
+    struct PlannedTask {
+        title: String,
+        description: String,
+        kind: &'static str,
+        assignee: Option<String>,
+        after: Option<String>,
+    }
+    let mut resolved: Vec<PlannedTask> = Vec::new();
     for t in &tasks {
         let title = t.get("title").and_then(Value::as_str).unwrap_or("").trim();
         if title.is_empty() {
@@ -996,7 +1004,21 @@ async fn run_agent_turn_inner(
             Some(n) => resolve_teammate(state, company_id, n).await?,
             None => None,
         };
-        resolved.push((title.to_string(), description.to_string(), kind, assignee));
+        // The dependency, by title (M30): another task in this same plan, or
+        // an open one already on the board. Unknown titles are dropped — a
+        // dependency on nothing must not freeze a task forever.
+        let after = t
+            .get("after")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        resolved.push(PlannedTask {
+            title: title.to_string(),
+            description: description.to_string(),
+            kind,
+            assignee,
+            after,
+        });
     }
 
     // Anything the agent wrote in its scratch dir is something it is handing
@@ -1050,7 +1072,18 @@ async fn run_agent_turn_inner(
     )
     .await?;
 
-    for (title, description, kind, assignee) in &resolved {
+    // Titles of the tasks this very plan creates, resolved to ids as we go,
+    // so "after": "a task from this same plan" works in one pass.
+    let mut created_ids: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for PlannedTask {
+        title,
+        description,
+        kind,
+        assignee,
+        after,
+    } in &resolved
+    {
         let task_id = new_id();
         // A `code` task needs a repository. Planned for a company that has
         // none, it would sit in `todo` forever — no human can start it either.
@@ -1062,9 +1095,29 @@ async fn run_agent_turn_inner(
         } else {
             planned_kind
         };
+        // Resolve the dependency: a task created earlier in this plan wins;
+        // otherwise the newest open task on the board with that title.
+        let depends_on: Option<String> = match after {
+            None => None,
+            Some(dep_title) => match created_ids.get(dep_title) {
+                Some(id) => Some(id.clone()),
+                None => {
+                    let row: Option<(String,)> = sqlx::query_as(
+                        "SELECT id FROM tasks WHERE company_id = ? AND title = ?
+                         AND status NOT IN ('done', 'cancelled')
+                         ORDER BY created_at DESC LIMIT 1",
+                    )
+                    .bind(company_id)
+                    .bind(dep_title)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    row.map(|(id,)| id)
+                }
+            },
+        };
         sqlx::query(
-            "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, assignee_agent_id, conversation_id, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?, ?)",
+            "INSERT INTO tasks (id, company_id, goal_id, title, description, status, priority, execution_kind, assignee_agent_id, conversation_id, depends_on, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task_id)
         .bind(company_id)
@@ -1074,10 +1127,13 @@ async fn run_agent_turn_inner(
         .bind(kind)
         .bind(assignee.as_deref())
         .bind(conversation_id)
+        .bind(depends_on.as_deref())
         .bind(now())
         .bind(now())
         .execute(&mut *tx)
         .await?;
+        created_ids.insert(title.clone(), task_id.clone());
+        let waits = depends_on.is_some();
         audit::append(
             &mut tx,
             Some(company_id),
@@ -1090,7 +1146,11 @@ async fn run_agent_turn_inner(
             }),
         )
         .await?;
-        if let Some(assignee) = assignee.as_deref() {
+        if let Some(assignee) = assignee.as_deref()
+            && !waits
+        {
+            // A waiting task is not offered now: its dependency's completion
+            // releases it (runner::release_dependents).
             opened_for.push((task_id.clone(), assignee.to_string()));
         }
     }
@@ -1103,6 +1163,45 @@ async fn run_agent_turn_inner(
     for (task_id, assignee) in opened_for {
         if let Err(e) = crate::runner::offer_start(state, &task_id, &assignee).await {
             eprintln!("could not offer the start of task {task_id}: {e}");
+        }
+    }
+
+    // The `start` verb (M30, ADR-0042): the CEO starts — or relaunches —
+    // existing open tasks by title. In a prompted turn the start goes
+    // through the autonomy gates like everything else; in a digest it is
+    // ALWAYS an approval — an unprompted turn proposes, never spends.
+    let starts: Vec<String> = plan
+        .as_ref()
+        .and_then(|v| v.get("start").and_then(Value::as_array))
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for title in starts {
+        if digest_block.is_some() {
+            let task: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT id, assignee_agent_id FROM tasks
+                 WHERE company_id = ? AND title = ? AND status IN ('backlog', 'todo', 'blocked')
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(company_id)
+            .bind(&title)
+            .fetch_optional(&state.pool)
+            .await?;
+            if let Some((task_id, Some(assignee))) = task
+                && let Err(e) = crate::runner::file_start_approval(
+                    state, company_id, &task_id, &assignee, &title,
+                )
+                .await
+            {
+                eprintln!("digest could not propose the start of «{title}»: {e}");
+            }
+        } else if let Err(e) = crate::runner::start_existing(state, company_id, &title).await {
+            eprintln!("could not start «{title}»: {e}");
         }
     }
 

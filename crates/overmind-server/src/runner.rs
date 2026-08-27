@@ -521,7 +521,7 @@ pub(crate) async fn default_goal(state: &AppState, company_id: &str) -> Option<S
 /// File the approval that starts a task, and tell the human (ADR-0020): an
 /// approval nobody sees is an agent stuck waiting forever. Used by the
 /// governance gate and by [`offer_start`] for agents that act with approval.
-async fn file_start_approval(
+pub(crate) async fn file_start_approval(
     state: &AppState,
     company_id: &str,
     task_id: &str,
@@ -579,6 +579,112 @@ async fn file_start_approval(
     state.notify(company_id);
     crate::notify::deliver(state, company_id, &notification);
     Ok(approval_id)
+}
+
+/// A dependency delivered: hand its artifacts to every task waiting on it,
+/// and offer each one a start (M30, ADR-0042). The handoff copies the
+/// artifact files into the dependent's attachments — the same table the
+/// run's `place_inputs` already reads — so the dependent opens with the
+/// dependency's deliverables in its working directory.
+pub(crate) async fn release_dependents(
+    state: &AppState,
+    task_id: &str,
+    session_id: &str,
+) -> Result<(), RunnerError> {
+    let dependents: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT id, assignee_agent_id FROM tasks
+         WHERE depends_on = ? AND status IN ('backlog', 'todo')",
+    )
+    .bind(task_id)
+    .fetch_all(&state.pool)
+    .await?;
+    if dependents.is_empty() {
+        return Ok(());
+    }
+    let artifacts: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT title, mime, file_path, size_bytes FROM task_artifacts
+         WHERE session_id = ? AND file_path IS NOT NULL",
+    )
+    .bind(session_id)
+    .fetch_all(&state.pool)
+    .await?;
+    for (dep_id, assignee) in dependents {
+        for (title, mime, file_path, size) in &artifacts {
+            let Some(path) = file_path else { continue };
+            let mut tx = state.write_tx().await?;
+            sqlx::query(
+                "INSERT INTO attachments
+                 (id, conversation_id, task_id, message_id, origin, filename, mime, size_bytes, path, created_at)
+                 VALUES (?, NULL, ?, NULL, 'agent', ?, ?, ?, ?, ?)",
+            )
+            .bind(uuid::Uuid::now_v7().to_string())
+            .bind(&dep_id)
+            .bind(title)
+            .bind(mime)
+            .bind(size)
+            .bind(path)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+        }
+        // The dependency is met: the row no longer gates anything, and a
+        // second completion of the same task must not re-trigger.
+        sqlx::query("UPDATE tasks SET depends_on = NULL WHERE id = ?")
+            .bind(&dep_id)
+            .execute(&state.pool)
+            .await?;
+        if let Some(assignee) = assignee
+            && let Err(e) = boxed_offer_start(state, &dep_id, &assignee).await
+        {
+            eprintln!("dependent {dep_id} could not be offered: {e}");
+        }
+    }
+    Ok(())
+}
+
+/// [`offer_start`], type-erased: the release path runs inside a session that
+/// `start_task` spawned, and an opaque future that (transitively) contains
+/// itself is a cycle — a boxed dyn future is not.
+fn boxed_offer_start<'a>(
+    state: &'a AppState,
+    task_id: &'a str,
+    agent_id: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Offer, RunnerError>> + Send + 'a>> {
+    Box::pin(offer_start(state, task_id, agent_id))
+}
+
+/// Start (or relaunch) an existing open task on the CEO's word (M30):
+/// `blocked` returns to the queue first — a relaunch is exactly that — and
+/// the start goes through [`offer_start`]'s autonomy gates like any other.
+pub(crate) async fn start_existing(
+    state: &AppState,
+    company_id: &str,
+    title: &str,
+) -> Result<Option<Offer>, RunnerError> {
+    let task: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, status, assignee_agent_id FROM tasks
+         WHERE company_id = ? AND title = ? AND status IN ('backlog', 'todo', 'blocked')
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(company_id)
+    .bind(title)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((task_id, status, assignee)) = task else {
+        return Ok(None);
+    };
+    let Some(assignee) = assignee else {
+        return Ok(None);
+    };
+    if status != "todo" {
+        sqlx::query("UPDATE tasks SET status = 'todo', updated_at = ? WHERE id = ?")
+            .bind(now())
+            .bind(&task_id)
+            .execute(&state.pool)
+            .await?;
+    }
+    Ok(Some(offer_start(state, &task_id, &assignee).await?))
 }
 
 /// What offering a start did (ADR-0038).
@@ -2031,6 +2137,24 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     }
     tx.commit().await?;
     ctx.state.notify(&ctx.company_id);
+
+    // The floor moves on its own (M30, ADR-0042): a completed run releases
+    // the tasks that were waiting on this one — each inherits the
+    // deliverables as inputs and is offered to start by its agent's
+    // autonomy. Best-effort: the session is already recorded.
+    if f.session_status == "completed" {
+        // Spawned, not awaited: releasing a dependent starts a new session,
+        // and a future that awaits its own descendants is a cycle the
+        // compiler rightly refuses.
+        let st = ctx.state.clone();
+        let tid = ctx.task_id.clone();
+        let sid = ctx.session_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = release_dependents(&st, &tid, &sid).await {
+                eprintln!("could not release dependents of {tid}: {e}");
+            }
+        });
+    }
 
     // Collaboration (ADR-0020): while working, the agent may have hit a call it
     // should not make alone and left a MEETING_REQUEST.json behind. Raising it
