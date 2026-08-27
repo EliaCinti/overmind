@@ -82,6 +82,15 @@ Found while the owner drove the Casa San Vito company; each is small, none is ur
 - **Duplicate attachments read twice.** The same file uploaded twice to a thread is listed twice ("BozzaCasa.jpeg, BozzaCasa.jpeg") and copied over itself in the run dir. Dedup by (filename, size) at listing time, or say "×2".
 - **A manual board move to *in progress* runs nobody.** The transition is legal but inert — either offer the start when the column changes, or say plainly that starting lives on the task.
 
+## Frictions from the two-machine walk (27 Aug 2026, in the order they bit)
+
+The owner and a friend ran the walk: a fresh install on the friend's machine, shared over the tailnet. What bit, ranked:
+
+1. **The subscription sign-in stuck.** The friend's code exchange answered an OAuth 400; the CLI said "Press Enter to retry" — a shape the flow did not know. The retry mints a *fresh* URL (new PKCE challenge), so re-offering the old link loops on 400 forever; the flow ended with "the CLI finished but no token appeared". *Fixed on `build-never-sinks`: the OAuth-error shape is recognized, Enter is pressed for the person, the fresh URL is scraped and offered with an honest note.*
+2. **Everything rides one Docker volume.** `docker compose down -v` — or a lost disk — is total loss. The *Backup and restore* milestone below is the verb; until it lands, the wiki should say plainly which volumes hold the data and that `-v` destroys them.
+3. **Plain HTTP on the tailnet.** The documented sharing path is `100.x.y.z:7070` in the clear. `tailscale serve` is the free fix (stage A of *Overmind in your pocket*); its verification should jump ahead of the rest of that milestone.
+4. **The logs say almost nothing.** Two startup lines, then errors only — no timestamps, no run lifecycle. When the sign-in stuck, `docker compose logs` had nothing to tell. The sign-in flow now narrates itself; the rest of the server deserves the same: timestamped lifecycle lines (task started, agent spawned, turn finished, cost recorded) — one focused PR.
+
 ## Local models: Overmind off the meter (researched 27 Aug 2026)
 
 The owner's ask: run Overmind's agents on local LLMs — for privacy and to

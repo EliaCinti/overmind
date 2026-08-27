@@ -547,9 +547,12 @@ export const api = {
       | { state: "idle" }
       | { state: "starting"; tail?: string }
       | { state: "exchanging"; tail?: string }
-      | { state: "url_ready"; url: string; tail?: string }
+      /** `rejected` rides along when this URL replaced one whose code the CLI refused. */
+      | { state: "url_ready"; url: string; tail?: string; rejected?: string | null }
       /** The CLI rejected the pasted code and is prompting again. */
       | { state: "code_rejected"; tail?: string; url?: string | null }
+      /** An OAuth error made the CLI restart its flow; a fresh URL is coming. */
+      | { state: "restarting"; tail?: string }
       | { state: "done"; economy: Economy }
       | { state: "failed"; tail: string }
     >("GET", "/claude-auth"),
