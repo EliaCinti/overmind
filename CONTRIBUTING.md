@@ -81,7 +81,7 @@ npm run build
 
 ### The image
 
-CI also builds the Docker image and runs a real task inside it (`.github/scripts/container-smoke.sh`) — "does it build" is not the bar, "an agent can do a day's work in it" is. Locally: `docker compose build` then `bash .github/scripts/container-smoke.sh`.
+CI also builds the Docker image and runs a real task inside it (`.github/scripts/container-smoke.sh`) — "does it build" is not the bar, "an agent can do a day's work in it" is. Locally: `docker compose -f docker-compose.yml -f docker-compose.build.yml build` then `IMAGE=overmind:local bash .github/scripts/container-smoke.sh` (the default `docker-compose.yml` names only the published image; the build lives in the override).
 
 ### Writing tests
 
