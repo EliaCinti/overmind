@@ -60,7 +60,8 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
 # Baking every toolchain in would grow the image without bound; instead one
 # build argument adds what YOUR agents need:
 #
-#   docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base texlive-lang-italian"
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
+#     build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base texlive-lang-italian"
 #
 ARG EXTRA_APT_PACKAGES=""
 RUN if [ -n "$EXTRA_APT_PACKAGES" ]; then \

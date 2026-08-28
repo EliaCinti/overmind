@@ -1,0 +1,28 @@
+# The developer's override: build the image from this tree instead of pulling
+# the published one. Layer it on top of the default file --
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+#
+# or once per shell, after which a plain `docker compose …` means "from source":
+#
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml
+#
+# Why a separate file: docker-compose.yml names ONLY the published image, so
+# `docker compose up -d --pull always` is a download and an update -- never a
+# seven-minute build, and never a question of which of the two you are
+# running. The build is tagged `overmind:local` here, not
+# `ghcr.io/eliacinti/overmind:latest`: a from-source image that wore the
+# published image's name is exactly how a `pull` came to land "nothing new".
+#
+# Agents need a toolchain the image lacks? Add it at build time:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml \
+#     build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"
+#
+# CI's smoke test runs against this image too:
+#   IMAGE=overmind:local bash .github/scripts/container-smoke.sh
+
+services:
+  overmind:
+    build: .
+    image: overmind:local
