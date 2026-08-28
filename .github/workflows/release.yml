@@ -119,3 +119,7 @@ jobs:
         with:
           body_path: notes.md
           generate_release_notes: false
+          # The install is one file on top of Docker: ship that file with the
+          # version it belongs to, so nobody has to clone a repository to run
+          # an image.
+          files: docker-compose.yml

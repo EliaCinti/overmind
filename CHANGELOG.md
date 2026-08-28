@@ -4,6 +4,10 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+### Changed
+- **`docker-compose.yml` is the installer's file, and `docker compose up -d --pull always` is the one command — to start and to update.** The compose declared both `image:` and `build:`, and "which one am I running?" had no honest answer: a local `up --build` claimed the `latest` tag, a friend's `docker compose pull` landed no visible new version, and the fix was "delete everything and download again". The default file now names only the published image. Building from this tree moved to `docker-compose.build.yml` (`docker compose -f docker-compose.yml -f docker-compose.build.yml up --build`), tagged `overmind:local` so a from-source build can never pass for the published one — and that is where `EXTRA_APT_PACKAGES` lives now.
+- **`docker-compose.yml` ships with every release as an asset.** One file on top of Docker is the whole install; the Quickstart downloads it instead of cloning the repository.
+
 ## [0.2.2] — 2026-08-28
 
 The subscription sign-in, watched all the way through on a friend's machine. The flow reached "token created successfully" — and then declared failure.

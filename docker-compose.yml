@@ -1,21 +1,32 @@
-# Quickstart: `docker compose up --build` → http://localhost:7070
+# Quickstart -- this file and Docker are the whole install:
 #
-# The image brings its own agent CLI, so a task works out of the box once the
-# agent can authenticate — see ANTHROPIC_API_KEY below, or `claude login` if you
-# are on a subscription. The database, worktrees and (optional) managed brains
-# persist on a named volume; so do the agent's credentials.
+#   docker compose up -d --pull always      → http://localhost:7070
+#
+# The same line is the UPDATE: `--pull always` fetches the newest published
+# image before starting, so "a new version is out" means running it again --
+# not a rebuild, not a reinstall. The image brings its own agent CLI, so a
+# task works out of the box once the agent can authenticate -- see
+# ANTHROPIC_API_KEY below, or the subscription sign-in. The database,
+# worktrees and (optional) managed brains persist on a named volume; so do
+# the agent's credentials. Logs: `docker compose logs -f overmind`.
+#
+# This file names the PUBLISHED image and nothing else, on purpose. Building
+# from source is a developer's path and lives in docker-compose.build.yml:
+# when one compose declares both `image:` and `build:`, "which one am I
+# running?" has no honest answer -- a local `up --build` once claimed the
+# `latest` tag, and a friend's `docker compose pull` landed no visible new
+# version until everything was deleted and downloaded again.
 
 services:
   overmind:
+    # Multi-arch (amd64 + arm64), built by the release workflow on every
+    # version tag. Pin a version instead of `latest` if you want an update to
+    # be a decision rather than a side effect: ghcr.io/eliacinti/overmind:0.2.2
+    #
     # Agents work with the tools the image carries (git, gh, ripgrep, python,
     # node). If yours need more -- a LaTeX toolchain, a linter, a compiler --
-    # add it at build time instead of deriving an image:
-    #   docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"
-    # The published image (built by the release workflow on every version
-    # tag): `docker compose pull && docker compose up` is a download, not a
-    # seven-minute build. `docker compose up --build` still builds from this
-    # tree -- the path for developers and for EXTRA_APT_PACKAGES.
-    build: .
+    # build from this tree with docker-compose.build.yml and its
+    # EXTRA_APT_PACKAGES argument instead of deriving an image.
     image: ghcr.io/eliacinti/overmind:latest
     ports:
       # Loopback ONLY, on purpose. Since M24 the API answers to a credential
@@ -34,9 +45,9 @@ services:
       #
       # The CLI writes its session under the agent's $HOME, which is not on
       # /data — without this volume a `claude login` is lost on the next
-      # `docker compose up --build`, and the failure looks like a login that
-      # never sticks. Mounted by default because "your sign-in survives" is not
-      # a thing anyone should have to opt into. The server takes ownership of it
+      # image update, and the failure looks like a login that never sticks.
+      # Mounted by default because "your sign-in survives" is not a thing
+      # anyone should have to opt into. The server takes ownership of it
       # at startup: a fresh named volume arrives owned by root, and the agent is
       # not root (ADR-0029).
       - overmind-agent-home:/home/agent/.claude

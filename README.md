@@ -214,16 +214,16 @@ The result: an organization of agents that doesn't start from zero every morning
 The image is self-contained: the agent CLI (Claude Code, pinned) and the memory engine (Wadachi, semantic model included) are already inside. The one thing it cannot bring is a way to pay — **give the agent credentials first**, or your first conversation will fail instead of answering:
 
 ```sh
-git clone https://github.com/EliaCinti/overmind.git && cd overmind
+# One file, on top of Docker (Docker Desktop on macOS and Windows, the docker
+# engine package on Linux). No clone needed.
+curl -fsSLO https://raw.githubusercontent.com/EliaCinti/overmind/main/docker-compose.yml
 
 # EITHER: pay with an API key — export it before starting
 export ANTHROPIC_API_KEY=sk-ant-…
 
-docker compose pull && docker compose up   # the published image → http://localhost:7070
-# (or build it from this tree: docker compose up --build — prefer `pull`:
-#  it is the tested multi-arch image and needs no toolchain. A from-source
-#  build degrades gracefully if the memory engine cannot be fetched: watch
-#  the build log for WARNING lines.)
+docker compose up -d --pull always   # the published image → http://localhost:7070
+# The same line is the update: `--pull always` fetches the newest image first.
+# (Building from this tree is the developer's path — see "From source".)
 
 # OR: pay with a Claude subscription — sign in from the product (the notice
 # above the first screen walks you through it), or once from the shell:
@@ -234,7 +234,7 @@ Both at once — a key exported in your shell *and* a claude.ai login (the usual
 
 Open the browser, **create the owner account** (the first run offers exactly that), found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is. The DB, worktrees, brains and the agent's sign-in persist on named volumes across restarts.
 
-To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover swapping the agent CLI (`OVERMIND_AGENT_CMD`) or the memory server (`OVERMIND_MEMORY_CMD`) for your own. Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time: `docker compose build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`.
+To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover swapping the agent CLI (`OVERMIND_AGENT_CMD`) or the memory server (`OVERMIND_MEMORY_CMD`) for your own. Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time, from this tree: `docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`.
 
 ### From source
 
@@ -248,6 +248,8 @@ cargo run                          # → http://127.0.0.1:7070
 # Frontend dev with hot reload (proxies /api and /ws to the server):
 cd web && npm run dev
 ```
+
+**The image from this tree** — for developers, or for a toolchain the published image lacks: `docker compose -f docker-compose.yml -f docker-compose.build.yml up --build`. The default compose names only the published image, on purpose; [`docker-compose.build.yml`](docker-compose.build.yml) says why, and tags the build `overmind:local` so it can never pass for the published one. A from-source build degrades gracefully if the memory engine cannot be fetched: watch the build log for WARNING lines.
 
 On macOS every run is caged with `sandbox-exec`; a Claude subscription works inside the cage (the Keychain is granted read-only). macOS is the platform Overmind is run natively on; Linux and Windows use the image.
 
