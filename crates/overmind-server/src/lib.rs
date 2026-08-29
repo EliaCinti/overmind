@@ -1,6 +1,7 @@
 pub mod api;
 pub mod audit;
 pub mod auth;
+pub mod backup;
 pub mod ceo;
 pub mod claude_auth;
 pub mod db;

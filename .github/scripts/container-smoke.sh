@@ -59,6 +59,7 @@ printf 'The container can do a day of work.\n' > ARTIFACT.md
     echo "uid=$(id -u)"
     if [ -r /data/overmind.sqlite ]; then echo "db=READABLE"; else echo "db=DENIED"; fi
     if ls /data/companies >/dev/null 2>&1; then echo "brains=READABLE"; else echo "brains=DENIED"; fi
+    if ls /data/backups >/dev/null 2>&1; then echo "backups=READABLE"; else echo "backups=DENIED"; fi
 } > PROBE.txt
 echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
 STUB
