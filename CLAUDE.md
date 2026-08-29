@@ -55,6 +55,23 @@ invent other checks; do not skip these.
   and to update. `docker-compose.yml` names only the published image on
   purpose; the build lives in `docker-compose.build.yml`.
 
+## Before a PR is opened — every PR, no exceptions
+
+1. The checks above, green.
+2. `/code-review` at `medium` on the branch (or `/code-review <PR#>` once it
+   exists). Every verified finding is either fixed in a commit of its own or
+   written down — in the PR body, or in `docs/NEXT.md` when it is a debt —
+   never silently dropped. The first compose split lost a `name:` and a
+   tracked override this way; the review found both.
+3. `/security-review` when the diff touches the door (`auth.rs`,
+   `governance.rs`), the cage (`sandbox.rs`, `landlock.rs`), credentials
+   (`claude_auth.rs`, `scrub_secrets`), the audit chain, the compose or the
+   image, or anything that moves data in or out of `/data` (backup, export,
+   attachments).
+4. The PR body says the reviews ran and what came of them.
+
+`/code-review ultra` is for release-grade PRs and is the owner's call.
+
 ## Branches, commits, releases
 
 - `main` is protected. Branch (`feat/…`, `fix/…`, `docs/…` — or a name that says
