@@ -21,7 +21,7 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 ### A week of use *(the owner's milestone)*
 Not a development milestone: the owner uses Overmind for real work for a week, does the **two-machine walk over Tailscale** with a friend (closes M24 and M25), has the friend install it on a fresh machine with `docker compose pull && up` (closes M27), and writes down every friction **in the order it bit**. Those frictions are the backlog for what follows, ahead of anything below — the roadmap's own doctrine since M23: *dogfood first, then fix what actually hurt.*
 
-**Accept:** M23, M24, M25, M27 marked `done` on the owner's word; a list of frictions, ranked.
+**Accept:** M23, M24, M25, M27 marked `done` on the owner's word; a list of frictions, ranked. *29 Aug 2026: M23, M24, M27 (and M29) closed on his word; the frictions are the list above. M25 waits for his word on the shared-company half of the walk.*
 
 ### Backup and restore
 Today's incident, turned into a verb. One API and one button: **export** a company — or the whole instance — as a single archive (the database, every brain, the subscription token, attachments and artifacts), and **restore** it into a fresh instance. The archive is what you keep on another disk; the restore is what makes the image disposable. Plus the documented, tested recovery of a Docker volume gone bad.
