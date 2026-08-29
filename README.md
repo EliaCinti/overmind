@@ -215,15 +215,18 @@ The image is self-contained: the agent CLI (Claude Code, pinned) and the memory 
 
 ```sh
 # One file, on top of Docker (Docker Desktop on macOS and Windows, the docker
-# engine package on Linux). No clone needed.
+# engine package on Linux). No clone needed. On Windows run this in WSL2 or
+# Git Bash — in PowerShell `curl` is not curl.
 curl -fsSLO https://raw.githubusercontent.com/EliaCinti/overmind/main/docker-compose.yml
 
 # EITHER: pay with an API key — export it before starting
 export ANTHROPIC_API_KEY=sk-ant-…
 
 docker compose up -d --pull always   # the published image → http://localhost:7070
-# The same line is the update: `--pull always` fetches the newest image first.
-# (Building from this tree is the developer's path — see "From source".)
+docker compose logs -f overmind      # what it is doing, who pays, the version
+# The same `up` line is the update: `--pull always` fetches the newest image
+# first. Offline, plain `docker compose up -d` starts the image you have.
+# (Building from source is the developer's path — see "From source".)
 
 # OR: pay with a Claude subscription — sign in from the product (the notice
 # above the first screen walks you through it), or once from the shell:
@@ -234,11 +237,13 @@ Both at once — a key exported in your shell *and* a claude.ai login (the usual
 
 Open the browser, **create the owner account** (the first run offers exactly that), found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is. The DB, worktrees, brains and the agent's sign-in persist on named volumes across restarts.
 
-To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover swapping the agent CLI (`OVERMIND_AGENT_CMD`) or the memory server (`OVERMIND_MEMORY_CMD`) for your own. Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time, from this tree: `docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`.
+To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover the memory server (`OVERMIND_MEMORY_CMD`); the agent CLI is swapped with `OVERMIND_AGENT_CMD` (the [environment table](#configuration) below). Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time, from a checkout (see *From source*), and keep starting from the same two files — the plain update line would put the published image back: `docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`, then `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d`.
 
 ### From source
 
 ```sh
+git clone https://github.com/EliaCinti/overmind.git && cd overmind
+
 # 1. Build the UI (once, or after frontend changes)
 cd web && npm install && npm run build && cd ..
 
@@ -249,7 +254,7 @@ cargo run                          # → http://127.0.0.1:7070
 cd web && npm run dev
 ```
 
-**The image from this tree** — for developers, or for a toolchain the published image lacks: `docker compose -f docker-compose.yml -f docker-compose.build.yml up --build`. The default compose names only the published image, on purpose; [`docker-compose.build.yml`](docker-compose.build.yml) says why, and tags the build `overmind:local` so it can never pass for the published one. A from-source build degrades gracefully if the memory engine cannot be fetched: watch the build log for WARNING lines.
+**The image from this tree** — for developers, or for a toolchain the published image lacks: `docker compose -f docker-compose.yml -f docker-compose.build.yml up --build` (or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` once, then plain `docker compose …`). The default compose names only the published image, on purpose — in a clone, `docker compose up --build` builds nothing; [`docker-compose.build.yml`](docker-compose.build.yml) says why ([ADR-0043](docs/adr/0043-the-compose-file-is-the-installers.md)), and tags the build `overmind:local` so it can never pass for the published one. A from-source build degrades gracefully if the memory engine cannot be fetched: watch the build log for WARNING lines.
 
 On macOS every run is caged with `sandbox-exec`; a Claude subscription works inside the cage (the Keychain is granted read-only). macOS is the platform Overmind is run natively on; Linux and Windows use the image.
 

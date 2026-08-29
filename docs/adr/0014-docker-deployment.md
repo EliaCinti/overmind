@@ -21,6 +21,6 @@ Paperclip ships Docker for two distinct jobs: **deployment** (one image, `docker
 
 ## Consequences
 
-- "Run anywhere" with `docker compose up --build`; the healthcheck hits `/api/health`.
+- "Run anywhere" with `docker compose up --build`; the healthcheck hits `/api/health`. *(Superseded in part by [ADR-0043](0043-the-compose-file-is-the-installers.md): the default compose no longer builds; `up --build` needs `docker-compose.build.yml`.)*
 - Verified: `docker build` succeeds (web + Rust release + runtime), the container serves the API (`/api/health`) and the SPA, and the bundled toolchain is present (git 2.39, gh 2.96, node 22, python3, ripgrep).
 - M10 gains a concrete direction: agent isolation via containers, and ARCHITECTURE.md's sandbox-exec note is superseded by this ADR.
