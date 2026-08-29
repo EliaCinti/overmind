@@ -1,5 +1,0 @@
-# Dogfood M23: il mount dei repo, fatto come lo farebbe un utente.
-services:
-  overmind:
-    volumes:
-      - /tmp/m23-repos:/repos

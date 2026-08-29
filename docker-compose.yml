@@ -10,18 +10,32 @@
 # worktrees and (optional) managed brains persist on a named volume; so do
 # the agent's credentials. Logs: `docker compose logs -f overmind`.
 #
+# `--pull always` asks the registry every time. Offline -- a plane, a captive
+# portal, a registry outage -- plain `docker compose up -d` starts the image
+# you already have.
+#
 # This file names the PUBLISHED image and nothing else, on purpose. Building
-# from source is a developer's path and lives in docker-compose.build.yml:
-# when one compose declares both `image:` and `build:`, "which one am I
-# running?" has no honest answer -- a local `up --build` once claimed the
-# `latest` tag, and a friend's `docker compose pull` landed no visible new
-# version until everything was deleted and downloaded again.
+# from source is a developer's path and lives in docker-compose.build.yml
+# (ADR-0043): when one compose declares both `image:` and `build:`, "which
+# one am I running?" has no honest answer -- a local `up --build` once claimed
+# the `latest` tag, and a friend's `docker compose pull` landed no visible new
+# version until everything was deleted and downloaded again. In a clone of
+# the repository `docker compose up --build` therefore builds NOTHING now; the
+# from-source command is in that other file.
+
+# The project's name is fixed here, not taken from the directory the file
+# sits in: the container and the volumes are `overmind-…` whether you curled
+# this file into ~/Downloads or cloned the repository, so an update from
+# another directory finds YOUR data instead of starting an empty instance --
+# and the backup recipe at the bottom names a volume that exists.
+name: overmind
 
 services:
   overmind:
     # Multi-arch (amd64 + arm64), built by the release workflow on every
     # version tag. Pin a version instead of `latest` if you want an update to
-    # be a decision rather than a side effect: ghcr.io/eliacinti/overmind:0.2.2
+    # be a decision rather than a side effect: ghcr.io/eliacinti/overmind:X.Y.Z
+    # (every release's tag is on its GitHub Release page).
     #
     # Agents work with the tools the image carries (git, gh, ripgrep, python,
     # node). If yours need more -- a LaTeX toolchain, a linter, a compiler --
@@ -41,7 +55,7 @@ services:
       - "127.0.0.1:7070:7070"
     volumes:
       - overmind-data:/data
-      # The agent's credentials, kept across rebuilds.
+      # The agent's credentials, kept across updates.
       #
       # The CLI writes its session under the agent's $HOME, which is not on
       # /data — without this volume a `claude login` is lost on the next

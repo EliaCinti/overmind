@@ -274,7 +274,8 @@
     <h2>Quickstart</h2>
     <p class="lede">Self-hosted, no account, your data on your machine.</p>
     <pre><span class="c"># Docker (recommended)</span>
-<span class="prompt">$ </span>docker compose up -d --pull always <span class="c"># → http://localhost:7070</span>
+<span class="prompt">$ </span>curl -fsSLO https://raw.githubusercontent.com/EliaCinti/overmind/main/docker-compose.yml
+<span class="prompt">$ </span>docker compose up -d --pull always <span class="c"># → http://localhost:7070 (and the update, later)</span>
 
 <span class="c"># Organizational memory (optional) — point at any MCP memory server</span>
 <span class="prompt">$ </span>OVERMIND_MEMORY_CMD=<span>"BRAIN_DIR=/path/to/brain wadachi"</span> cargo run</pre>

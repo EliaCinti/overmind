@@ -119,7 +119,8 @@ jobs:
         with:
           body_path: notes.md
           generate_release_notes: false
-          # The install is one file on top of Docker: ship that file with the
-          # version it belongs to, so nobody has to clone a repository to run
-          # an image.
+          # The install is one file on top of Docker: ship that file with
+          # every release so nobody has to clone a repository to run an image.
+          # It names `latest` -- a release asset is where you get the file,
+          # not a pin; the one update line keeps working from it.
           files: docker-compose.yml

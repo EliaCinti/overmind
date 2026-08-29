@@ -1,5 +1,5 @@
 # The developer's override: build the image from this tree instead of pulling
-# the published one. Layer it on top of the default file --
+# the published one (ADR-0043). Layer it on top of the default file --
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
 #
@@ -7,22 +7,34 @@
 #
 #   export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml
 #
+# Carry the same files into every later command (`up`, `logs`, `exec`): a
+# plain `docker compose up -d --pull always` reads the default file alone and
+# puts the published image back -- with none of what you built in.
+#
 # Why a separate file: docker-compose.yml names ONLY the published image, so
 # `docker compose up -d --pull always` is a download and an update -- never a
 # seven-minute build, and never a question of which of the two you are
 # running. The build is tagged `overmind:local` here, not
 # `ghcr.io/eliacinti/overmind:latest`: a from-source image that wore the
 # published image's name is exactly how a `pull` came to land "nothing new".
+# `pull_policy: build` keeps `--pull always` from asking Docker Hub for an
+# `overmind:local` that only ever exists on this machine.
 #
 # Agents need a toolchain the image lacks? Add it at build time:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml \
 #     build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"
 #
-# CI's smoke test runs against this image too:
-#   IMAGE=overmind:local bash .github/scripts/container-smoke.sh
+# CI builds the same Dockerfile as `overmind:ci` and runs
+# .github/scripts/container-smoke.sh against it; locally, after the build
+# above: `IMAGE=overmind:local bash .github/scripts/container-smoke.sh`.
 
 services:
   overmind:
     build: .
     image: overmind:local
+    pull_policy: build
+    volumes:
+      # Dogfood (M23): repositories mounted the way a user would mount them.
+      # Point it at your own checkouts, or drop it.
+      - /tmp/m23-repos:/repos

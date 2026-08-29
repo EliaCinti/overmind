@@ -6,7 +6,7 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ### Changed
 - **`docker-compose.yml` is the installer's file, and `docker compose up -d --pull always` is the one command — to start and to update.** The compose declared both `image:` and `build:`, and "which one am I running?" had no honest answer: a local `up --build` claimed the `latest` tag, a friend's `docker compose pull` landed no visible new version, and the fix was "delete everything and download again". The default file now names only the published image. Building from this tree moved to `docker-compose.build.yml` (`docker compose -f docker-compose.yml -f docker-compose.build.yml up --build`), tagged `overmind:local` so a from-source build can never pass for the published one — and that is where `EXTRA_APT_PACKAGES` lives now.
-- **`docker-compose.yml` ships with every release as an asset.** One file on top of Docker is the whole install; the Quickstart downloads it instead of cloning the repository.
+- **`docker-compose.yml` ships with every release as an asset.** One file on top of Docker is the whole install; the Quickstart downloads it instead of cloning the repository. The file now declares `name: overmind`, so the container and the volumes carry the same names wherever it was downloaded to — an update run from another directory finds your data, and the backup recipe names a volume that exists. The tracked dogfood override (`/repos` from `/tmp/m23-repos`) moved into the build file, where it no longer merges silently into an installer's run ([ADR-0043](docs/adr/0043-the-compose-file-is-the-installers.md)).
 
 ## [0.2.2] — 2026-08-28
 
