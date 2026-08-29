@@ -24,15 +24,7 @@ Not a development milestone: the owner uses Overmind for real work for a week, d
 **Accept:** M23, M24, M25, M27 marked `done` on the owner's word; a list of frictions, ranked. *29 Aug 2026: M23, M24, M27 (and M29) closed on his word; the frictions are the list above. M25 waits for his word on the shared-company half of the walk.*
 
 ### Backup and restore
-*Opened 29 Aug 2026 as **M31** — [ADR-0044](adr/0044-the-archive-is-the-instance.md); the milestone lives in the roadmap now. The owner's decisions: the token sealed by a passphrase (not in the clear as written below), download and a server folder, all of `/data`, restore on an empty instance only.*
-
-Today's incident, turned into a verb. One API and one button: **export** a company — or the whole instance — as a single archive (the database, every brain, the subscription token, attachments and artifacts), and **restore** it into a fresh instance. The archive is what you keep on another disk; the restore is what makes the image disposable. Plus the documented, tested recovery of a Docker volume gone bad.
-
-- Export is consistent: taken inside a read transaction (SQLite backup API), brains copied after the database, the audit chain verified before the archive is sealed and the verification written into it.
-- Restore refuses an archive whose chain does not verify, says so, and never touches the running data until the archive is accepted.
-- The owner's verb, like billing: an export is everyone's data.
-
-**Accept:** export on one machine, restore on another, the door, the companies, the memories and the chain all intact; the threat model gains a row.
+*Opened 29 Aug 2026 as **M31** ([ADR-0044](adr/0044-the-archive-is-the-instance.md)); the milestone, its slices and its Accept live in the roadmap now. What was sketched here — the archive, the verified chain, the restore into a fresh instance — is there in its decided form; the token is sealed by a passphrase rather than carried in the clear, and the scratch dirs stay out.*
 
 ### From diff to landed
 The loop's last step. After review, a person can **land** a code run: merge its branch into the workspace's default ref (fast-forward or merge commit, the repo's history kept honest), or — when the repository has a remote and `gh` is signed in — **open a pull request** with the task's brief as the description and the diff as the body. Both are the human's verb, audited with the actor; an agent never lands its own work. Conflicts are reported, not resolved by a machine.
