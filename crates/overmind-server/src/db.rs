@@ -386,6 +386,9 @@ pub struct Config {
     pub agent_tools: AgentTools,
     /// Where worktrees and other runtime data live (`OVERMIND_DATA_DIR`).
     pub data_dir: PathBuf,
+    /// Where archives land (`OVERMIND_BACKUP_DIR`, ADR-0044); `None` means
+    /// `<data>/backups/`.
+    pub backup_dir: Option<PathBuf>,
     /// Scheduler tick interval (`OVERMIND_HEARTBEAT_SECS`).
     pub heartbeat_ms: u64,
     /// Kill sessions running longer than this (`OVERMIND_SESSION_TIMEOUT_SECS`).
@@ -554,6 +557,7 @@ impl Default for Config {
             agent_cmd: None,
             agent_tools: AgentTools::default(),
             data_dir: PathBuf::from("./overmind-data"),
+            backup_dir: None,
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
             start_estimate_cents: 50,
@@ -642,6 +646,10 @@ impl Config {
             agent_gid: std::env::var("OVERMIND_AGENT_GID")
                 .ok()
                 .and_then(|s| s.parse().ok()),
+            backup_dir: std::env::var("OVERMIND_BACKUP_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
             agent_home: std::env::var("OVERMIND_AGENT_HOME")
                 .ok()
                 .filter(|s| !s.is_empty())

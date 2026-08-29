@@ -72,7 +72,9 @@ order:
    `company_tokens.token` (the editor's integration tokens — a restored
    instance does not honour tokens that lived in a file; they are marked
    revoked in the snapshot and the restore says so). Session hashes stay:
-   they are hashes.
+   they are hashes. The scrub runs with `secure_delete` on and ends in a
+   `VACUUM`: an `UPDATE` alone leaves the old bytes in the page's free space,
+   readable with `strings`.
 3. `companies/<id>/brain/…` — the managed brain is Wadachi's (ADR-0024,
    ADR-0031): its `brain.db` is taken with `VACUUM INTO` through a read-only
    connection (Wadachi's own process may hold it open; WAL makes that safe),
@@ -85,8 +87,10 @@ order:
 5. `secrets/claude-oauth-token.enc` — the token, **sealed**: key =
    argon2id(passphrase, 16-byte salt; m = 64 MiB, t = 3, p = 1; the numbers
    written here because the door's `Argon2::default()` is not a spec);
-   cipher = XChaCha20-Poly1305, 24-byte nonce, the manifest's own bytes as
-   associated data. Salt and nonce ride in the manifest; the key never
+   cipher = XChaCha20-Poly1305, 24-byte nonce, the archive's identity line
+   (`overmind-backup/<format>/<scope>/<created_at>`) as associated data —
+   not the manifest's bytes, which name this entry's hash and would make the
+   two circular. Salt and nonce ride in the manifest; the key never
    exists outside the request. An export with a token present **requires** a
    passphrase; without a token none is asked.
 

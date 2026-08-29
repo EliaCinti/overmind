@@ -651,7 +651,7 @@ pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
     tokio::task::spawn_blocking(move || {
         mkdir_mode(&root, 0o755)?;
         // Overmind's own shelves.
-        for name in ["companies", "artifacts", "attachments"] {
+        for name in ["companies", "artifacts", "attachments", "backups"] {
             mkdir_mode(&root.join(name), 0o700)?;
         }
         // Traversable, not listable: these hold the runs.

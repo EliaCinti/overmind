@@ -272,6 +272,12 @@ fn api_router() -> Router<AppState> {
         .route("/claude-auth/start", post(claude_auth_start))
         .route("/claude-auth/code", post(claude_auth_code))
         .route("/economy/pay-with", post(pay_with))
+        // The archive is the instance (ADR-0044): the owner's verb, on a
+        // claimed instance only -- `require_owner` alone would let anyone on
+        // the port of an unclaimed box fill the folder and download it.
+        .route("/backup", post(create_backup))
+        .route("/backups", get(list_backups))
+        .route("/backup/{name}", get(download_backup))
 }
 
 #[derive(serde::Deserialize)]
@@ -482,6 +488,107 @@ async fn pay_with(
         "economy": crate::economy::as_json(&economy),
         "pay_with": crate::economy::pay_with_slug(&state.config),
     })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BackupRequest {
+    #[serde(default)]
+    passphrase: Option<String>,
+}
+
+/// Export, list and download are the owner's, and only once an owner exists:
+/// an unclaimed instance has companies and possibly a sign-in already, and
+/// nobody to answer for handing them out.
+async fn require_claimed_owner(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), ApiError> {
+    let anyone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+    if anyone == 0 {
+        return Err(ApiError::Conflict(
+            "this instance has no owner yet: claim it first, then export".into(),
+        ));
+    }
+    crate::auth::require_owner(state, headers).await
+}
+
+async fn create_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<BackupRequest>>,
+) -> Result<Json<Value>, ApiError> {
+    require_claimed_owner(&state, &headers).await?;
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let report = crate::backup::export(&state, req.passphrase.as_deref())
+        .await
+        .map_err(|e| match e {
+            crate::backup::ExportError::PassphraseRequired => ApiError::Invalid(e.to_string()),
+            other => {
+                // Paths and SQLite's words, never a credential: the export
+                // handles the token only through the seal.
+                eprintln!("backup: export failed: {other}");
+                ApiError::Internal(other.into())
+            }
+        })?;
+    eprintln!(
+        "backup: exported {} ({} bytes, chain {} events{})",
+        report.name,
+        report.bytes,
+        report.chain.events_checked,
+        if report.sealed_token {
+            ", token sealed"
+        } else {
+            ""
+        }
+    );
+    Ok(Json(serde_json::to_value(report)?))
+}
+
+async fn list_backups(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    require_claimed_owner(&state, &headers).await?;
+    let archives = crate::backup::list(&state.config).map_err(|e| ApiError::Internal(e.into()))?;
+    Ok(Json(Value::Array(archives)))
+}
+
+/// Streamed from the folder; `name` must be a bare entry of it -- the first
+/// user-supplied file name this API resolves, so the rule is strict.
+async fn download_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ApiError> {
+    require_claimed_owner(&state, &headers).await?;
+    let listed = crate::backup::list(&state.config)
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .iter()
+        .any(|a| a["name"].as_str() == Some(name.as_str()));
+    if !crate::backup::is_archive_name(&name) || !listed {
+        return Err(ApiError::NotFound("archive"));
+    }
+    let path = crate::backup::backup_dir(&state.config).join(&name);
+    let mut response = tower_http::services::ServeFile::new_with_mime(
+        &path,
+        &"application/gzip"
+            .parse()
+            .map_err(|_| ApiError::NotFound("archive"))?,
+    )
+    .try_call(request)
+    .await
+    .map_err(|_| ApiError::NotFound("archive file"))?
+    .into_response();
+    if let Ok(value) = format!("attachment; filename=\"{name}\"").parse() {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
+    }
+    Ok(response)
 }
 
 async fn memory_status(State(state): State<AppState>) -> Json<Value> {
