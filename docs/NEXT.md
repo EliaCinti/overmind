@@ -24,6 +24,8 @@ Not a development milestone: the owner uses Overmind for real work for a week, d
 **Accept:** M23, M24, M25, M27 marked `done` on the owner's word; a list of frictions, ranked. *29 Aug 2026: M23, M24, M27 (and M29) closed on his word; the frictions are the list above. M25 waits for his word on the shared-company half of the walk.*
 
 ### Backup and restore
+*Opened 29 Aug 2026 as **M31** — [ADR-0044](adr/0044-the-archive-is-the-instance.md); the milestone lives in the roadmap now. The owner's decisions: the token sealed by a passphrase (not in the clear as written below), download and a server folder, all of `/data`, restore on an empty instance only.*
+
 Today's incident, turned into a verb. One API and one button: **export** a company — or the whole instance — as a single archive (the database, every brain, the subscription token, attachments and artifacts), and **restore** it into a fresh instance. The archive is what you keep on another disk; the restore is what makes the image disposable. Plus the documented, tested recovery of a Docker volume gone bad.
 
 - Export is consistent: taken inside a read transaction (SQLite backup API), brains copied after the database, the audit chain verified before the archive is sealed and the verification written into it.

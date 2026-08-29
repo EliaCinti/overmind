@@ -436,6 +436,15 @@ Opened from the owner's own words, reading a relaunch plan the CEO had written f
 - ✅ **`after`**: dependencies as data (`tasks.depends_on`, migration 0031) — the dependent waits, inherits the dependency's artifacts as inputs on completion, and is offered by its agent's autonomy. Chains of any length.
 - ✅ **Digests propose**: an unprompted turn may return `start`, and each lands as a `task_start` approval — never a spend. `tests/the_floor.rs`.
 
+## M31 — Backup and restore `in-progress`
+Opened 29 Aug 2026 from the second friction of the two-machine walk and the first item of *Where 0.1 leaves us*: **the data has no way out.** Designed in [ADR-0044](adr/0044-the-archive-is-the-instance.md) before any code — the owner's four decisions (the token sealed by a passphrase, download *and* a folder on the server, all of `/data`, restore on an empty instance only) are the shape.
+
+- **Slice A — the archive.** `POST /api/backup` (owner only): a `tar.gz` with a manifest first — the audit chain verified and its report written in, a hash per entry, the database and every brain taken with `VACUUM INTO`, the token sealed with argon2id + XChaCha20-Poly1305 under a passphrase the server never keeps. Written to `OVERMIND_BACKUP_DIR` (default `<data>/backups/`), streamed by `GET /api/backup/<name>`, listed by `GET /api/backups`; `backup.exported` on the chain with the actor.
+- **Slice B — the restore.** `POST /api/restore`, accepted only while the instance is unclaimed: unpack to staging, check every hash, verify the chain against the manifest's report, unseal the token if a passphrase was given (a wrong one refuses the token alone), swap into place, `backup.restored` on the restored chain, exit 0 and say so. A claimed instance answers `409` with the way out.
+- **Slice C — the UI and the words.** Export with its passphrase field and the list of archives under the instance settings; *Restore an archive* on the unclaimed landing; the compose comment and the wiki page updated — the raw volume copy stays documented as the last resort.
+- **Slice D — the threat model.** A row for the archive, held by tests that read the archive bytes and find no credential.
+- **Accept:** export on one machine, restore on another (the owner's Mac → a fresh container, or the friend's), the door, the companies, the memories, the artifacts and the chain all intact; the token back with the passphrase and the sign-in asked for without it; a tampered archive refused by name.
+
 ## What comes next
 The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
 
