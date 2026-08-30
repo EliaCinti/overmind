@@ -516,3 +516,77 @@ async fn without_a_token_no_passphrase_is_asked_and_nothing_is_sealed() {
     let manifest: Value = serde_json::from_slice(&entries[0].1).expect("manifest");
     assert!(manifest["token"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// What an agent can put in the way
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_room_an_agent_works_in_stays_out_of_the_archive() {
+    let (app, _state, dir) = setup().await;
+    let cookie = claim(&app).await;
+    // A meeting room is handed to the agent uid for every turn and outlives
+    // the meeting; what the meeting decided is in the database.
+    std::fs::create_dir_all(dir.join("meetings").join("m1")).expect("room");
+    std::fs::write(dir.join("meetings").join("m1").join("notes.md"), b"scratch")
+        .expect("room file");
+
+    let (s, report) = export(&app, &cookie, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{report}");
+    let archive = std::fs::read(
+        dir.join("backups")
+            .join(report["name"].as_str().expect("name")),
+    )
+    .expect("archive");
+    let entries = entries(&archive);
+    assert!(
+        !entries.iter().any(|(p, _)| p.starts_with("meetings/")),
+        "the agent's room rode along: {:?}",
+        entries.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
+    let (app, _state, dir) = setup().await;
+    let cookie = claim(&app).await;
+    // The credential the whole seal exists to keep out of an archive.
+    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    let shelf = dir.join("artifacts").join("s1");
+    std::fs::create_dir_all(&shelf).expect("shelf");
+    std::fs::write(shelf.join("ARTIFACT.md"), b"# a real deliverable\n").expect("artifact");
+    std::os::unix::fs::symlink(dir.join("claude-oauth-token"), shelf.join("notes.md"))
+        .expect("symlink");
+
+    let (s, report) = export(
+        &app,
+        &cookie,
+        json!({ "passphrase": "correct horse battery" }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{report}");
+    let archive = std::fs::read(
+        dir.join("backups")
+            .join(report["name"].as_str().expect("name")),
+    )
+    .expect("archive");
+    let entries = entries(&archive);
+    assert!(
+        !entries.iter().any(|(p, _)| p == "artifacts/s1/notes.md"),
+        "the link was copied"
+    );
+    assert!(
+        entries.iter().any(|(p, _)| p == "artifacts/s1/ARTIFACT.md"),
+        "the real file beside it was not"
+    );
+    let mut all = archive.clone();
+    for (_, bytes) in &entries {
+        all.extend_from_slice(bytes);
+    }
+    assert!(
+        !String::from_utf8_lossy(&all).contains("sk-ant-"),
+        "the token travelled through a symlink"
+    );
+}

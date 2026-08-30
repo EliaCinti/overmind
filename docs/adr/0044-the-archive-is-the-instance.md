@@ -82,8 +82,13 @@ order:
    there is no brain and nothing to take; with another provider the
    directory is copied as files and the manifest says `brain: copied`, not
    `snapshot`.
-4. `attachments/`, `artifacts/`, `meetings/`, `pay-with-plan` — copied as
-   files.
+4. `attachments/`, `artifacts/`, `pay-with-plan` — copied as files, each
+   opened `O_NOFOLLOW`: `read_dir` says what a name *was*, `std::fs::copy`
+   resolves it again, and a privileged copy that follows a link planted in
+   between is how a credential gets into an archive that promises none.
+   Every directory the export writes is `0700` and every file it writes
+   `0600` — the staging tree included, and it lives inside the backup folder
+   rather than beside the run shelves the cage leaves traversable.
 5. `secrets/claude-oauth-token.enc` — the token, **sealed**: key =
    argon2id(passphrase, 16-byte salt; m = 64 MiB, t = 3, p = 1; the numbers
    written here because the door's `Argon2::default()` is not a spec);
@@ -94,9 +99,12 @@ order:
    exists outside the request. An export with a token present **requires** a
    passphrase; without a token none is asked.
 
-Left out, by name: `sessions/`, `chat/`, `worktrees/` (scratch), the
-export/restore staging dirs, and `backups/` (an archive does not contain the
-archives). The agent CLI's own login on the other volume is out by boundary,
+Left out, by name: `sessions/`, `chat/`, `worktrees/`, `meetings/` (scratch —
+and the meeting room in particular is `hand_over`-ed to the agent uid for
+every turn and outlives the meeting, so copying it as the server would be a
+privileged read of an agent-writable tree; what a meeting decided is in
+`meeting_turns`, which rides in the database), the export/restore staging
+dirs, and `backups/` (an archive does not contain the archives). The agent CLI's own login on the other volume is out by boundary,
 and the compose comment says so beside the volume.
 
 ### Export — `POST /api/backup`
@@ -189,6 +197,23 @@ passphrase field and the "restore without the sign-in" choice spelled out.
 - **The agent CLI's own login**: on its own volume, by ADR-0029's boundary.
   The wiki keeps the raw volume copy for it, and for the day the product's
   export is not what you have.
+
+## What the security review changed
+
+The first cut of slice A was reviewed before it merged, and two findings held:
+
+- **The staging tree was left at the umask's mercy** — `0755` under a data dir
+  the cage deliberately keeps traversable, holding a `0644` snapshot of the
+  whole database and every brain for the length of an export. On Docker
+  Desktop, where Landlock is absent and the uid is the only boundary, that
+  handed an agent everything the threat model says it cannot read. Staging
+  moved inside the `0700` backup folder, is created `0700` explicitly, and the
+  snapshots are `0600`.
+- **`meetings/` was in the durable set and copied as the server.** The room is
+  the agent's; `copy_tree` checked with `file_type()` and copied with
+  `std::fs::copy`, which resolves the path again — a link swapped in between
+  would have been followed as root. The room is now scratch, and every copy
+  is `O_NOFOLLOW`.
 
 ## Consequences
 
