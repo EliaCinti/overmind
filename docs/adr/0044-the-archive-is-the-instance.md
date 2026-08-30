@@ -215,6 +215,17 @@ The first cut of slice A was reviewed before it merged, and two findings held:
   would have been followed as root. The room is now scratch, and every copy
   is `O_NOFOLLOW`.
 
+Two more the code review added, before any of this shipped: the assembly —
+every copy, every hash, the KDF and the gzip — runs in `spawn_blocking`, off
+the runtime's workers, because a gigabyte of instance would otherwise hold one
+for minutes while the socket and the scheduler wait; and a passphrase that
+seals a token must be **at least twelve characters**, longer than the door's
+password floor, because this credential is the one that leaves the machine and
+nothing rate-limits an attempt on an archive sitting on somebody's disk. A
+`OVERMIND_BACKUP_DIR` that holds the data directory is refused rather than
+obeyed: forcing it `0700` would take away the path a caged agent walks to its
+own run.
+
 ## Consequences
 
 - Three new dependencies, named because the rulebook asks: `tar`, `flate2`

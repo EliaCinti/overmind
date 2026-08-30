@@ -189,7 +189,7 @@ async fn once_claimed_the_export_is_the_owners_alone() {
 async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() {
     let (app, state, dir) = setup().await;
     let cookie = claim(&app).await;
-    let company = found(&app, &cookie, "Casa San Vito").await;
+    let _company = found(&app, &cookie, "Casa San Vito").await;
     std::fs::create_dir_all(dir.join("artifacts").join("s1")).expect("artifacts dir");
     std::fs::write(
         dir.join("artifacts").join("s1").join("ARTIFACT.md"),
@@ -284,13 +284,17 @@ async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() 
     assert_eq!(payload["actor"], owner_id);
     assert_eq!(payload["name"], name);
     assert_eq!(payload["chain"]["events_checked"], chain.events_checked);
-    let _ = company;
 
-    // The staging directory did not outlive the export.
-    let leftovers: Vec<_> = std::fs::read_dir(&dir)
-        .expect("data dir")
+    // The staging tree did not outlive the export -- and it is staged inside
+    // the backup folder, which is where a leak would be found. (Written the
+    // way it is because the first version of this assertion looked for
+    // `export-` under the data dir, where staging has not lived since the
+    // security review, and could never have failed.)
+    let leftovers: Vec<String> = std::fs::read_dir(dir.join("backups"))
+        .expect("backup folder")
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().starts_with("export-"))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with(".staging-"))
         .collect();
     assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
 }
@@ -559,6 +563,9 @@ async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
     std::fs::write(shelf.join("ARTIFACT.md"), b"# a real deliverable\n").expect("artifact");
     std::os::unix::fs::symlink(dir.join("claude-oauth-token"), shelf.join("notes.md"))
         .expect("symlink");
+    // The who-pays marker was the one entry still copied by name.
+    std::os::unix::fs::symlink(dir.join("claude-oauth-token"), dir.join("pay-with-plan"))
+        .expect("marker symlink");
 
     let (s, report) = export(
         &app,
@@ -578,6 +585,10 @@ async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
         "the link was copied"
     );
     assert!(
+        !entries.iter().any(|(p, _)| p == "pay-with-plan"),
+        "the marker was read through a link"
+    );
+    assert!(
         entries.iter().any(|(p, _)| p == "artifacts/s1/ARTIFACT.md"),
         "the real file beside it was not"
     );
@@ -588,5 +599,64 @@ async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
     assert!(
         !String::from_utf8_lossy(&all).contains("sk-ant-"),
         "the token travelled through a symlink"
+    );
+}
+
+#[tokio::test]
+async fn a_passphrase_that_leaves_the_machine_has_a_floor() {
+    let (app, _state, dir) = setup().await;
+    let cookie = claim(&app).await;
+    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    // The door refuses under eight characters for a password that never
+    // leaves the box; this one is carried away on a disk, where nothing
+    // rate-limits an attempt on it.
+    let (s, v) = export(&app, &cookie, json!({ "passphrase": "short" })).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or("").contains("characters"),
+        "says what is wrong with it: {v}"
+    );
+    let written = std::fs::read_dir(dir.join("backups"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(written, 0, "an archive was written anyway");
+    let (s, _) = export(&app, &cookie, json!({ "passphrase": "twelve chars" })).await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_backup_folder_that_holds_the_data_dir_is_refused() {
+    // `OVERMIND_BACKUP_DIR=/data` is a reasonable thing to type: the folder
+    // would be forced 0700, and the data dir is 0755 precisely so a caged
+    // agent can walk through it to its own run.
+    let data_dir =
+        std::env::temp_dir().join(format!("overmind-backup-{}", uuid::Uuid::now_v7().simple()));
+    std::fs::create_dir_all(&data_dir).expect("data dir");
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        data_dir.join("overmind.sqlite").display()
+    );
+    let state = overmind_server::init_with(
+        &db_url,
+        overmind_server::Config {
+            data_dir: data_dir.clone(),
+            backup_dir: Some(data_dir.clone()),
+            agent_cmd: Some("/usr/bin/true".into()),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init");
+    let app = overmind_server::app(state);
+    let cookie = claim(&app).await;
+
+    let (s, v) = export(&app, &cookie, json!({})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("OVERMIND_BACKUP_DIR"),
+        "names the setting to change: {v}"
     );
 }

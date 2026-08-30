@@ -46,6 +46,10 @@ const KDF_M_KIB: u32 = 64 * 1024;
 const KDF_T: u32 = 3;
 const KDF_P: u32 = 1;
 
+/// The shortest passphrase that may seal a token. Longer than the door's
+/// password floor because the archive is the thing that travels.
+const MIN_PASSPHRASE_CHARS: usize = 12;
+
 /// The chain report of the *snapshot* — computed by opening the `VACUUM INTO`
 /// output, not the live pool, which keeps writing while the export runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +111,13 @@ pub enum ExportError {
          or remove the sign-in first"
     )]
     PassphraseRequired,
+    #[error(
+        "a passphrase that seals an archive should be at least {MIN_PASSPHRASE_CHARS} characters: \
+         the archive leaves this machine, and nothing rate-limits an attempt on it"
+    )]
+    PassphraseTooShort,
+    #[error("{0}")]
+    Config(String),
     #[error("the archive could not be written: {0}")]
     Io(#[from] std::io::Error),
     #[error("the snapshot could not be taken: {0}")]
@@ -147,8 +158,26 @@ pub async fn export(
     if token.is_some() && passphrase.is_none() {
         return Err(ExportError::PassphraseRequired);
     }
+    if let Some(p) = passphrase {
+        // The door refuses a password under eight characters, and that
+        // credential never leaves the box. This one does: an archive on
+        // somebody's disk can be attacked for as long as they like, with no
+        // rate limiter in the way. Count characters, not bytes.
+        if p.chars().count() < MIN_PASSPHRASE_CHARS {
+            return Err(ExportError::PassphraseTooShort);
+        }
+    }
 
     let folder = backup_dir(&config);
+    if config.data_dir.starts_with(&folder) {
+        // `OVERMIND_BACKUP_DIR=/data` is a reasonable thing to type and a
+        // disaster to obey: the folder is forced 0700, and the data dir is
+        // 0755 precisely so a caged agent can walk through it to its own run.
+        return Err(ExportError::Config(format!(
+            "OVERMIND_BACKUP_DIR ({}) holds the data directory: choose a folder of its own",
+            folder.display()
+        )));
+    }
     private_dir(&folder)?;
 
     // Staged INSIDE the backup folder, and private itself. Under the data dir
@@ -174,6 +203,17 @@ pub async fn export(
     let _ = std::fs::remove_dir_all(&staging);
     let report = outcome?;
 
+    // "Every export is on the chain": an archive whose event could not be
+    // written is an archive that never existed.
+    let audited = audit_the_export(state, &report).await;
+    if let Err(e) = audited {
+        let _ = std::fs::remove_file(folder.join(&report.name));
+        return Err(e);
+    }
+    Ok(report)
+}
+
+async fn audit_the_export(state: &AppState, report: &ExportReport) -> Result<(), ExportError> {
     let mut conn = state
         .pool
         .acquire()
@@ -194,7 +234,7 @@ pub async fn export(
     )
     .await
     .map_err(|e| ExportError::Db(format!("audit: {e}")))?;
-    Ok(report)
+    Ok(())
 }
 
 async fn build(
@@ -212,23 +252,28 @@ async fn build(
     vacuum_into(&state.pool, &snapshot)
         .await
         .map_err(|e| ExportError::Db(format!("VACUUM INTO {}: {e}", snapshot.display())))?;
-    keep_private(&snapshot)?;
     if !snapshot.is_file() {
+        // Said before anything touches the file: sqlx's in-memory database
+        // answers `VACUUM INTO` with success and no file, and "No such file"
+        // from a chmod is not an explanation.
         return Err(ExportError::Db(format!(
             "VACUUM INTO {} produced no file",
             snapshot.display()
         )));
     }
+    keep_private(&snapshot)?;
     let chain = scrub_and_report(&snapshot)
         .await
         .map_err(|e| ExportError::Db(format!("reading the snapshot back: {e}")))?;
 
-    // 2. Every company's brain, the same way.
+    // 2. Every company's brain the same way. The snapshot is SQLite's work;
+    //    the rest of the directory is copied with everything else, below.
     let companies: Vec<(String,)> = sqlx::query_as("SELECT id FROM companies")
         .fetch_all(&state.pool)
         .await
         .map_err(|e| ExportError::Db(format!("listing companies: {e}")))?;
     let mut brain_mode = "none";
+    let mut brains = Vec::new();
     for (company_id,) in &companies {
         let brain = state.brain_dir(company_id);
         if !brain.is_dir() {
@@ -237,7 +282,15 @@ async fn build(
         let dest = staging.join("companies").join(company_id).join("brain");
         private_dir(&dest)?;
         let db = brain.join(BRAIN_DB);
-        if db.is_file() {
+        // `symlink_metadata`, not `is_file`: a `brain.db` that is a link
+        // pointing at another company's brain — or at the live database —
+        // would be read through by SQLite as the server. The copy below
+        // refuses links; so does this.
+        let is_a_database = db
+            .symlink_metadata()
+            .map(|m| m.file_type().is_file())
+            .unwrap_or(false);
+        if is_a_database {
             snapshot_brain(&db, &dest.join(BRAIN_DB))
                 .await
                 .map_err(|e| ExportError::Db(format!("brain of {company_id}: {e}")))?;
@@ -248,7 +301,62 @@ async fn build(
         } else {
             brain_mode = "copied";
         }
-        copy_tree(&brain, &dest, &|name| {
+        brains.push((brain, dest));
+    }
+
+    // 3-5. The rest is files, hashes and compression: blocking work, and a
+    //      1 GB instance would hold a runtime worker for minutes — with the
+    //      socket, the board and the scheduler waiting behind it.
+    let job = Assembly {
+        staging: staging.to_path_buf(),
+        folder: folder.to_path_buf(),
+        data_dir: config.data_dir.clone(),
+        marker: crate::economy::plan_marker(config),
+        brains,
+        brain_mode,
+        token: token.map(str::to_string),
+        passphrase: passphrase.map(str::to_string),
+        chain,
+        created_at,
+    };
+    tokio::task::spawn_blocking(move || assemble(job))
+        .await
+        .map_err(|e| ExportError::Io(std::io::Error::other(e)))?
+}
+
+/// Everything the export does with files, in one place so it can be done off
+/// the runtime.
+struct Assembly {
+    staging: PathBuf,
+    folder: PathBuf,
+    data_dir: PathBuf,
+    marker: PathBuf,
+    /// `(source brain directory, its place in the staging tree)`.
+    brains: Vec<(PathBuf, PathBuf)>,
+    brain_mode: &'static str,
+    token: Option<String>,
+    passphrase: Option<String>,
+    chain: ChainSummary,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn assemble(job: Assembly) -> Result<ExportReport, ExportError> {
+    let Assembly {
+        staging,
+        folder,
+        data_dir,
+        marker,
+        brains,
+        brain_mode,
+        token,
+        passphrase,
+        chain,
+        created_at,
+    } = job;
+
+    // The brains' own files, beside the snapshot already taken.
+    for (brain, dest) in &brains {
+        copy_tree(brain, dest, &|name| {
             !(name == BRAIN_DB
                 || name == "brain.db-wal"
                 || name == "brain.db-shm"
@@ -256,27 +364,33 @@ async fn build(
         })?;
     }
 
-    // 3. Files, as files. `meetings/` is not among them: the room is handed to
+    // Files, as files. `meetings/` is not among them: the room is handed to
     // the agent uid for every turn (`hand_over`) and outlives the meeting, so
     // copying it as the server would be a privileged read of an
     // agent-writable tree — and what a meeting decided is in `meeting_turns`,
     // which rides in the database.
     for name in ["attachments", "artifacts"] {
-        let src = config.data_dir.join(name);
+        let src = data_dir.join(name);
         if src.is_dir() {
             copy_tree(&src, &staging.join(name), &|_| true)?;
         }
     }
-    let marker = crate::economy::plan_marker(config);
-    if marker.is_file() {
-        std::fs::copy(&marker, staging.join("pay-with-plan"))?;
+    // The marker gets the same treatment as everything else: a link in its
+    // place would otherwise be read through, as `pay-with-plan`, by the
+    // server.
+    if marker
+        .symlink_metadata()
+        .map(|m| m.file_type().is_file())
+        .unwrap_or(false)
+    {
+        copy_file_nofollow(&marker, &staging.join("pay-with-plan"))?;
     }
 
-    // 4. The token, sealed — never in the clear.
+    // The token, sealed — never in the clear.
     let scope = SCOPE_INSTANCE.to_string();
     let created_at_text = created_at.to_rfc3339();
     let mut seal = None;
-    if let (Some(token), Some(passphrase)) = (token, passphrase) {
+    if let (Some(token), Some(passphrase)) = (&token, &passphrase) {
         let aad = associated_data(FORMAT, &scope, &created_at_text);
         let (params, sealed) = seal_token(token, passphrase, aad.as_bytes())?;
         let path = staging.join(TOKEN_ENTRY);
@@ -288,11 +402,11 @@ async fn build(
         seal = Some(params);
     }
 
-    // 5. Hash everything, write the manifest, then the archive.
+    // Hash everything, write the manifest, then the archive.
     let mut entries = BTreeMap::new();
-    for rel in list_files(staging)? {
-        let bytes = std::fs::read(staging.join(&rel))?;
-        entries.insert(rel, hex::encode(Sha256::digest(&bytes)));
+    for rel in list_files(&staging)? {
+        let hash = hash_file(&staging.join(&rel))?;
+        entries.insert(rel, hash);
     }
     let manifest = Manifest {
         format: FORMAT,
@@ -304,14 +418,12 @@ async fn build(
         entries: entries.clone(),
         token: seal.clone(),
     };
-    std::fs::write(
-        staging.join(MANIFEST_ENTRY),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
+    let manifest_path = staging.join(MANIFEST_ENTRY);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    keep_private(&manifest_path)?;
 
-    let name = archive_name(folder, &scope, &created_at);
-    let path = folder.join(&name);
-    let bytes = write_archive(staging, &path, entries.keys())?;
+    let (name, file) = reserve_archive(&folder, &scope, &created_at)?;
+    let bytes = write_archive(&staging, file, entries.keys())?;
 
     Ok(ExportReport {
         name,
@@ -320,6 +432,16 @@ async fn build(
         chain,
         sealed_token: seal.is_some(),
     })
+}
+
+/// A file's SHA-256, read through rather than into memory: the staged
+/// snapshot is the size of the whole database, and an attachment is whatever
+/// somebody uploaded.
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// `VACUUM INTO` the live database. The path is quoted for SQL; SQLite has
@@ -439,7 +561,11 @@ fn copy_file_nofollow(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut source = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // `O_NOFOLLOW` for the link a writable directory can swap in;
+        // `O_NONBLOCK` for the fifo it can swap in instead, which would
+        // otherwise block the open forever waiting for a writer. Neither
+        // changes anything about reading an ordinary file.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(from)
     {
         Ok(file) => file,
@@ -500,26 +626,41 @@ fn list_files(root: &Path) -> std::io::Result<Vec<String>> {
     Ok(out)
 }
 
-fn archive_name(folder: &Path, scope: &str, at: &chrono::DateTime<chrono::Utc>) -> String {
+/// Pick a free name and *take* it in the same breath: `create_new` is the
+/// reservation. Two exports started in the same second would otherwise both
+/// find the name free, and the second would lose its whole archive to
+/// `AlreadyExists` at the last step.
+fn reserve_archive(
+    folder: &Path,
+    scope: &str,
+    at: &chrono::DateTime<chrono::Utc>,
+) -> std::io::Result<(String, std::fs::File)> {
     let stamp = at.format("%Y%m%dT%H%M%SZ");
     let base = format!("overmind-{scope}-{stamp}");
-    let mut name = format!("{base}.tar.gz");
-    let mut n = 2;
-    while folder.join(&name).exists() {
-        name = format!("{base}-{n}.tar.gz");
-        n += 1;
+    for n in 1..1_000 {
+        let name = if n == 1 {
+            format!("{base}.tar.gz")
+        } else {
+            format!("{base}-{n}.tar.gz")
+        };
+        match open_private(&folder.join(&name)) {
+            Ok(file) => return Ok((name, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    name
+    Err(std::io::Error::other(
+        "a thousand archives share this second's name",
+    ))
 }
 
-/// Write the archive: the manifest first, then every entry in manifest
-/// order. The file is the server's alone (`0600`).
+/// Write the archive into the file `reserve_archive` took: the manifest
+/// first, then every entry in manifest order.
 fn write_archive<'a>(
     staging: &Path,
-    path: &Path,
+    file: std::fs::File,
     entries: impl Iterator<Item = &'a String>,
 ) -> Result<u64, ExportError> {
-    let file = open_private(path)?;
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
     tar.append_path_with_name(staging.join(MANIFEST_ENTRY), MANIFEST_ENTRY)?;
@@ -530,6 +671,21 @@ fn write_archive<'a>(
     let mut file = gz.finish()?;
     file.flush()?;
     Ok(file.metadata()?.len())
+}
+
+/// A directory the server alone can enter, whatever the umask says.
+///
+/// `create_dir_all` takes the umask's word for it — 0755 in the image, whose
+/// server is root — and the export writes a copy of every company's database
+/// and brain into this tree.
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    crate::sandbox::mkdir_mode(path, 0o700)
+}
+
+/// A file the server alone can read. SQLite writes `VACUUM INTO` output 0644,
+/// which is why the live database has needed `keep_to_server` since ADR-0029.
+fn keep_private(path: &Path) -> std::io::Result<()> {
+    crate::sandbox::set_mode(path, 0o600)
 }
 
 #[cfg(unix)]
@@ -548,33 +704,6 @@ fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create_new(true)
         .open(path)
-}
-
-/// A directory the server alone can enter, whatever the umask says.
-///
-/// `create_dir_all` takes the umask's word for it — 0755 in the image, whose
-/// server is root — and the export writes a copy of every company's database
-/// and brain into this tree.
-fn private_dir(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)?;
-    set_mode(path, 0o700)
-}
-
-/// A file the server alone can read. SQLite writes `VACUUM INTO` output 0644,
-/// which is why the live database has needed `keep_to_server` since ADR-0029.
-fn keep_private(path: &Path) -> std::io::Result<()> {
-    set_mode(path, 0o600)
-}
-
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
