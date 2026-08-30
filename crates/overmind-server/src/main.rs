@@ -10,7 +10,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let db_url =
         std::env::var("OVERMIND_DB").unwrap_or_else(|_| "sqlite://overmind.sqlite".to_string());
+    // A restore staged before the last stop is swapped in here, before
+    // anything opens the database (ADR-0044).
+    let config = overmind_server::Config::from_env();
+    let restored = overmind_server::backup::swap_pending(&config, &db_url)?;
+
     let state = overmind_server::init(&db_url).await?;
+    if let Some(record) = &restored {
+        // Written onto the chain it restored, as a system event.
+        if let Err(e) = overmind_server::backup::note_restored(&state, record).await {
+            eprintln!("restore: the restore could not be written to the audit chain: {e}");
+        }
+    }
     let _heartbeat = overmind_server::scheduler::spawn(state.clone());
 
     let addr: SocketAddr = std::env::var("OVERMIND_ADDR")
@@ -40,6 +51,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "agent confinement: {}",
         overmind_server::sandbox::announce(&state.config)
     );
-    axum::serve(listener, overmind_server::app(state)).await?;
+    let mut asked_to_restart = state.restart.subscribe();
+    axum::serve(listener, overmind_server::app(state))
+        .with_graceful_shutdown(async move {
+            let _ = asked_to_restart.recv().await;
+        })
+        .await?;
+    // The only thing that ends the wait is a staged restore. Say so, and
+    // leave: the image's restart policy brings the server back on the
+    // restored data, and natively the person starts it again.
+    println!(
+        "overmind-server: a restore is staged — stopping, so the next start swaps it in \
+         (restart the container, or run the server again)"
+    );
     Ok(())
 }

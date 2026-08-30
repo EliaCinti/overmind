@@ -278,6 +278,14 @@ fn api_router() -> Router<AppState> {
         .route("/backup", post(create_backup))
         .route("/backups", get(list_backups))
         .route("/backup/{name}", get(download_backup))
+        // The archive is bigger than any upload the rest of the API takes,
+        // and it is streamed to disk rather than held: the router's 128 MB
+        // limit is lifted for this one route (ADR-0044). It answers on an
+        // *empty* instance only -- see `what_makes_the_instance_full`.
+        .route(
+            "/restore",
+            post(restore_instance).layer(axum::extract::DefaultBodyLimit::disable()),
+        )
 }
 
 #[derive(serde::Deserialize)]
@@ -593,6 +601,113 @@ async fn download_backup(
             .insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
+}
+
+/// Take an archive, check it, stage it, and ask to be restarted.
+///
+/// No credential guards this one: an instance with no owner, no company and
+/// no sign-in is open by design (ADR-0032) -- whoever can reach the port can
+/// claim it, and a restore is a claim with a payload. The moment any of the
+/// three exists, it answers 409 instead.
+async fn restore_instance(
+    State(state): State<AppState>,
+    mut form: Multipart,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(reason) = crate::backup::what_makes_the_instance_full(&state).await {
+        return Err(ApiError::Conflict(
+            crate::backup::RestoreError::NotEmpty(reason).to_string(),
+        ));
+    }
+    let upload = state
+        .config
+        .data_dir
+        .join(format!("upload-{}.tar.gz", new_id()));
+    let mut passphrase: Option<String> = None;
+    let mut skip_token = false;
+    let mut arrived = false;
+
+    let taken = take_upload(
+        &mut form,
+        &upload,
+        &mut passphrase,
+        &mut skip_token,
+        &mut arrived,
+    )
+    .await;
+    if let Err(e) = taken {
+        let _ = tokio::fs::remove_file(&upload).await;
+        return Err(e);
+    }
+    if !arrived {
+        let _ = tokio::fs::remove_file(&upload).await;
+        return Err(ApiError::Invalid(
+            "no archive came with the request: send the `.tar.gz` as the `archive` field".into(),
+        ));
+    }
+
+    let outcome = crate::backup::restore(&state, &upload, passphrase.as_deref(), skip_token).await;
+    let _ = tokio::fs::remove_file(&upload).await;
+    let report = outcome.map_err(|e| match e {
+        crate::backup::RestoreError::NotEmpty(_) => ApiError::Conflict(e.to_string()),
+        crate::backup::RestoreError::Refused(_) => ApiError::Invalid(e.to_string()),
+        other => {
+            eprintln!("restore: {other}");
+            ApiError::Internal(other.into())
+        }
+    })?;
+
+    // The swap happens at the next boot; ask for one. In the image the
+    // restart policy is the supervisor; natively the person starts it again,
+    // and the answer says so.
+    let _ = state.restart.send(());
+    Ok(Json(serde_json::to_value(report)?))
+}
+
+/// Read the multipart form, streaming the archive to disk rather than into
+/// memory: this upload is the size of somebody's whole instance.
+async fn take_upload(
+    form: &mut Multipart,
+    upload: &std::path::Path,
+    passphrase: &mut Option<String>,
+    skip_token: &mut bool,
+    arrived: &mut bool,
+) -> Result<(), ApiError> {
+    use tokio::io::AsyncWriteExt;
+    while let Some(mut field) = form
+        .next_field()
+        .await
+        .map_err(|e| ApiError::Invalid(format!("the upload could not be read: {e}")))?
+    {
+        match field.name().unwrap_or_default() {
+            "passphrase" => {
+                *passphrase = field.text().await.ok().filter(|t| !t.trim().is_empty());
+            }
+            "skip_token" => {
+                let said = field.text().await.unwrap_or_default();
+                *skip_token = matches!(said.trim(), "true" | "1" | "on" | "yes");
+            }
+            "archive" => {
+                let mut file = tokio::fs::File::create(upload)
+                    .await
+                    .map_err(|e| ApiError::Internal(e.into()))?;
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|e| ApiError::Invalid(format!("the archive stopped arriving: {e}")))?
+                {
+                    file.write_all(&chunk)
+                        .await
+                        .map_err(|e| ApiError::Internal(e.into()))?;
+                }
+                file.flush()
+                    .await
+                    .map_err(|e| ApiError::Internal(e.into()))?;
+                *arrived = true;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 async fn memory_status(State(state): State<AppState>) -> Json<Value> {
