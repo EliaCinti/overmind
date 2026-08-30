@@ -20,7 +20,7 @@
 //! snapshots `0600`, and no copy ever follows a symlink.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,10 @@ const DB_ENTRY: &str = "overmind.sqlite";
 const MANIFEST_ENTRY: &str = "MANIFEST.json";
 const TOKEN_ENTRY: &str = "secrets/claude-oauth-token.enc";
 const BRAIN_DB: &str = "brain.db";
+const TOKEN_FILE: &str = "claude-oauth-token";
+const MARKER_FILE: &str = "pay-with-plan";
+/// What a staged restore leaves for the next boot to find.
+const RESTORE_PENDING: &str = "restore-pending";
 
 /// argon2id parameters for the sealed token, written down because the door's
 /// `Argon2::default()` is not a spec: 64 MiB, three passes, one lane.
@@ -910,5 +914,517 @@ mod tests {
             .expect("skipped, not an error");
         assert!(!dest.join("smuggled.md").exists(), "the link was followed");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The restore
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreError {
+    #[error(
+        "this instance is not empty — {0}. A restore is a claim with a payload, and it lands on \
+         an empty instance only: stop the server, empty its data, start it again, then restore"
+    )]
+    NotEmpty(String),
+    /// The archive itself is the problem, and the sentence says how.
+    #[error("{0}")]
+    Refused(String),
+    #[error("the archive could not be read: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RestoreReport {
+    pub scope: String,
+    pub entries: usize,
+    /// `restored`, `skipped` (asked for), or `none` (the archive had none).
+    pub token: &'static str,
+    pub chain: ChainSummary,
+    /// Always true: the swap is the next boot's work, never a live pool's.
+    pub restarting: bool,
+}
+
+/// What stops a restore, in the words the refusal will use — or `None` when
+/// the instance is the empty one a fresh `docker compose up` leaves you with.
+pub async fn what_makes_the_instance_full(state: &AppState) -> Option<String> {
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(1);
+    if users > 0 {
+        return Some("an owner has already claimed it".into());
+    }
+    let companies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM companies")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(1);
+    if companies > 0 {
+        return Some("it already holds companies".into());
+    }
+    if crate::claude_auth::stored_token(&state.config).is_some() {
+        return Some("a subscription is signed in on it".into());
+    }
+    None
+}
+
+/// Check an archive and stage it. Nothing of the live instance is touched:
+/// what this leaves behind is a staging tree and a marker, and the swap
+/// happens at the next boot, before anything opens the database.
+pub async fn restore(
+    state: &AppState,
+    archive: &Path,
+    passphrase: Option<&str>,
+    skip_token: bool,
+) -> Result<RestoreReport, RestoreError> {
+    if let Some(reason) = what_makes_the_instance_full(state).await {
+        return Err(RestoreError::NotEmpty(reason));
+    }
+    let staging = state
+        .config
+        .data_dir
+        .join(format!("restore-{}", uuid::Uuid::now_v7().simple()));
+    private_dir(&staging)?;
+
+    let outcome = stage(state, archive, &staging, passphrase, skip_token).await;
+    match outcome {
+        Ok(report) => Ok(report),
+        Err(e) => {
+            // A refusal leaves nothing behind — the next attempt must find the
+            // instance as empty as this one did.
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(e)
+        }
+    }
+}
+
+async fn stage(
+    state: &AppState,
+    archive: &Path,
+    staging: &Path,
+    passphrase: Option<&str>,
+    skip_token: bool,
+) -> Result<RestoreReport, RestoreError> {
+    let archive = archive.to_path_buf();
+    let staging_owned = staging.to_path_buf();
+    let manifest = tokio::task::spawn_blocking(move || unpack_checked(&archive, &staging_owned))
+        .await
+        .map_err(|e| RestoreError::Io(std::io::Error::other(e)))??;
+
+    // The chain, on the database that actually arrived.
+    let snapshot = staging.join(DB_ENTRY);
+    if !snapshot.is_file() {
+        return Err(RestoreError::Refused(
+            "the archive carries no database: there is nothing to restore".into(),
+        ));
+    }
+    let chain = chain_of(&snapshot).await.map_err(|e| {
+        RestoreError::Refused(format!(
+            "the archive's audit chain could not be read, so it is not restored: {e}"
+        ))
+    })?;
+    if !chain.valid {
+        return Err(RestoreError::Refused(format!(
+            "the archive's audit chain does not verify (first bad event: {}), so it is not \
+             restored — a chain that does not hold is not this instance's history",
+            chain
+                .first_invalid_seq
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".into())
+        )));
+    }
+    if chain.events_checked != manifest.chain.events_checked
+        || chain.last_hash != manifest.chain.last_hash
+        || chain.last_seq != manifest.chain.last_seq
+    {
+        return Err(RestoreError::Refused(format!(
+            "the archive's audit chain is not the one its manifest describes ({} events ending \
+             at {:?}, against {} ending at {:?})",
+            chain.events_checked,
+            chain.last_hash,
+            manifest.chain.events_checked,
+            manifest.chain.last_hash
+        )));
+    }
+
+    // The sign-in: opened here, where a retry is still free, or refused whole.
+    let sealed_path = staging.join(TOKEN_ENTRY);
+    let token = match (&manifest.token, skip_token) {
+        (None, _) => "none",
+        (Some(_), true) => {
+            let _ = std::fs::remove_file(&sealed_path);
+            // A marker that says the plan pays, with nothing that pays, would
+            // leave every agent command without a credential and the health
+            // card claiming otherwise.
+            let _ = std::fs::remove_file(staging.join(MARKER_FILE));
+            "skipped"
+        }
+        (Some(_), false) => {
+            let Some(passphrase) = passphrase.map(str::trim).filter(|p| !p.is_empty()) else {
+                return Err(RestoreError::Refused(
+                    "this archive carries a sealed sign-in: give the passphrase it was exported \
+                     with, or ask to restore without it — the sign-in is then yours to redo"
+                        .into(),
+                ));
+            };
+            let sealed = std::fs::read(&sealed_path)?;
+            let as_value = serde_json::to_value(&manifest)
+                .map_err(|e| RestoreError::Refused(format!("the manifest is unreadable: {e}")))?;
+            let opened = unseal(&as_value, &sealed, passphrase).map_err(|_| {
+                RestoreError::Refused(
+                    "the passphrase does not open this archive's sign-in, so nothing was \
+                     restored — try again, or restore without the sign-in"
+                        .into(),
+                )
+            })?;
+            let path = staging.join(TOKEN_FILE);
+            std::fs::write(&path, opened)?;
+            keep_private(&path)?;
+            let _ = std::fs::remove_file(&sealed_path);
+            let _ = std::fs::remove_dir(staging.join("secrets"));
+            "restored"
+        }
+    };
+
+    // Nothing has moved. What is left is a tree and a note for the next boot.
+    let record = json!({
+        "staging": staging.to_string_lossy(),
+        "scope": manifest.scope,
+        "entries": manifest.entries.len(),
+        "created_at": manifest.created_at,
+        "overmind_version": manifest.overmind_version,
+        "token": token,
+    });
+    let marker = state.config.data_dir.join(RESTORE_PENDING);
+    std::fs::write(&marker, serde_json::to_vec_pretty(&record)?)?;
+    keep_private(&marker)?;
+    eprintln!(
+        "restore: staged {} entries from an archive of {} — stopping so the next start can swap \
+         it in",
+        manifest.entries.len(),
+        manifest.created_at
+    );
+
+    Ok(RestoreReport {
+        scope: manifest.scope,
+        entries: manifest.entries.len(),
+        token,
+        chain,
+        restarting: true,
+    })
+}
+
+impl From<serde_json::Error> for RestoreError {
+    fn from(e: serde_json::Error) -> Self {
+        RestoreError::Refused(format!("the archive's manifest is not readable: {e}"))
+    }
+}
+
+/// Unpack, refusing anything the manifest does not vouch for: an entry that
+/// is not a plain file, a path that climbs out of the tree, a name nobody
+/// named, a hash that does not match, a name the manifest names and the
+/// archive does not carry.
+fn unpack_checked(archive: &Path, staging: &Path) -> Result<Manifest, RestoreError> {
+    let file = std::fs::File::open(archive)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut tar = tar::Archive::new(gz);
+    let mut manifest: Option<Manifest> = None;
+    let mut seen: Vec<String> = Vec::new();
+
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        if entry.header().entry_type() != tar::EntryType::Regular {
+            return Err(RestoreError::Refused(
+                "the archive carries something that is not a plain file (a link, a device); an \
+                 archive of ours carries files and nothing else"
+                    .into(),
+            ));
+        }
+        let path = entry.path()?.into_owned();
+        let name = entry_name(&path)?;
+
+        if name == MANIFEST_ENTRY {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            let parsed: Manifest = serde_json::from_slice(&bytes)?;
+            if parsed.format != FORMAT {
+                return Err(RestoreError::Refused(format!(
+                    "this archive is format {}, and this server reads format {FORMAT}",
+                    parsed.format
+                )));
+            }
+            if is_newer(&parsed.overmind_version, env!("CARGO_PKG_VERSION")) {
+                return Err(RestoreError::Refused(format!(
+                    "this archive was written by Overmind {}, and this server is {} — a newer \
+                     archive's database would fail its migrations and the server would come up \
+                     and die, over and over. Update first, then restore",
+                    parsed.overmind_version,
+                    env!("CARGO_PKG_VERSION")
+                )));
+            }
+            manifest = Some(parsed);
+            continue;
+        }
+
+        let Some(known) = manifest.as_ref() else {
+            return Err(RestoreError::Refused(
+                "the archive does not open with its manifest, so nothing in it can be checked"
+                    .into(),
+            ));
+        };
+        let Some(expected) = known.entries.get(&name) else {
+            return Err(RestoreError::Refused(format!(
+                "{name} is in the archive and not in its manifest: nobody vouched for it"
+            )));
+        };
+
+        let dest = staging.join(&name);
+        if let Some(parent) = dest.parent() {
+            private_dir(parent)?;
+        }
+        let mut out = open_private(&dest)?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let read = entry.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            out.write_all(&buf[..read])?;
+            hasher.update(&buf[..read]);
+        }
+        out.flush()?;
+        let got = hex::encode(hasher.finalize());
+        if &got != expected {
+            return Err(RestoreError::Refused(format!(
+                "{name} is not what the manifest says it is — the archive has been changed since \
+                 it was written"
+            )));
+        }
+        seen.push(name);
+    }
+
+    let Some(manifest) = manifest else {
+        return Err(RestoreError::Refused(
+            "the archive has no manifest: it is not one of ours".into(),
+        ));
+    };
+    for name in manifest.entries.keys() {
+        if !seen.iter().any(|s| s == name) {
+            return Err(RestoreError::Refused(format!(
+                "{name} is named in the manifest and missing from the archive"
+            )));
+        }
+    }
+    Ok(manifest)
+}
+
+/// An entry's name, or a refusal. Relative, no `..`, no root, no prefix —
+/// the archive names where it will be written, and it does not get to name
+/// anywhere else.
+fn entry_name(path: &Path) -> Result<String, RestoreError> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let part = part.to_string_lossy();
+                if part.is_empty() {
+                    return Err(RestoreError::Refused(
+                        "the archive names an empty path".into(),
+                    ));
+                }
+                parts.push(part.to_string());
+            }
+            _ => {
+                return Err(RestoreError::Refused(format!(
+                    "the archive names {}, which points outside itself",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(RestoreError::Refused("the archive names nothing".into()));
+    }
+    Ok(parts.join("/"))
+}
+
+/// Is `a` a later version than `b`? Compared piece by piece; anything that
+/// does not parse is treated as not newer, because refusing to restore over
+/// an unreadable version string helps nobody.
+fn is_newer(a: &str, b: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.split(['.', '-', '+'])
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (a, b) = (parts(a), parts(b));
+    for i in 0..a.len().max(b.len()) {
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// Verify the chain of a database that is not ours yet: read-only, so
+/// nothing is written into an archive's file before it is accepted.
+async fn chain_of(snapshot: &Path) -> Result<ChainSummary, sqlx::Error> {
+    let options = SqliteConnectOptions::new()
+        .filename(snapshot)
+        .read_only(true)
+        .foreign_keys(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let report = crate::audit::verify(&pool).await?;
+    let head: Option<(i64, String)> =
+        sqlx::query_as("SELECT seq, hash FROM audit_events ORDER BY seq DESC LIMIT 1")
+            .fetch_optional(&pool)
+            .await?;
+    pool.close().await;
+    let (last_seq, last_hash) = match head {
+        Some((s, h)) => (Some(s), Some(h)),
+        None => (None, None),
+    };
+    Ok(ChainSummary {
+        valid: report.valid,
+        events_checked: report.events_checked,
+        first_invalid_seq: report.first_invalid_seq,
+        last_seq,
+        last_hash,
+    })
+}
+
+/// The boot half of a restore: swap the staged tree into place **before**
+/// anything opens the database.
+///
+/// Done here and not in the request because a pool holds the file it opened:
+/// renaming underneath it would leave the server writing to an unlinked inode
+/// and SQLite replaying the old write-ahead log onto the restored file — a
+/// database with somebody else's last minute in it. Returns what was
+/// swapped, for the caller to write onto the restored chain.
+pub fn swap_pending(config: &Config, database_url: &str) -> std::io::Result<Option<Value>> {
+    let marker = config.data_dir.join(RESTORE_PENDING);
+    let Ok(bytes) = std::fs::read(&marker) else {
+        return Ok(None);
+    };
+    let record: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let staging = record
+        .get("staging")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir());
+    let Some(staging) = staging else {
+        // Coming up on the data that is here beats refusing to start for ever
+        // over a note pointing at nothing.
+        eprintln!(
+            "restore: a restore was pending but its staged copy is gone; starting on the data \
+             that is here"
+        );
+        let _ = std::fs::remove_file(&marker);
+        return Ok(None);
+    };
+
+    let db_files = crate::db::sqlite_files(database_url);
+    let db_path = db_files.first().cloned();
+    // The sidecars go with it: a stale write-ahead log replayed onto a
+    // restored database is the one way to lose exactly what was restored.
+    for path in &db_files {
+        let _ = std::fs::remove_file(path);
+    }
+
+    for entry in std::fs::read_dir(&staging)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == MANIFEST_ENTRY || name == "secrets" {
+            continue;
+        }
+        let from = entry.path();
+        let to = if name == DB_ENTRY {
+            match &db_path {
+                Some(path) => path.clone(),
+                None => {
+                    eprintln!(
+                        "restore: this server has no database file to restore onto ({database_url}); \
+                         its database was left as it is"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            config.data_dir.join(&name)
+        };
+        move_into_place(&from, &to)?;
+    }
+
+    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_file(&marker);
+    println!(
+        "restore: swapped in an archive of {} ({} entries, sign-in {})",
+        record
+            .get("created_at")
+            .and_then(Value::as_str)
+            .unwrap_or("an unknown date"),
+        record.get("entries").and_then(Value::as_u64).unwrap_or(0),
+        record
+            .get("token")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+    );
+    Ok(Some(record))
+}
+
+/// Write the restore onto the chain it restored — a system event, like the
+/// scheduler's: the archive's owner did not act, and is not named as if they
+/// had.
+pub async fn note_restored(state: &AppState, record: &Value) -> Result<(), sqlx::Error> {
+    let mut conn = state.pool.acquire().await?;
+    crate::audit::append(
+        &mut conn,
+        None,
+        None,
+        "backup.restored",
+        &json!({
+            "scope": record.get("scope").cloned().unwrap_or(Value::Null),
+            "entries": record.get("entries").cloned().unwrap_or(Value::Null),
+            "created_at": record.get("created_at").cloned().unwrap_or(Value::Null),
+            "overmind_version": record.get("overmind_version").cloned().unwrap_or(Value::Null),
+            "token": record.get("token").cloned().unwrap_or(Value::Null),
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
+fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
+    if to.is_dir() {
+        std::fs::remove_dir_all(to)?;
+    } else if to.exists() {
+        std::fs::remove_file(to)?;
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        // The data directory and the database can sit on different volumes;
+        // a rename across them is not a rename.
+        Err(_) => {
+            if from.is_dir() {
+                copy_tree(from, to, &|_| true)?;
+                std::fs::remove_dir_all(from)
+            } else {
+                std::fs::copy(from, to)?;
+                keep_private(to)?;
+                std::fs::remove_file(from)
+            }
+        }
     }
 }

@@ -21,6 +21,11 @@ pub struct AppState {
     /// Live change notifications for connected UI clients. Each message is a
     /// JSON string; the board refetches the affected scope (see ADR-0010).
     pub events: broadcast::Sender<String>,
+    /// Asked to stop so a supervisor can bring the server back on restored
+    /// data (ADR-0044). The swap is a boot's work, never a live pool's, and
+    /// this is how the request that staged one says so. Nobody listens in
+    /// tests; `main` does, and returns from `serve`.
+    pub restart: broadcast::Sender<()>,
     /// Organizational memory over MCP (Wadachi reference). A no-op when no
     /// memory server is configured — Overmind is fully functional without it.
     ///
@@ -705,7 +710,7 @@ pub enum InitError {
 /// wrong. Anything that is not a plain `sqlite://path` yields nothing, and the
 /// caller's restriction is then simply not applied — the honest answer for a
 /// URL shape we do not understand.
-fn sqlite_files(database_url: &str) -> Vec<PathBuf> {
+pub(crate) fn sqlite_files(database_url: &str) -> Vec<PathBuf> {
     let Some(rest) = database_url.strip_prefix("sqlite://") else {
         return Vec::new();
     };
@@ -787,12 +792,14 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
                 reason: "not detected yet".into(),
             });
     let (events, _) = broadcast::channel(256);
+    let (restart, _) = broadcast::channel(1);
     let memory = crate::mcp::Memory::from_config(config.memory_cmd.clone());
     Ok(AppState {
         pool,
         config: Arc::new(config),
         running: Arc::new(Mutex::new(HashSet::new())),
         events,
+        restart,
         memory,
         brains: Arc::new(Mutex::new(HashMap::new())),
         economy: Arc::new(std::sync::RwLock::new(economy)),
