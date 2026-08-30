@@ -9,9 +9,15 @@
 //! honour credentials that lived in a file. The subscription token travels
 //! only sealed, under a passphrase the server never keeps.
 //!
-//! What stays out, by name: `sessions/`, `chat/`, `worktrees/` (scratch by the
-//! runner's and the CEO's own word), the staging directories, and `backups/`
+//! What stays out, by name: `sessions/`, `chat/`, `worktrees/` and `meetings/`
+//! (scratch by the runner's, the CEO's and `lay_out_data_dir`'s own word — a
+//! meeting room is handed to the agent uid, and its transcript is durable in
+//! `meeting_turns`, not in the room), the staging directory, and `backups/`
 //! itself — an archive does not contain the archives.
+//!
+//! Everything the export writes is the server's alone while it is being
+//! written: the staging tree is `0700` inside the `0700` backup folder, the
+//! snapshots `0600`, and no copy ever follows a symlink.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -143,12 +149,17 @@ pub async fn export(
     }
 
     let folder = backup_dir(&config);
-    std::fs::create_dir_all(&folder)?;
-    set_mode(&folder, 0o700)?;
+    private_dir(&folder)?;
 
+    // Staged INSIDE the backup folder, and private itself. Under the data dir
+    // it would have sat in a directory the cage deliberately leaves
+    // traversable (`lay_out_data_dir`), at whatever mode the umask felt like —
+    // and for the length of an export the agent uid could have read a
+    // world-readable copy of every company's database and brain. `is_archive_name`
+    // keeps the dot-prefixed staging out of the listing.
     let export_id = uuid::Uuid::now_v7().simple().to_string();
-    let staging = config.data_dir.join(format!("export-{export_id}"));
-    std::fs::create_dir_all(&staging)?;
+    let staging = folder.join(format!(".staging-{export_id}"));
+    private_dir(&staging)?;
 
     let outcome = build(
         state,
@@ -201,6 +212,7 @@ async fn build(
     vacuum_into(&state.pool, &snapshot)
         .await
         .map_err(|e| ExportError::Db(format!("VACUUM INTO {}: {e}", snapshot.display())))?;
+    keep_private(&snapshot)?;
     if !snapshot.is_file() {
         return Err(ExportError::Db(format!(
             "VACUUM INTO {} produced no file",
@@ -223,12 +235,13 @@ async fn build(
             continue;
         }
         let dest = staging.join("companies").join(company_id).join("brain");
-        std::fs::create_dir_all(&dest)?;
+        private_dir(&dest)?;
         let db = brain.join(BRAIN_DB);
         if db.is_file() {
             snapshot_brain(&db, &dest.join(BRAIN_DB))
                 .await
                 .map_err(|e| ExportError::Db(format!("brain of {company_id}: {e}")))?;
+            keep_private(&dest.join(BRAIN_DB))?;
             if brain_mode == "none" {
                 brain_mode = "snapshot";
             }
@@ -243,8 +256,12 @@ async fn build(
         })?;
     }
 
-    // 3. Files, as files.
-    for name in ["attachments", "artifacts", "meetings"] {
+    // 3. Files, as files. `meetings/` is not among them: the room is handed to
+    // the agent uid for every turn (`hand_over`) and outlives the meeting, so
+    // copying it as the server would be a privileged read of an
+    // agent-writable tree — and what a meeting decided is in `meeting_turns`,
+    // which rides in the database.
+    for name in ["attachments", "artifacts"] {
         let src = config.data_dir.join(name);
         if src.is_dir() {
             copy_tree(&src, &staging.join(name), &|_| true)?;
@@ -264,9 +281,10 @@ async fn build(
         let (params, sealed) = seal_token(token, passphrase, aad.as_bytes())?;
         let path = staging.join(TOKEN_ENTRY);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            private_dir(parent)?;
         }
         std::fs::write(&path, sealed)?;
+        keep_private(&path)?;
         seal = Some(params);
     }
 
@@ -386,7 +404,7 @@ async fn snapshot_brain(src: &Path, dest: &Path) -> Result<(), sqlx::Error> {
 }
 
 fn copy_tree(src: &Path, dest: &Path, keep: &dyn Fn(&str) -> bool) -> std::io::Result<()> {
-    std::fs::create_dir_all(dest)?;
+    private_dir(dest)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
@@ -400,11 +418,57 @@ fn copy_tree(src: &Path, dest: &Path, keep: &dyn Fn(&str) -> bool) -> std::io::R
         if kind.is_dir() {
             copy_tree(&from, &to, keep)?;
         } else if kind.is_file() {
-            std::fs::copy(&from, &to)?;
+            copy_file_nofollow(&from, &to)?;
         }
         // Symlinks and specials are not data of ours.
     }
     Ok(())
+}
+
+/// Copy one file without ever following a link.
+///
+/// `read_dir` says what a name *was*; `std::fs::copy` resolves it again, and
+/// between the two anything that can write the directory can put a symlink in
+/// the way — the same shape `chown_tree` avoids by using `lchown`. So the
+/// source is opened `O_NOFOLLOW`, the *open file* is asked what it is, and the
+/// destination is created new and private. A name that turned into a link
+/// since the listing is skipped and said out loud: it is either a bug or
+/// somebody trying something.
+#[cfg(unix)]
+fn copy_file_nofollow(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut source = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(from)
+    {
+        Ok(file) => file,
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            eprintln!(
+                "backup: {} is a symbolic link, not a file -- not copied",
+                from.display()
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
+    if !source.metadata()?.is_file() {
+        // A fifo, a socket, a device: not data of ours, and not something to
+        // read from during an export.
+        return Ok(());
+    }
+    let mut target = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)?;
+    std::io::copy(&mut source, &mut target)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_file_nofollow(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::copy(from, to).map(|_| ())
 }
 
 /// Every regular file under `root`, as archive paths (forward slashes),
@@ -484,6 +548,22 @@ fn open_private(path: &Path) -> std::io::Result<std::fs::File> {
         .write(true)
         .create_new(true)
         .open(path)
+}
+
+/// A directory the server alone can enter, whatever the umask says.
+///
+/// `create_dir_all` takes the umask's word for it — 0755 in the image, whose
+/// server is root — and the export writes a copy of every company's database
+/// and brain into this tree.
+fn private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    set_mode(path, 0o700)
+}
+
+/// A file the server alone can read. SQLite writes `VACUUM INTO` output 0644,
+/// which is why the live database has needed `keep_to_server` since ADR-0029.
+fn keep_private(path: &Path) -> std::io::Result<()> {
+    set_mode(path, 0o600)
 }
 
 #[cfg(unix)]
@@ -641,4 +721,65 @@ pub fn list(config: &Config) -> std::io::Result<Vec<Value>> {
     }
     out.sort_by(|a, b| b["name"].as_str().cmp(&a["name"].as_str()));
     Ok(out)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::metadata(path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "overmind-backup-unit-{label}-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    #[test]
+    fn a_staged_directory_is_the_servers_alone_whatever_the_umask_says() {
+        let root = scratch("private-dir");
+        let staged = root.join("deep").join("staging");
+        private_dir(&staged).expect("private dir");
+        assert_eq!(mode_of(&staged), 0o700);
+        let file = staged.join("snapshot.sqlite");
+        std::fs::write(&file, b"x").expect("write");
+        keep_private(&file).expect("private file");
+        assert_eq!(mode_of(&file), 0o600);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_name_that_became_a_symlink_is_skipped_not_followed() {
+        let root = scratch("nofollow");
+        let secret = root.join("secret.txt");
+        std::fs::write(&secret, b"sk-ant-oat01-the-live-token").expect("secret");
+        let src = root.join("src");
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&src).expect("src");
+        std::os::unix::fs::symlink(&secret, src.join("notes.md")).expect("symlink");
+        std::fs::write(src.join("real.md"), b"an ordinary file").expect("real file");
+
+        // What `read_dir` reports as a link never reaches the copy; and even
+        // handed the path directly, the copy refuses to follow it.
+        copy_tree(&src, &dest, &|_| true).expect("copy tree");
+        assert!(!dest.join("notes.md").exists(), "a link was copied");
+        assert_eq!(
+            std::fs::read(dest.join("real.md")).expect("real file"),
+            b"an ordinary file"
+        );
+        copy_file_nofollow(&src.join("notes.md"), &dest.join("smuggled.md"))
+            .expect("skipped, not an error");
+        assert!(!dest.join("smuggled.md").exists(), "the link was followed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
