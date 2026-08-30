@@ -695,7 +695,7 @@ fn chown_one(_path: &Path, _user: AgentUser) -> std::io::Result<()> {
 /// directory built before this function existed would otherwise keep whatever
 /// the umask gave it — a boundary that protects only fresh installations is one
 /// nobody can reason about.
-fn mkdir_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+pub(crate) fn mkdir_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     set_mode(path, mode)
 }
@@ -714,13 +714,13 @@ pub fn keep_to_server(config: &Config, path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+pub(crate) fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 

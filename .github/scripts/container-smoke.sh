@@ -285,12 +285,16 @@ if caged.get("db") != "DENIED":
                  "every company's data")
 if caged.get("brains") != "DENIED":
     fails.append("the caged agent could read /data/companies — every company's brain")
+if caged.get("backups") != "DENIED":
+    fails.append("the caged agent could read /data/backups — an archive is the whole "
+                 "instance, database and brains and all (ADR-0044)")
 
 # Uncaged: the same probes must *succeed*, or the denials above prove nothing —
 # a typo in the probe would read as security.
 if uncaged["uid"] != "0":
     fails.append("the uncaged agent was not root, so the pair does not isolate the cage")
-if uncaged.get("db") != "READABLE" or uncaged.get("brains") != "READABLE":
+if (uncaged.get("db") != "READABLE" or uncaged.get("brains") != "READABLE"
+        or uncaged.get("backups") != "READABLE"):
     fails.append("the uncaged agent could not read Overmind's data either, so the caged "
                  "denials say nothing about the cage")
 

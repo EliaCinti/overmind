@@ -490,7 +490,9 @@ async fn pay_with(
     })))
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// No `Debug`: the one field is a passphrase, and a `{:?}` in a future log
+/// line is all it would take.
+#[derive(Default, Deserialize)]
 struct BackupRequest {
     #[serde(default)]
     passphrase: Option<String>,
@@ -525,7 +527,9 @@ async fn create_backup(
     let report = crate::backup::export(&state, req.passphrase.as_deref())
         .await
         .map_err(|e| match e {
-            crate::backup::ExportError::PassphraseRequired => ApiError::Invalid(e.to_string()),
+            crate::backup::ExportError::PassphraseRequired
+            | crate::backup::ExportError::PassphraseTooShort
+            | crate::backup::ExportError::Config(_) => ApiError::Invalid(e.to_string()),
             other => {
                 // Paths and SQLite's words, never a credential: the export
                 // handles the token only through the seal.
