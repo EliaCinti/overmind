@@ -507,8 +507,62 @@ export type Economy =
       unknown_kind: "not_signed_in" | "custom_adapter" | "unreadable";
     };
 
+/** One archive in the folder (ADR-0044). */
+export interface Archive {
+  name: string;
+  bytes: number;
+  created_at: string | null;
+}
+
+/** What an export answered. */
+export interface ExportedArchive {
+  name: string;
+  bytes: number;
+  scope: string;
+  sealed_token: boolean;
+}
+
+/** What a restore staged, before the restart that swaps it in. */
+export interface StagedRestore {
+  scope: string;
+  entries: number;
+  /** `restored`, `skipped`, or `none` — what became of the sign-in. */
+  token: "restored" | "skipped" | "none";
+  restarting: boolean;
+}
+
 export const api = {
   /** Server identity, and how it pays. */
+  /** Backup and restore (M31, ADR-0044): the owner's verbs, both ways. */
+  backups: () =>
+    req<{ archives: Archive[]; sign_in_travels: boolean }>("GET", "/backups"),
+  backupCreate: (passphrase?: string) =>
+    req<ExportedArchive>("POST", "/backup", passphrase ? { passphrase } : {}),
+  backupDelete: (name: string) =>
+    req<{ deleted: string }>("DELETE", `/backup/${encodeURIComponent(name)}`),
+  /** A link, not a fetch: the browser saves the file itself. */
+  backupHref: (name: string) => `/api/backup/${encodeURIComponent(name)}`,
+  /** Hand an archive back to an empty instance. Multipart, because the
+   *  archive is a file and the server streams it to disk rather than holding
+   *  it in memory. */
+  restore: async (archive: File, passphrase?: string, skipToken?: boolean) => {
+    const form = new FormData();
+    if (passphrase) form.append("passphrase", passphrase);
+    if (skipToken) form.append("skip_token", "true");
+    form.append("archive", archive, archive.name || "overmind.tar.gz");
+    const res = await fetch("/api/restore", { method: "POST", body: form });
+    if (!res.ok) {
+      let message = res.statusText;
+      try {
+        const data = await res.json();
+        if (data?.error) message = data.error;
+      } catch {
+        // keep statusText
+      }
+      throw new ApiError(res.status, message);
+    }
+    return (await res.json()) as StagedRestore;
+  },
   /** The door (M24): where it stands, and the three ways through it. */
   authState: () =>
     req<{

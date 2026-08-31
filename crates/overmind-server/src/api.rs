@@ -277,7 +277,7 @@ fn api_router() -> Router<AppState> {
         // the port of an unclaimed box fill the folder and download it.
         .route("/backup", post(create_backup))
         .route("/backups", get(list_backups))
-        .route("/backup/{name}", get(download_backup))
+        .route("/backup/{name}", get(download_backup).delete(delete_backup))
         // The archive is bigger than any upload the rest of the API takes,
         // and it is streamed to disk rather than held: the router's 128 MB
         // limit is lifted for this one route (ADR-0044). It answers on an
@@ -565,7 +565,42 @@ async fn list_backups(
 ) -> Result<Json<Value>, ApiError> {
     require_claimed_owner(&state, &headers).await?;
     let archives = crate::backup::list(&state.config).map_err(|e| ApiError::Internal(e.into()))?;
-    Ok(Json(Value::Array(archives)))
+    Ok(Json(json!({
+        "archives": archives,
+        // Whether an export will need a passphrase, so the interface can ask
+        // for one only when there is a sign-in to seal -- and say why.
+        "sign_in_travels": crate::claude_auth::stored_token(&state.config).is_some(),
+    })))
+}
+
+/// Delete one archive. The owner's verb, and audited: an archive is the whole
+/// instance, and "where did last month's backup go" deserves an answer.
+async fn delete_backup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_claimed_owner(&state, &headers).await?;
+    let listed = crate::backup::list(&state.config)
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .iter()
+        .any(|a| a["name"].as_str() == Some(name.as_str()));
+    if !crate::backup::is_archive_name(&name) || !listed {
+        return Err(ApiError::NotFound("archive"));
+    }
+    let path = crate::backup::backup_dir(&state.config).join(&name);
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    std::fs::remove_file(&path).map_err(|e| ApiError::Internal(e.into()))?;
+    let mut conn = state.pool.acquire().await?;
+    crate::audit::append(
+        &mut conn,
+        None,
+        None,
+        "backup.deleted",
+        &json!({ "name": name, "bytes": bytes }),
+    )
+    .await?;
+    Ok(Json(json!({ "deleted": name })))
 }
 
 /// Streamed from the folder; `name` must be a bare entry of it -- the first

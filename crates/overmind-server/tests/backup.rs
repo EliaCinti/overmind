@@ -309,14 +309,16 @@ async fn the_folder_lists_what_it_holds_and_names_only_bare_entries() {
 
     let (s, list) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
     assert_eq!(s, StatusCode::OK);
-    let names: Vec<&str> = list
-        .as_array()
-        .expect("list")
+    let archives = list["archives"].as_array().expect("archives");
+    let names: Vec<&str> = archives
         .iter()
         .map(|a| a["name"].as_str().expect("name"))
         .collect();
     assert_eq!(names, vec![name.as_str()]);
-    assert!(list[0]["bytes"].as_u64().expect("size") > 0);
+    assert!(archives[0]["bytes"].as_u64().expect("size") > 0);
+    // The interface asks a passphrase only when there is a sign-in to seal:
+    // a field nobody needs is a field nobody should be shown (UX.md).
+    assert_eq!(list["sign_in_travels"], false);
 
     // A name that is not a bare entry of the folder is nothing.
     std::fs::write(dir.join("not-an-archive.sqlite"), b"x").expect("bait");
@@ -659,4 +661,60 @@ async fn a_backup_folder_that_holds_the_data_dir_is_refused() {
             .contains("OVERMIND_BACKUP_DIR"),
         "names the setting to change: {v}"
     );
+}
+
+#[tokio::test]
+async fn the_listing_says_whether_a_sign_in_would_travel() {
+    let (app, _state, dir) = setup().await;
+    let cookie = claim(&app).await;
+    let (s, before) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(before["sign_in_travels"], false);
+
+    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    let (_, after) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
+    assert_eq!(after["sign_in_travels"], true);
+}
+
+#[tokio::test]
+async fn an_archive_is_deleted_by_its_owner_and_the_chain_says_so() {
+    let (app, state, dir) = setup().await;
+    let cookie = claim(&app).await;
+    let (s, report) = export(&app, &cookie, json!({})).await;
+    assert_eq!(s, StatusCode::OK, "{report}");
+    let name = report["name"].as_str().expect("name").to_string();
+
+    // Not a stranger's verb, and not a member's.
+    let (s, _) = send(&app, "DELETE", &format!("/api/backup/{name}"), None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    assert!(dir.join("backups").join(&name).is_file());
+
+    // Nor a name that is not an archive of ours.
+    std::fs::write(dir.join("backups").join("notes.txt"), b"mine").expect("bait");
+    let (s, _) = send(&app, "DELETE", "/api/backup/notes.txt", None, Some(&cookie)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(dir.join("backups").join("notes.txt").is_file());
+
+    let (s, v) = send(
+        &app,
+        "DELETE",
+        &format!("/api/backup/{name}"),
+        None,
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(!dir.join("backups").join(&name).exists());
+    let (_, list) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
+    assert!(list["archives"].as_array().expect("archives").is_empty());
+
+    let (kind, payload): (String, String) =
+        sqlx::query_as("SELECT kind, payload FROM audit_events ORDER BY seq DESC LIMIT 1")
+            .fetch_one(&state.pool)
+            .await
+            .expect("last event");
+    assert_eq!(kind, "backup.deleted");
+    let payload: Value = serde_json::from_str(&payload).expect("payload");
+    assert_eq!(payload["name"], name);
+    assert!(payload["actor"].is_string(), "deleting names who did it");
 }

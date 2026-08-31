@@ -36,6 +36,7 @@ import { ConnectRepoDialog } from "./components/ConnectRepoDialog";
 import { Onboarding } from "./components/Onboarding";
 import { Door } from "./components/Door";
 import { InviteDialog } from "./components/InviteDialog";
+import { BackupDialog } from "./components/BackupDialog";
 import { DeleteCompanyDialog } from "./components/DeleteCompanyDialog";
 import { MembersDialog } from "./components/MembersDialog";
 import { SignInNotice } from "./components/SignInNotice";
@@ -71,6 +72,7 @@ export default function App() {
   /** Who is signed in (M25): the invite surface is the owner's. */
   const [isOwner, setIsOwner] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const [backupOpen, setBackupOpen] = useState(false);
   const [deleteCompanyOpen, setDeleteCompanyOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   /** The signed-in name (M25): the members list says "you" beside it. */
@@ -404,10 +406,12 @@ export default function App() {
             api.authLogout().finally(() => setGate("locked"));
           }}
           onInvite={isOwner ? () => setInviteOpen(true) : undefined}
+          onBackup={isOwner ? () => setBackupOpen(true) : undefined}
           onDeleteCompany={companyId ? () => setDeleteCompanyOpen(true) : undefined}
           onMembers={companyId ? () => setMembersOpen(true) : undefined}
         />
         <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
+        <BackupDialog open={backupOpen} onOpenChange={setBackupOpen} />
         {companyId && (
           <MembersDialog
             open={membersOpen}
