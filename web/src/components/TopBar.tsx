@@ -15,6 +15,7 @@ import {
   UserRoundPlus,
   Trash2,
   Users,
+  Archive,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -50,6 +51,7 @@ export function TopBar({
   onToggleTheme,
   onLogout,
   onInvite,
+  onBackup,
   onDeleteCompany,
   onMembers,
 }: {
@@ -77,6 +79,8 @@ export function TopBar({
   onToggleTheme: () => void;
   /** Absent while the instance is unclaimed: no session, nothing to end. */
   onLogout?: () => void;
+  /** Backup and restore (M31): present only for the owner. */
+  onBackup?: () => void;
   /** The invite surface (M25): present only for the owner. */
   onInvite?: () => void;
   /** Absent while no company is selected: nothing to delete (ADR-0034). */
@@ -194,6 +198,11 @@ export function TopBar({
         {onInvite && (
           <Button variant="ghost" size="icon" onClick={onInvite} aria-label={t("door.inviteMint")}>
             <UserRoundPlus className="h-4.5 w-4.5" />
+          </Button>
+        )}
+        {onBackup && (
+          <Button variant="ghost" size="icon" onClick={onBackup} aria-label={t("backup.title")}>
+            <Archive className="h-4.5 w-4.5" />
           </Button>
         )}
         {onLogout && (

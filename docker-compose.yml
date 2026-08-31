@@ -121,8 +121,17 @@ volumes:
   # audit chain, attachments, the subscription token (overmind-data) and the
   # agent CLI's sign-in (overmind-agent-home). `docker compose down -v`
   # DELETES BOTH — that flag removes named volumes, and there is no undo.
-  # Until export/restore ships, back them up by copying:
-  #   docker run --rm -v overmind_overmind-data:/d -v "$PWD/backup":/b \
+  #
+  # `POST /api/backup` (or the Backups button, owner only) is the everyday
+  # answer: one archive with the database, every brain, attachments and
+  # artifacts, the sign-in sealed under a passphrase you choose
+  # (ADR-0044). `POST /api/restore` takes it back into an EMPTY instance —
+  # a fresh `up` on this file, before anyone claims it.
+  #
+  # The one thing an archive does not carry is `overmind-agent-home` — the
+  # agent CLI's own login, set by `claude setup-token` rather than from the
+  # product. If you signed in that way, back that volume up the raw way too:
+  #   docker run --rm -v overmind_overmind-agent-home:/d -v "$PWD/backup":/b \
   #     alpine cp -a /d/. /b/
   overmind-data:
   overmind-agent-home:

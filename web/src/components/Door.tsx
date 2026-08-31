@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { ArrowLeft, KeyRound, Lock, LogIn, Ticket, User, UserPlus } from "lucide-react";
-import { api } from "../lib/api";
+import { ArrowLeft, Archive, KeyRound, Loader2, Lock, LogIn, Ticket, Upload, User, UserPlus } from "lucide-react";
+import type { StagedRestore } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { cn } from "../lib/utils";
 import { DoorBackground } from "./DoorBackground";
@@ -83,7 +84,7 @@ export function Door({
   onEntered: () => void;
 }) {
   const t = useT();
-  const [screen, setScreen] = useState<"landing" | "login" | "signup">("landing");
+  const [screen, setScreen] = useState<"landing" | "login" | "signup" | "restore">("landing");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [invite, setInvite] = useState("");
@@ -91,10 +92,43 @@ export function Door({
   const [shake, setShake] = useState(0);
   const [busy, setBusy] = useState(false);
 
-  const go = (next: "landing" | "login" | "signup") => {
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreNeedsPassphrase, setRestoreNeedsPassphrase] = useState(false);
+  const [restoreSkipToken, setRestoreSkipToken] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreDone, setRestoreDone] = useState<StagedRestore | null>(null);
+
+  const go = (next: "landing" | "login" | "signup" | "restore") => {
     setScreen(next);
     setError(null);
     setPassword("");
+  };
+
+  const runRestore = async () => {
+    if (!restoreFile || restoreBusy) return;
+    setRestoreBusy(true);
+    setRestoreError(null);
+    try {
+      const staged = await api.restore(
+        restoreFile,
+        restoreNeedsPassphrase ? restorePassphrase.trim() || undefined : undefined,
+        restoreSkipToken,
+      );
+      setRestoreDone(staged);
+    } catch (e) {
+      // The server only learns whether the archive is sealed by opening it,
+      // so the first attempt is what asks: this turns that refusal into the
+      // passphrase field appearing, instead of a dead end.
+      if (e instanceof ApiError && !restoreNeedsPassphrase && /passphrase/i.test(e.message)) {
+        setRestoreNeedsPassphrase(true);
+      } else {
+        setRestoreError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setRestoreBusy(false);
+    }
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -160,6 +194,110 @@ export function Door({
                     <UserPlus className="h-4 w-4" /> {t("door.chooseSignup")}
                   </RoundButton>
                 </div>
+                {mode === "unclaimed" && (
+                  <button
+                    type="button"
+                    onClick={() => go("restore")}
+                    className="mt-4 w-full text-center text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+                  >
+                    {t("door.restoreOffer")}
+                  </button>
+                )}
+              </motion.div>
+            ) : screen === "restore" ? (
+              <motion.div key="restore" {...slide}>
+                <div className="flex items-center gap-2">
+                  <RoundButton
+                    type="button"
+                    variant="ghost"
+                    onClick={() => go("landing")}
+                    aria-label={t("door.back")}
+                    className="h-9"
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </RoundButton>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    {t("backup.restoreTitle")}
+                  </span>
+                </div>
+
+                {restoreDone ? (
+                  <div className="mt-5 flex flex-col items-center gap-3 text-center">
+                    <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                      <Archive className="h-5.5 w-5.5" />
+                    </span>
+                    <p className="text-sm">{t("backup.restoreDone")}</p>
+                  </div>
+                ) : (
+                  <div className="mt-5 flex flex-col gap-4">
+                    <p className="text-sm text-muted-foreground">{t("backup.restoreBody")}</p>
+
+                    <label className="flex h-24 cursor-pointer flex-col items-center justify-center gap-1.5 rounded-2xl border border-dashed border-input bg-background/50 text-center transition-colors hover:border-primary/60">
+                      <Upload className="h-5 w-5 text-muted-foreground" />
+                      <span className="px-3 text-xs text-muted-foreground">
+                        {restoreFile
+                          ? t("backup.restoreChosen", { name: restoreFile.name })
+                          : t("backup.restoreChoose")}
+                      </span>
+                      <input
+                        type="file"
+                        accept=".tar.gz,application/gzip"
+                        className="hidden"
+                        onChange={(e) => {
+                          setRestoreFile(e.target.files?.[0] ?? null);
+                          setRestoreError(null);
+                          setRestoreNeedsPassphrase(false);
+                        }}
+                      />
+                    </label>
+
+                    {restoreNeedsPassphrase && (
+                      <div className="flex flex-col gap-2">
+                        <p className="pl-1 text-xs text-muted-foreground">
+                          {t("backup.restoreSealed")}
+                        </p>
+                        <RoundInput
+                          icon={KeyRound}
+                          type="password"
+                          value={restorePassphrase}
+                          onChange={(e) => setRestorePassphrase(e.target.value)}
+                          placeholder={t("backup.passphrase")}
+                          aria-label={t("backup.passphrase")}
+                          disabled={restoreSkipToken}
+                        />
+                        <label className="flex items-center gap-2 pl-1 text-xs text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={restoreSkipToken}
+                            onChange={(e) => setRestoreSkipToken(e.target.checked)}
+                          />
+                          {t("backup.restoreSkipToken")}
+                        </label>
+                      </div>
+                    )}
+
+                    {restoreError && <p className="pl-1 text-sm text-destructive">{restoreError}</p>}
+
+                    <RoundButton
+                      type="button"
+                      onClick={runRestore}
+                      disabled={
+                        !restoreFile ||
+                        restoreBusy ||
+                        (restoreNeedsPassphrase &&
+                          !restoreSkipToken &&
+                          restorePassphrase.trim().length < 12)
+                      }
+                    >
+                      {restoreBusy ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Archive className="h-4 w-4" />
+                      )}
+                      {restoreBusy ? t("backup.restoreWorking") : t("backup.restoreGo")}
+                    </RoundButton>
+                  </div>
+                )}
               </motion.div>
             ) : (
               <motion.div key={screen} {...slide}>
