@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A restore staged before the last stop is swapped in here, before
     // anything opens the database (ADR-0044).
     let config = overmind_server::Config::from_env();
-    let restored = overmind_server::backup::swap_pending(&config, &db_url)?;
+    let restored = overmind_server::backup::swap_pending(&config, &db_url).await?;
 
     let state = overmind_server::init(&db_url).await?;
     if let Some(record) = &restored {

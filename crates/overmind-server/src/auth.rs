@@ -259,6 +259,10 @@ pub async fn claim(state: &AppState, req: &Credentials) -> Result<Response, ApiE
     if done.rows_affected() == 0 {
         return Err(ApiError::Invalid("the owner is already claimed".into()));
     }
+    // A restore only ever checked emptiness at a point in time; this INSERT's
+    // `WHERE NOT EXISTS` is the one atomic decision that matters, and once it
+    // lands, no staged restore gets to overwrite it at the next boot.
+    crate::backup::discard_stale_restore(&state.config);
     audit_auth(state, "auth.claimed", name).await;
     open_session(state, name).await
 }

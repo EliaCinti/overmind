@@ -226,6 +226,35 @@ nothing rate-limits an attempt on an archive sitting on somebody's disk. A
 obeyed: forcing it `0700` would take away the path a caged agent walks to its
 own run.
 
+Slice B was reviewed the same way, before it merged. One finding was the
+review's most severe of the whole milestone:
+
+- **A restore's "empty instance" guarantee was checked, not held.** `restore()`
+  asked `what_makes_the_instance_full` once, at the top, then spent real time
+  unpacking and verifying an archive before writing `restore-pending`
+  unconditionally; `swap_pending` then deleted the live database and swapped
+  the staged one in without ever asking, at that final moment, whether the
+  instance was still the one it checked. A claim's `INSERT ... WHERE NOT
+  EXISTS` is atomic; a restore that only *observed* emptiness earlier is not
+  — an operator could legitimately claim an instance, found a company, and
+  have both silently replaced at the next restart by an archive someone else
+  had merely staged first. Closed three ways: `stage()` re-checks emptiness
+  right before the marker commits to anything; `auth::claim` clears any
+  staged restore the instant its `INSERT` lands, since a landed claim is the
+  one fact that must never be second-guessed; and `swap_pending` — the load-
+  bearing fix — opens the *live* database, read-only, immediately before the
+  delete that cannot be undone, and refuses the swap if it is no longer empty
+  or cannot be read at all. That last check is not defence in depth; on the
+  boot path nothing else stands between "staged" and "destroyed", so it is
+  asked as late as the filesystem allows.
+- **The manifest could hand the KDF a terabyte to allocate.** `unseal`'s
+  argon2 parameters (`m_kib`, `t`, `p`) came from the archive's own manifest —
+  untrusted input reaching `Argon2::hash_password_into` directly, and a
+  memory allocation that large does not fail gracefully, it aborts the
+  process. Bounded now to `MAX_KDF_M_KIB` (1 GiB), ten passes, four lanes —
+  forward-compatible with a future export that raises its own defaults, and
+  nowhere near what an allocator survives.
+
 ## Consequences
 
 - Three new dependencies, named because the rulebook asks: `tar`, `flate2`

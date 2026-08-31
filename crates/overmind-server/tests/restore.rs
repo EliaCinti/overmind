@@ -246,8 +246,10 @@ fn rebuild(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
 }
 
 /// The boot half: what `main` does before the pool is opened.
-fn swap(inst: &Instance) -> Option<Value> {
-    overmind_server::backup::swap_pending(&inst.state.config, &inst.db_url).expect("swap")
+async fn swap(inst: &Instance) -> Option<Value> {
+    overmind_server::backup::swap_pending(&inst.state.config, &inst.db_url)
+        .await
+        .expect("swap")
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +272,7 @@ async fn an_archive_restores_into_an_empty_instance_and_the_chain_still_verifies
     assert_eq!(still_empty, 0, "the live database was touched");
     target.state.pool.close().await;
 
-    let record = swap(&target).expect("a restore was pending");
+    let record = swap(&target).await.expect("a restore was pending");
     assert_eq!(record["scope"], "instance");
     assert!(!target.dir.join("restore-pending").exists());
 
@@ -455,7 +457,7 @@ async fn a_restore_without_the_sign_in_leaves_nothing_claiming_the_plan_pays() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["token"], "skipped");
     target.state.pool.close().await;
-    swap(&target).expect("pending");
+    swap(&target).await.expect("pending");
 
     assert!(
         !target.dir.join("claude-oauth-token").exists(),
@@ -571,8 +573,8 @@ async fn a_broken_chain_is_refused_even_when_every_hash_matches() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-#[test]
-fn a_boot_with_nothing_pending_is_a_boot_like_any_other() {
+#[tokio::test]
+async fn a_boot_with_nothing_pending_is_a_boot_like_any_other() {
     let dir = std::env::temp_dir().join(format!("overmind-nopending-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&dir).expect("dir");
     let config = overmind_server::Config {
@@ -583,13 +585,14 @@ fn a_boot_with_nothing_pending_is_a_boot_like_any_other() {
         &config,
         &format!("sqlite://{}", dir.join("overmind.sqlite").display()),
     )
+    .await
     .expect("swap");
     assert!(done.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn a_pending_marker_pointing_nowhere_is_cleared_rather_than_obeyed() {
+#[tokio::test]
+async fn a_pending_marker_pointing_nowhere_is_cleared_rather_than_obeyed() {
     let dir = std::env::temp_dir().join(format!("overmind-badpending-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&dir).expect("dir");
     let mut marker = std::fs::File::create(dir.join("restore-pending")).expect("marker");
@@ -611,8 +614,145 @@ fn a_pending_marker_pointing_nowhere_is_cleared_rather_than_obeyed() {
         &config,
         &format!("sqlite://{}", dir.join("overmind.sqlite").display()),
     )
+    .await
     .expect("swap");
     assert!(done.is_none());
     assert!(!dir.join("restore-pending").exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The race a review found: a legitimate claim landing after a restore only
+// ever checked emptiness at one point in time.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_claim_that_lands_after_a_restore_was_staged_wins_at_the_next_boot() {
+    let (_source, archive) = an_instance_worth_restoring().await;
+    let target = instance().await;
+
+    // The attacker's request: passes the emptiness check, stages an archive,
+    // asks to be restarted -- exactly what the API does.
+    let (s, v) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert!(target.dir.join("restore-pending").is_file());
+
+    // Before any restart happens, the real operator claims the instance --
+    // the race the review's exploit walks through step by step.
+    let cookie = claim(&target.app).await;
+    let (s, mine) = send(
+        &target.app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "The Real Company" })),
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{mine}");
+    target.state.pool.close().await;
+
+    // The boot swap must refuse: the live database is no longer empty, and
+    // that is the one fact that must survive a slow, merely-checked-earlier
+    // restore.
+    let swapped = swap(&target).await;
+    assert!(
+        swapped.is_none(),
+        "the staged restore overwrote a real claim: {swapped:?}"
+    );
+    assert!(
+        !target.dir.join("restore-pending").exists(),
+        "the stale restore should be discarded, not left to try again"
+    );
+
+    let restored = overmind_server::init_with(
+        &target.db_url,
+        overmind_server::Config {
+            data_dir: target.dir.clone(),
+            agent_cmd: Some("/usr/bin/true".into()),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init on the live data");
+    let (owner,): (String,) = sqlx::query_as("SELECT name FROM users")
+        .fetch_one(&restored.pool)
+        .await
+        .expect("owner");
+    assert_eq!(owner, "elia", "the real owner survives");
+    let (company,): (String,) = sqlx::query_as("SELECT name FROM companies")
+        .fetch_one(&restored.pool)
+        .await
+        .expect("company");
+    assert_eq!(company, "The Real Company", "the real company survives");
+}
+
+#[tokio::test]
+async fn a_claim_clears_a_restore_staged_earlier_the_instant_it_lands() {
+    let (_source, archive) = an_instance_worth_restoring().await;
+    let target = instance().await;
+
+    let (s, _) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(target.dir.join("restore-pending").is_file());
+
+    let _cookie = claim(&target.app).await;
+
+    // Not just "the boot refuses it" -- the claim itself clears the note, so
+    // an operator inspecting the data directory right after claiming does
+    // not find a restore that is merely waiting to be stale.
+    assert!(
+        !target.dir.join("restore-pending").exists(),
+        "claiming should clear a restore staged before it, immediately"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The manifest is the archive's word for itself, not ours: it must not be
+// able to hand the KDF a memory allocation big enough to abort the process.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_manifest_asking_the_kdf_for_a_terabyte_is_refused_before_it_is_spent() {
+    let (_source, archive) = an_instance_worth_restoring().await;
+    let mut archive_entries = entries(&archive);
+    let manifest_index = archive_entries
+        .iter()
+        .position(|(p, _)| p == "MANIFEST.json")
+        .expect("manifest");
+    let mut parsed: Value =
+        serde_json::from_slice(&archive_entries[manifest_index].1).expect("manifest json");
+    // Near u32::MAX KiB is on the order of a terabyte -- exactly the
+    // allocation `Argon2::hash_password_into` would otherwise be asked to
+    // make, and the one a global allocator does not fail out of gracefully.
+    parsed["token"]["m_kib"] = json!(u32::MAX - 1);
+    archive_entries[manifest_index].1 = serde_json::to_vec_pretty(&parsed).expect("manifest bytes");
+    let greedy = rebuild(&archive_entries);
+
+    // At the API, a bad seal and a wrong passphrase read the same on purpose
+    // (ADR-0044: no oracle for which one failed) -- so the request-level
+    // check is that it refuses, and refuses fast rather than spending the
+    // KDF's time first.
+    let target = instance().await;
+    let started = std::time::Instant::now();
+    let (s, v) = restore(&target.app, &greedy, &[("passphrase", PASSPHRASE)]).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the request took {:?} -- it is spending the KDF's time instead of refusing it",
+        started.elapsed()
+    );
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    assert!(!target.dir.join("restore-pending").exists());
+
+    // Underneath, `unseal` itself names what it refused -- checked directly,
+    // since the API layer collapses every unseal failure to one message.
+    let (_, sealed) = archive_entries
+        .iter()
+        .find(|(p, _)| p == "secrets/claude-oauth-token.enc")
+        .expect("sealed entry");
+    let err = overmind_server::backup::unseal(&parsed, sealed, PASSPHRASE)
+        .expect_err("a terabyte request must not be honoured");
+    assert!(
+        err.to_string().contains("more work"),
+        "names what it refused: {err}"
+    );
 }
