@@ -47,6 +47,20 @@ const RESTORE_PENDING: &str = "restore-pending";
 /// argon2id parameters for the sealed token, written down because the door's
 /// `Argon2::default()` is not a spec: 64 MiB, three passes, one lane.
 const KDF_M_KIB: u32 = 64 * 1024;
+
+/// A ceiling on the KDF parameters an *archive* may ask for when unsealing.
+///
+/// The manifest carries the parameters an export was made with, so a future
+/// version that raises `KDF_M_KIB` can still open an older archive — the
+/// bound here is not "must equal ours", it is "must not be absurd". Without
+/// it, a manifest is untrusted input that reaches `Argon2::hash_password_into`
+/// directly: `m_kib` near `u32::MAX` asks it to allocate on the order of a
+/// terabyte, which the allocator does not fail gracefully — it aborts the
+/// process. 1 GiB, ten passes and four lanes is far past anything Overmind
+/// has ever written and nowhere near what takes a server down.
+const MAX_KDF_M_KIB: u32 = 1024 * 1024;
+const MAX_KDF_T: u32 = 10;
+const MAX_KDF_P: u32 = 4;
 const KDF_T: u32 = 3;
 const KDF_P: u32 = 1;
 
@@ -802,6 +816,17 @@ pub fn unseal(manifest: &Value, sealed: &[u8], passphrase: &str) -> Result<Strin
     if nonce.len() != 24 || seal.cipher != "xchacha20poly1305" || seal.kdf != "argon2id" {
         return Err(UnsealError::Manifest("unknown seal".into()));
     }
+    // The manifest is the archive's word for itself, not ours: these three
+    // numbers otherwise reach the KDF's memory allocation untouched. An
+    // archive of ours never asks for more than this; one that does is not
+    // opened, no matter how good its passphrase might be.
+    if seal.m_kib > MAX_KDF_M_KIB || seal.t > MAX_KDF_T || seal.p > MAX_KDF_P {
+        return Err(UnsealError::Manifest(format!(
+            "this archive's sign-in asks for more work than any of ours would (m={} KiB, t={}, \
+             p={}) — refused before it is spent",
+            seal.m_kib, seal.t, seal.p
+        )));
+    }
     let key =
         derive_key(passphrase, &salt, seal.m_kib, seal.t, seal.p).map_err(UnsealError::Manifest)?;
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&key));
@@ -969,6 +994,27 @@ pub async fn what_makes_the_instance_full(state: &AppState) -> Option<String> {
     None
 }
 
+/// Clear a staged restore before it can be swapped in.
+///
+/// Called the instant a claim succeeds: a restore only ever *checked* that
+/// the instance was empty, at one point in time, before doing real work — a
+/// claim's `INSERT ... WHERE NOT EXISTS` is the one atomic decision that
+/// matters, and once it lands, no restore that merely observed emptiness
+/// earlier gets to overwrite it at the next boot. Best-effort; the boot-time
+/// swap re-checks the live database itself regardless, so a marker or
+/// staging directory this misses is still caught there.
+pub fn discard_stale_restore(config: &Config) {
+    let marker = config.data_dir.join(RESTORE_PENDING);
+    if let Ok(bytes) = std::fs::read(&marker)
+        && let Some(staging) = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("staging").and_then(Value::as_str).map(PathBuf::from))
+    {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    let _ = std::fs::remove_file(&marker);
+}
+
 /// Check an archive and stage it. Nothing of the live instance is touched:
 /// what this leaves behind is a staging tree and a marker, and the swap
 /// happens at the next boot, before anything opens the database.
@@ -1086,6 +1132,17 @@ async fn stage(
             "restored"
         }
     };
+
+    // The instance may have stopped being empty while this ran — the unpack
+    // and the chain verification above take real time, and a legitimate
+    // claim racing this request is exactly the case ADR-0044 means by "as
+    // open as the claim it is". Checked again, right before the one file
+    // write that commits to restoring: this is not the last check (the boot
+    // swap re-checks the live database itself), but it closes the window a
+    // slow archive could otherwise hold open.
+    if let Some(reason) = what_makes_the_instance_full(state).await {
+        return Err(RestoreError::NotEmpty(reason));
+    }
 
     // Nothing has moved. What is left is a tree and a note for the next boot.
     let record = json!({
@@ -1310,7 +1367,7 @@ async fn chain_of(snapshot: &Path) -> Result<ChainSummary, sqlx::Error> {
 /// and SQLite replaying the old write-ahead log onto the restored file — a
 /// database with somebody else's last minute in it. Returns what was
 /// swapped, for the caller to write onto the restored chain.
-pub fn swap_pending(config: &Config, database_url: &str) -> std::io::Result<Option<Value>> {
+pub async fn swap_pending(config: &Config, database_url: &str) -> std::io::Result<Option<Value>> {
     let marker = config.data_dir.join(RESTORE_PENDING);
     let Ok(bytes) = std::fs::read(&marker) else {
         return Ok(None);
@@ -1334,6 +1391,44 @@ pub fn swap_pending(config: &Config, database_url: &str) -> std::io::Result<Opti
 
     let db_files = crate::db::sqlite_files(database_url);
     let db_path = db_files.first().cloned();
+
+    // The last word, right before the one step that cannot be undone: a
+    // restore only ever checked emptiness at a point in time, and a claim
+    // could have landed since — in the moments this same request spent
+    // unpacking and verifying, or in whatever happened between that request
+    // finishing and this boot. This is not a defence in depth; on the boot
+    // path nothing else stands between "staged" and "destroyed", so this
+    // check IS the gate, asked as late as the filesystem allows.
+    if let Some(path) = &db_path {
+        match live_instance_is_still_empty(path, config).await {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!(
+                    "restore: a restore was staged, but this instance is no longer empty — \
+                     someone claimed it since. The staged archive is discarded, not the live \
+                     data; if the archive is still wanted, restore it after emptying the \
+                     instance again"
+                );
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = std::fs::remove_file(&marker);
+                return Ok(None);
+            }
+            Err(e) => {
+                // Read as "we cannot prove this is safe" rather than "it is
+                // safe": a live database that fails to open is not the same
+                // thing as an empty one.
+                eprintln!(
+                    "restore: a restore was staged, but the live database could not be checked \
+                     ({e}) — discarding the staged archive rather than guessing. The live data \
+                     was not touched"
+                );
+                let _ = std::fs::remove_dir_all(&staging);
+                let _ = std::fs::remove_file(&marker);
+                return Ok(None);
+            }
+        }
+    }
+
     // The sidecars go with it: a stale write-ahead log replayed onto a
     // restored database is the one way to lose exactly what was restored.
     for path in &db_files {
@@ -1401,6 +1496,36 @@ pub async fn note_restored(state: &AppState, record: &Value) -> Result<(), sqlx:
     )
     .await?;
     Ok(())
+}
+
+/// Is the database at `path` still one nobody has claimed? `Ok(true)` also
+/// when the file does not exist at all — the state before anything has ever
+/// been written, which is as empty as an instance gets. A file that exists
+/// but will not open as SQLite is `Err`, not `Ok(false)`: refusing to guess
+/// is the point.
+async fn live_instance_is_still_empty(path: &Path, config: &Config) -> std::io::Result<bool> {
+    if !path.is_file() {
+        return Ok(true);
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .foreign_keys(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(std::io::Error::other)?;
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .map_err(std::io::Error::other)?;
+    let companies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM companies")
+        .fetch_one(&pool)
+        .await
+        .map_err(std::io::Error::other)?;
+    pool.close().await;
+    Ok(users == 0 && companies == 0 && crate::claude_auth::stored_token(config).is_none())
 }
 
 fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {
