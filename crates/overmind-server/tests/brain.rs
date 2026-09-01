@@ -461,6 +461,29 @@ async fn run_task(env: &Env, company: &str, goal: &str, title: &str) -> String {
     await_session(env, &session).await
 }
 
+/// Wait for what the assertion is actually about.
+///
+/// The runner marks a session `completed` and records what the organization
+/// learned *after* that -- deliberately, because a hung memory provider must
+/// never hold a run open ("Best-effort; never fatal", `runner.rs`). So
+/// `await_session` returning is not "the memory landed", and a test that reads
+/// the store the instant it returns is racing a write that is on purpose off
+/// the critical path. On a loaded runner that race is lost: seen on macOS CI,
+/// where `memories.txt` still held only the founding memory.
+async fn await_brain(env: &Env, company: &str, needle: &str) -> String {
+    let path = env.brain_dir(company).join("memories.txt");
+    for _ in 0..150 {
+        if let Ok(stored) = std::fs::read_to_string(&path)
+            && stored.contains(needle)
+        {
+            return stored;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let stored = std::fs::read_to_string(&path).unwrap_or_default();
+    panic!("{needle:?} never reached the brain of {company}: {stored}");
+}
+
 /// The heart of the milestone: what one company remembers, another cannot read.
 #[tokio::test]
 async fn one_companys_memories_are_invisible_to_another() {
@@ -503,10 +526,11 @@ async fn one_companys_memories_are_invisible_to_another() {
     // And on disk they are two stores, each holding only its own company's
     // work. Globex has a file too — it completed a task, so it remembered
     // something — and what matters is that Acme's secret is not in it.
-    let acme_store =
-        std::fs::read_to_string(env.brain_dir(&acme).join("memories.txt")).expect("acme store");
-    let globex_store =
-        std::fs::read_to_string(env.brain_dir(&globex).join("memories.txt")).expect("globex store");
+    let acme_store = await_brain(&env, &acme, "ACME_SECRET").await;
+    // Globex's own write is awaited too, so the negative assertion below is
+    // made against a store that has finished being written -- otherwise it
+    // could pass because nothing had landed yet, which proves nothing.
+    let globex_store = await_brain(&env, &globex, "Globex first task").await;
     assert!(acme_store.contains("ACME_SECRET"), "acme: {acme_store}");
     assert!(
         !globex_store.contains("ACME_SECRET"),
@@ -729,6 +753,10 @@ async fn a_memory_names_the_task_that_produced_it() {
     let env = setup(true, true).await;
     let (company, goal) = found_company(&env, "Provenance").await;
     run_task(&env, &company, &goal, "Rewrite the deploy script").await;
+    // The browse below counts exactly two memories, so it must not run until
+    // the task's has been written -- the runner stores it after the session is
+    // already `completed` (see `await_brain`).
+    await_brain(&env, &company, "Rewrite the deploy script").await;
 
     let (s, body) = send(
         &env.app,
@@ -769,8 +797,7 @@ async fn the_brain_itself_records_which_task_a_memory_came_from() {
     let (company, goal) = found_company(&env, "Tagged").await;
     run_task(&env, &company, &goal, "Tag me").await;
 
-    let stored =
-        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).expect("store");
+    let stored = await_brain(&env, &company, "task:").await;
     assert!(
         stored.contains("task:"),
         "no task tag written into the brain: {stored}"
