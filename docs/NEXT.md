@@ -26,6 +26,15 @@ Not a development milestone: the owner uses Overmind for real work for a week, d
 ### Backup and restore
 *Opened 29 Aug 2026 as **M31** ([ADR-0044](adr/0044-the-archive-is-the-instance.md)); the milestone, its slices and its Accept live in the roadmap now. What was sketched here — the archive, the verified chain, the restore into a fresh instance — is there in its decided form; the token is sealed by a passphrase rather than carried in the clear, and the scratch dirs stay out.*
 
+### Updating, and the way back
+*Measured 1 Sep 2026, while accepting M31.* Updating **forward** is already safe and needs nothing: `docker compose up -d --pull always` replaces the container, never the volumes; the compose declares `name: overmind`, so an update run from any directory finds the same data; and migrations are cumulative, so an instance on 0.1.0 can go straight to the newest with no stepping stones. Updating is opt-in — nothing moves until that line is run — and staying put is a deliberate edit of `image:` ([ADR-0043](adr/0043-the-compose-file-is-the-installers.md)).
+
+**Going back is where it stops.** `sqlx::migrate!` runs at boot and there is no schema-version guard, so an older binary meeting a database a newer one has migrated exits with `Migrate(VersionMissing(...))` and refuses to start. Failing closed is right — nothing is corrupted — but three things follow that we tell nobody: there is **no downgrade**; **an archive is not a rollback**, because a restore needs an *empty* instance, so going back means emptying the volume and restoring into it; and **nothing prompts an archive before an update**, so the person who needs one is exactly the person who does not have one. The error itself names a migration number and no remedy.
+
+M31 built the machinery; what is missing is the moment it is used on its own. The shape, cheapest first: at boot, when migrations are about to be applied that were not there before, **take an archive into `<data>/backups/` named for the version being left** — the one instant when the need is certain and the data is still the old version's. And **make the refusal speak**: record which version last opened the database, so an old binary can say *"this data was written by a newer Overmind (0.3.x); this is 0.2.3 — update again, or start empty and restore an archive"* instead of a migration number.
+
+**Accept:** update across a migration and find an archive of the previous version waiting, without having asked for it; roll the image back and read a sentence that says what happened and what to do; empty the volume, restore that archive, and be back where you were.
+
 ### From diff to landed
 The loop's last step. After review, a person can **land** a code run: merge its branch into the workspace's default ref (fast-forward or merge commit, the repo's history kept honest), or — when the repository has a remote and `gh` is signed in — **open a pull request** with the task's brief as the description and the diff as the body. Both are the human's verb, audited with the actor; an agent never lands its own work. Conflicts are reported, not resolved by a machine.
 
