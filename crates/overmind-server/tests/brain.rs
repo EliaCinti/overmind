@@ -753,20 +753,34 @@ async fn a_memory_names_the_task_that_produced_it() {
     let env = setup(true, true).await;
     let (company, goal) = found_company(&env, "Provenance").await;
     run_task(&env, &company, &goal, "Rewrite the deploy script").await;
-    // The browse below counts exactly two memories, so it must not run until
-    // the task's has been written -- the runner stores it after the session is
-    // already `completed` (see `await_brain`).
-    await_brain(&env, &company, "Rewrite the deploy script").await;
-
-    let (s, body) = send(
-        &env.app,
-        "GET",
-        &format!("/api/companies/{company}/memory/memories"),
-        None,
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(body["state"], json!("ok"), "browse: {body}");
+    // Wait for the answer this test is about, not for a sign of it. The runner
+    // stores the memory and only *then* writes the link row that `subject` is
+    // read from, so waiting for the memory to reach the store would move the
+    // race one step later instead of removing it: the browse could return the
+    // memory with a null subject.
+    let mut body = json!(null);
+    for _ in 0..150 {
+        let (s, v) = send(
+            &env.app,
+            "GET",
+            &format!("/api/companies/{company}/memory/memories"),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(v["state"], json!("ok"), "browse: {v}");
+        let ready = v["items"].as_array().is_some_and(|items| {
+            items.iter().any(|i| {
+                i["title"] == json!("Rewrite the deploy script")
+                    && i["subject"]["type"] == json!("task")
+            })
+        });
+        body = v;
+        if ready {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let items = body["items"].as_array().expect("items");
     // Two memories: the founding one (M21) and the task's. The one under test
     // is found by title, not by position — a browse order is not a contract.
