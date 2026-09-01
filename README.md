@@ -262,6 +262,19 @@ On macOS every run is caged with `sandbox-exec`; a Claude subscription works ins
 
 Overmind binds to loopback by default, on purpose. To share it, bind to a **Tailscale** address (see [above](#several-people-one-company--over-tailscale)) — or, for a public hostname, terminate TLS in a reverse proxy that preserves the `Host` header (Caddy does) and run Overmind with `OVERMIND_COOKIE_SECURE=on` behind it. Do not set that flag on plain-HTTP localhost: the browser would drop the cookie and every login would silently not stick.
 
+### Back up and restore
+
+The data has a way out. **Archive** in the top bar (owner only) exports the whole instance as one `tar.gz` — the database and every company's brain taken as consistent snapshots, your attachments and artifacts, and the subscription sign-in **sealed** under a passphrase the server never keeps (at least twelve characters; the field appears only when there is a sign-in to seal). No credential is readable in the bytes: a run's MCP bearer and the editor's integration tokens are scrubbed from the snapshot. Scratch — sessions, chat copies, worktrees, meeting rooms — stays out; a meeting's transcript is in the database and comes back with it.
+
+Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/`, the server's alone) and download from the same dialog. **Keep one somewhere the data disk isn't.**
+
+A restore is *a claim with a payload*: offered on an **empty** instance only — no owner, no company, no sign-in — from the door's first screen. Every entry is checked against the manifest's hash and the audit chain is verified against the report the archive carries; a wrong passphrase refuses the whole restore while a retry is still free, and `skip_token` restores without the sign-in. Nothing of the live instance moves during the request: the server stages the tree and asks to be restarted, and **the swap happens at the next start, before the database is opened** — under Docker the restart policy is enough.
+
+```bash
+# somewhere other than the data disk
+OVERMIND_BACKUP_DIR=/mnt/backups/overmind
+```
+
 ### Organizational memory
 
 **In the Docker image, memory is on by default** ([ADR-0031](docs/adr/0031-memory-on-by-default-in-the-image.md)): Wadachi ships inside it, semantic search included, model baked in. Set `OVERMIND_MEMORY_CMD=` (empty) to switch it off deliberately.
