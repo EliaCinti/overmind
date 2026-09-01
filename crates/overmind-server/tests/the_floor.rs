@@ -451,8 +451,16 @@ async fn a_company_with_the_new_references_can_still_be_deleted() {
     .await
     .expect("summary");
 
-    // Let the pair's sessions settle: deletion rightly refuses while a
-    // session is queued or running (caught on CI, where timing differs).
+    // Let the pair settle. Deletion rightly refuses while a session is queued
+    // or running, and waiting for *live sessions* alone is not enough: this is
+    // a dependent pair, so between Padre finishing and Figlio being picked up
+    // there is a moment with no live session and work still to come. The
+    // scheduler takes tasks in `todo` (`scheduler.rs`), and a `blocked` task
+    // becomes `todo` the moment its dependency lands -- so the condition is
+    // that neither is left, not that the sessions table happens to be quiet.
+    // (Caught on macOS CI, 1 Sep 2026: 409 "1 session(s) still queued or
+    // running" from a settle loop that had already seen zero.)
+    let mut open = (0, 0);
     for _ in 0..200 {
         let live: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM agent_task_sessions WHERE status IN ('queued', 'running')",
@@ -460,11 +468,22 @@ async fn a_company_with_the_new_references_can_still_be_deleted() {
         .fetch_one(&env.state.pool)
         .await
         .expect("q");
-        if live.0 == 0 {
+        let startable: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status IN ('todo', 'blocked')")
+                .fetch_one(&env.state.pool)
+                .await
+                .expect("q");
+        open = (live.0, startable.0);
+        if open == (0, 0) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    assert_eq!(
+        open,
+        (0, 0),
+        "the floor never went quiet: (live sessions, startable tasks)"
+    );
 
     let (s, v) = send(
         &env.app,
