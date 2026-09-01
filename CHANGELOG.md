@@ -4,6 +4,14 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-09-02
+
+**The data has a way out.** Until now one owner, one SQLite, one brain per company and one Docker volume held everything, and nothing could take it off the machine — an unplugged disk had already proved the volume can vanish under a running factory. M31 answers it: the instance exports as one archive, sealed, verified on the way back in, and restored into a fresh instance that swaps it in at its next start. Accepted on a real instance: 261 MB, 321 entries and a chain of 920 events exported from the owner's own Overmind and restored into a fresh container, companies, agents, tasks, messages, artifacts and attachments identical row for row.
+
+It also closes the door. An instance nobody had claimed was an open API — whoever reached the port could found a company and start a task, which runs an agent CLI on that machine, and signing up made them its owner. The claim costs a code now, and the wall no longer makes an exception for an unclaimed instance. **If you are running an unclaimed Overmind anywhere but loopback, this is the release to take.**
+
+And it is the first whose `docker-compose.yml` ships as an asset, so the install stops needing a clone.
+
 ### Security
 
 - **An instance nobody has claimed is no longer an open API, and the claim costs a code only somebody at the machine can read** ([ADR-0045](docs/adr/0045-the-install-is-one-script.md), M32). Until now a fresh Overmind waved the whole API through while it had no owner — the comment in the code said so out loud: *"the boundary is the credential, and until one exists there is nothing to guard with"*. But there was: this machine. Whoever reached the port of an unclaimed instance could found a company and start a task, which runs an agent CLI here; choose who pays; open the subscription sign-in; mint an invite; or restore their own archive over the top. On loopback that was theoretical. The documented way to share a company is to bind Overmind to a tailnet address, and there it was the whole instance.
