@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-01
 - **Status:** proposed
-- **Builds on:** [ADR-0043](0043-the-compose-file-is-the-installers.md) (the compose file is the installer's, and the asset is where you get it), [ADR-0014](0014-docker-deployment.md) (one deployment image), [ADR-0032](0032-the-door.md) (the first run claims the instance).
+- **Builds on:** [ADR-0043](0043-the-compose-file-is-the-installers.md) (the compose file is the installer's, and the asset is where you get it), [ADR-0014](0014-docker-deployment.md) (one deployment image), [ADR-0032](0032-authentication-the-boundary-moves-off-the-machine.md) (the first run claims the instance).
 
 ## Context
 
