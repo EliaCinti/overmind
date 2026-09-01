@@ -451,46 +451,29 @@ async fn a_company_with_the_new_references_can_still_be_deleted() {
     .await
     .expect("summary");
 
-    // Let the pair settle. Deletion rightly refuses while a session is queued
-    // or running, and waiting for *live sessions* alone is not enough: this is
-    // a dependent pair, so between Padre finishing and Figlio being picked up
-    // there is a moment with no live session and work still to come. The
-    // scheduler takes tasks in `todo` (`scheduler.rs`), and a `blocked` task
-    // becomes `todo` the moment its dependency lands -- so the condition is
-    // that neither is left, not that the sessions table happens to be quiet.
-    // (Caught on macOS CI, 1 Sep 2026: 409 "1 session(s) still queued or
-    // running" from a settle loop that had already seen zero.)
-    let mut open = (0, 0);
+    // Deletion refuses while a session is queued or running, and this is a
+    // dependent pair: between Padre finishing and Figlio being picked up there
+    // is a moment with no live session and work still to come -- the scheduler
+    // takes tasks in `todo` (`scheduler.rs`), and a `blocked` task becomes
+    // `todo` the instant its dependency lands. So rather than guess when the
+    // floor is quiet, wait on the verb under test: a 409 means "not yet",
+    // anything else is the answer. This also keeps a legitimately stuck task
+    // (empty-handed, or a timed-out session) from failing the wait instead of
+    // the assertion. (Caught on macOS CI, 1 Sep 2026, from a settle loop that
+    // had already seen zero live sessions.)
+    let (mut s, mut v) = (StatusCode::CONFLICT, json!(null));
     for _ in 0..200 {
-        let live: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM agent_task_sessions WHERE status IN ('queued', 'running')",
+        (s, v) = send(
+            &env.app,
+            "DELETE",
+            &format!("/api/companies/{}", env.company),
+            None,
         )
-        .fetch_one(&env.state.pool)
-        .await
-        .expect("q");
-        let startable: (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE status IN ('todo', 'blocked')")
-                .fetch_one(&env.state.pool)
-                .await
-                .expect("q");
-        open = (live.0, startable.0);
-        if open == (0, 0) {
+        .await;
+        if s != StatusCode::CONFLICT {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(
-        open,
-        (0, 0),
-        "the floor never went quiet: (live sessions, startable tasks)"
-    );
-
-    let (s, v) = send(
-        &env.app,
-        "DELETE",
-        &format!("/api/companies/{}", env.company),
-        None,
-    )
-    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
 }
