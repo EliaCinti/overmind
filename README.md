@@ -266,9 +266,21 @@ Overmind binds to loopback by default, on purpose. To share it, bind to a **Tail
 
 The data has a way out. **Archive** in the top bar (owner only) exports the whole instance as one `tar.gz` — the database and every company's brain taken as consistent snapshots, your attachments and artifacts, and the subscription sign-in **sealed** under a passphrase the server never keeps (at least twelve characters; the field appears only when there is a sign-in to seal). No credential is readable in the bytes: a run's MCP bearer and the editor's integration tokens are scrubbed from the snapshot. Scratch — sessions, chat copies, worktrees, meeting rooms — stays out; a meeting's transcript is in the database and comes back with it.
 
-Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/`, the server's alone) and download from the same dialog. **Keep one somewhere the data disk isn't.**
+One thing an archive deliberately does not carry: `overmind-agent-home`, the agent CLI's **own** login. It does not need to when you signed in **from the product** — that token is Overmind's, kept under `/data` and handed to every agent it spawns, so a restore with the passphrase pays again. If instead you signed in from the shell with `claude setup-token`, that credential is the CLI's and lives in that volume: back it up the raw way too, with the recipe in [`docker-compose.yml`](docker-compose.yml).
 
-A restore is *a claim with a payload*: offered on an **empty** instance only — no owner, no company, no sign-in — from the door's first screen. Every entry is checked against the manifest's hash and the audit chain is verified against the report the archive carries; a wrong passphrase refuses the whole restore while a retry is still free, and `skip_token` restores without the sign-in. Nothing of the live instance moves during the request: the server stages the tree and asks to be restarted, and **the swap happens at the next start, before the database is opened** — under Docker the restart policy is enough.
+Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/`, the server's alone) and download from the same dialog. **Keep one somewhere the data disk isn't** — and in the container that means a mount, not just a variable: a path nothing is mounted at is the container's writable layer, and the next `docker compose up -d --pull always` recreates the container and takes every archive with it.
+
+```yaml
+# docker-compose.yml — archives on a disk that outlives the container
+services:
+  overmind:
+    environment:
+      OVERMIND_BACKUP_DIR: /backups
+    volumes:
+      - /mnt/backups/overmind:/backups
+```
+
+A restore is *a claim with a payload*: offered on an **empty** instance only — no owner, no company, no sign-in — from the door's first screen. Every entry is checked against the manifest's hash and the audit chain is verified against the report the archive carries; a wrong passphrase refuses the whole restore while a retry is still free, and *Restore without the sign-in* (the `skip_token` field) brings everything else back and leaves you to sign in again. Nothing of the live instance moves during the request: the server stages the tree and asks to be restarted, and **the swap happens at the next start, before the database is opened** — under Docker the restart policy is enough.
 
 ```bash
 # somewhere other than the data disk
