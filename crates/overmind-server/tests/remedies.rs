@@ -6,6 +6,8 @@
 //! not characterized for it — the refusal names the remedy, and a general
 //! traits endpoint applies it.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -73,11 +75,12 @@ async fn upload_image(app: &axum::Router, uri: &str, filename: &str) -> Value {
 }
 
 async fn setup() -> (axum::Router, String) {
+    let data_dir =
+        std::env::temp_dir().join(format!("overmind-remedy-{}", uuid::Uuid::now_v7().simple()));
     let state = overmind_server::init_with(
         "sqlite::memory:",
         overmind_server::Config {
-            data_dir: std::env::temp_dir()
-                .join(format!("overmind-remedy-{}", uuid::Uuid::now_v7().simple())),
+            data_dir: data_dir.clone(),
             agent_cmd: Some("/usr/bin/true".into()),
             heartbeat_ms: 1_000_000,
             ..overmind_server::Config::default()
@@ -85,7 +88,7 @@ async fn setup() -> (axum::Router, String) {
     )
     .await
     .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &data_dir).await;
     let (_, co) = send(
         &app,
         "POST",

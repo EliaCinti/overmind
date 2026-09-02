@@ -8,6 +8,8 @@
 //! CEO* (M15) and the next thing that happens is that CEO speaking. Found live
 //! on 2026-08-13, when a company created "in Italian" answered in English.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -66,7 +68,7 @@ async fn app() -> axum::Router {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    overmind_server::app(state)
+    common::claimed(overmind_server::app(state), &root.join("data")).await
 }
 
 #[tokio::test]

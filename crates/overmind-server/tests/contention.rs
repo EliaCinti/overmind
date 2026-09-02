@@ -5,6 +5,8 @@
 //! locked" on the spot, which reached the browser as a 500 within the first
 //! minute of dogfooding. The pool now waits its turn; this holds that.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
@@ -25,7 +27,7 @@ async fn a_write_waits_for_the_writer_ahead_instead_of_failing() {
         ..overmind_server::Config::default()
     };
     let state = overmind_server::init_with(&db, config).await.expect("init");
-    let app = overmind_server::app(state.clone());
+    let app = common::claimed(overmind_server::app(state.clone()), &dir.join("data")).await;
 
     // One connection takes the write lock and sits on it, the way a
     // mid-flight conversation turn does.

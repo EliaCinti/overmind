@@ -2,6 +2,8 @@
 //! worktree, the diff is visible, every step is audited, cost is recorded,
 //! and concurrent checkouts of the same task can't double-run.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -104,7 +106,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, company) = send(
         &app,

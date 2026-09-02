@@ -8,6 +8,8 @@
 //! of what the agent is saying — rides on the conversation while a turn is
 //! answering, and on the session while a task runs.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -94,7 +96,7 @@ async fn setup() -> Env {
     )
     .await
     .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
     let (s, co) = send(
         &app,
         "POST",

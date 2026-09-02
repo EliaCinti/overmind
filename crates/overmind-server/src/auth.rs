@@ -204,6 +204,118 @@ pub async fn session_identity(
         .flatten()
 }
 
+// ---------------------------------------------------------------------------
+// The setup code (ADR-0045)
+// ---------------------------------------------------------------------------
+
+/// The file a fresh instance writes its setup code into, under the data dir.
+pub const SETUP_CODE_FILE: &str = "setup-code";
+
+/// Where the code lives. A file rather than a log line, so it survives a
+/// restart unchanged, can be read by the installer, and is not re-minted under
+/// somebody who has already copied it.
+pub fn setup_code_path(config: &crate::db::Config) -> std::path::PathBuf {
+    config.data_dir.join(SETUP_CODE_FILE)
+}
+
+/// The code, if this instance still has one. `None` once it has been claimed.
+pub fn stored_setup_code(config: &crate::db::Config) -> Option<String> {
+    let c = std::fs::read_to_string(setup_code_path(config)).ok()?;
+    let c = c.trim().to_string();
+    (!c.is_empty()).then_some(c)
+}
+
+/// Compare without letting the clock say how much of the code was right.
+fn codes_match(given: &str, expected: &str) -> bool {
+    let (a, b) = (given.as_bytes(), expected.as_bytes());
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..a.len().max(b.len()) {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
+}
+
+/// Four groups of four, from Crockford's alphabet minus the letters that read
+/// as digits: eighty bits, and a person can copy it off a terminal without
+/// wondering whether that was an O or a zero.
+fn new_setup_code() -> String {
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut raw = [0u8; 16];
+    getrandom::fill(&mut raw).expect("the operating system has randomness");
+    let chars: Vec<char> = raw
+        .iter()
+        .map(|b| ALPHABET[(*b as usize) % ALPHABET.len()] as char)
+        .collect();
+    chars
+        .chunks(4)
+        .map(|c| c.iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Mint one at boot when nobody owns this instance yet and none is waiting.
+///
+/// An unclaimed Overmind is open by construction — whoever reaches the port
+/// first becomes its owner — and the documented way to share a company is to
+/// bind it to a tailnet address. So the claim costs something only a person at
+/// the machine can read.
+pub async fn mint_setup_code(
+    pool: &sqlx::SqlitePool,
+    config: &crate::db::Config,
+) -> Result<(), std::io::Error> {
+    let owner_exists: bool = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if owner_exists {
+        // Nothing to guard, and nothing to leave lying about.
+        let _ = std::fs::remove_file(setup_code_path(config));
+        return Ok(());
+    }
+    if stored_setup_code(config).is_some() {
+        // Already minted, and somebody may have copied it.
+        return Ok(());
+    }
+    std::fs::create_dir_all(&config.data_dir)?;
+    let code = new_setup_code();
+    let path = setup_code_path(config);
+    std::fs::write(&path, format!("{code}\n"))?;
+    keep_to_the_server(&path);
+    println!(
+        "setup code for the first claim: {code}  (also in {}; it is asked for once, then deleted)",
+        path.display()
+    );
+    Ok(())
+}
+
+/// `0600`: the code is the whole of the door until somebody claims it.
+fn keep_to_the_server(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Spend it: a claim that succeeded is the last one this code can buy.
+pub fn clear_setup_code(config: &crate::db::Config) {
+    let _ = std::fs::remove_file(setup_code_path(config));
+}
+
+/// Does this request carry the code the instance is waiting for?
+///
+/// An instance with no code waiting has already been claimed, or was created
+/// before this existed; either way the claim's own checks decide.
+pub fn setup_code_ok(config: &crate::db::Config, given: Option<&str>) -> bool {
+    match stored_setup_code(config) {
+        None => true,
+        Some(expected) => given.is_some_and(|g| codes_match(g.trim(), &expected)),
+    }
+}
+
 /// The one thing a role changes today (M24): billing is the owner's.
 /// Everything else works identically for every user until M25's real
 /// permission model -- a decorative column would be worse than none.
@@ -231,11 +343,21 @@ pub struct Credentials {
     /// once anyone exists.
     #[serde(default)]
     pub invite: Option<String>,
+    /// The setup code (ADR-0045): what a claim costs while the instance has
+    /// nobody to refuse on its behalf.
+    #[serde(default)]
+    pub setup: Option<String>,
 }
 
 /// Create the owner -- exactly once, atomically. Of N concurrent claims one
 /// INSERT wins: the guard is in the WHERE, not in application logic.
 pub async fn claim(state: &AppState, req: &Credentials) -> Result<Response, ApiError> {
+    // Before anything else, and before the password is even hashed: an
+    // unclaimed instance has nobody to refuse on its behalf, so the code it
+    // minted at boot is the whole of its door (ADR-0045).
+    if !setup_code_ok(&state.config, req.setup.as_deref()) {
+        return Err(ApiError::Unauthorized);
+    }
     let name = req.name.trim();
     if name.is_empty() {
         return Err(ApiError::Invalid("the owner needs a name".into()));
@@ -263,6 +385,9 @@ pub async fn claim(state: &AppState, req: &Credentials) -> Result<Response, ApiE
     // `WHERE NOT EXISTS` is the one atomic decision that matters, and once it
     // lands, no staged restore gets to overwrite it at the next boot.
     crate::backup::discard_stale_restore(&state.config);
+    // Spent: this instance has an owner, and the code bought the only claim
+    // it was ever going to buy.
+    clear_setup_code(&state.config);
     audit_auth(state, "auth.claimed", name).await;
     open_session(state, name).await
 }
@@ -301,6 +426,13 @@ pub async fn signup(state: &AppState, req: &Credentials) -> Result<Response, Api
         .fetch_one(&mut *tx)
         .await
         .unwrap_or(0);
+    // Nobody has claimed this instance, so there is nobody who could have
+    // invited you -- and signing up here used to make you its *owner*, with
+    // neither an invite nor the setup code the claim costs (ADR-0045). The
+    // first person in is the owner, through the claim, holding the code.
+    if anyone == 0 {
+        return Err(ApiError::Unauthorized);
+    }
     if anyone > 0
         && req
             .invite
@@ -605,17 +737,29 @@ pub async fn wall(State(state): State<AppState>, req: Request<Body>, next: Next)
         return next.run(req).await;
     }
 
-    // No owner yet: the whole API stays open, exactly as before M24. The
-    // boundary is the credential, and until one exists there is nothing to
-    // guard with -- and a fresh install must be able to claim itself.
-    let owner_exists: bool = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
-        .fetch_one(&state.pool)
-        .await
-        .map(|n| n > 0)
-        .unwrap_or(false);
-    if !owner_exists {
-        return next.run(req).await;
+    // A restore is a claim with a payload (ADR-0044), so it is reachable
+    // exactly while a claim is: on an instance nobody owns yet. On a claimed
+    // one it stays behind the wall, which refuses a stranger *before* the
+    // upload rather than after it -- and the handler demands the setup code
+    // like the claim does (ADR-0045).
+    if path == "/restore" {
+        let owner_exists: bool = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+            .fetch_one(&state.pool)
+            .await
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if !owner_exists {
+            return next.run(req).await;
+        }
     }
+
+    // Until ADR-0045 an unclaimed instance waved the whole API through --
+    // "the boundary is the credential, and until one exists there is nothing
+    // to guard with". But there is: this machine. A stranger reaching the port
+    // of an unclaimed instance could found a company and start a task, which
+    // runs an agent CLI here; choose who pays; open the subscription sign-in;
+    // mint an invite. The door answers about itself and takes a claim. Nothing
+    // else answers anybody without a session.
 
     // The CSRF belt on top of SameSite=Strict (ADR-0032): a state-changing
     // request that carries a body must declare it JSON or multipart --

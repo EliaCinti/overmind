@@ -5,6 +5,8 @@
 //! reach the agent and its output still be lost, and output can be collected
 //! from a run that never saw the input.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -126,7 +128,7 @@ async fn setup(stub: &str) -> (axum::Router, String, String) {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
     let (_, company) = send(
         &app,
         "POST",
@@ -398,7 +400,7 @@ async fn a_code_run_hands_back_a_diff_and_a_document_without_mixing_them() {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, company) = send(
         &app,

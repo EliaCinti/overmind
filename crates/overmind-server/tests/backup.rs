@@ -89,12 +89,16 @@ async fn setup() -> (axum::Router, overmind_server::AppState, std::path::PathBuf
 }
 
 /// Claim the owner and hand back the session cookie's `k=v` pair.
-async fn claim(app: &axum::Router) -> String {
+async fn claim(app: &axum::Router, data_dir: &std::path::Path) -> String {
+    let code = std::fs::read_to_string(data_dir.join("setup-code"))
+        .expect("the server minted a setup code")
+        .trim()
+        .to_string();
     let (s, _, cookie) = send_raw(
         app,
         "POST",
         "/api/auth/claim",
-        Some(json!({ "name": "elia", "password": "a long enough password" })),
+        Some(json!({ "name": "elia", "password": "a long enough password", "setup": code })),
         None,
     )
     .await;
@@ -163,18 +167,21 @@ async fn download(app: &axum::Router, cookie: &str, name: &str) -> (StatusCode, 
 #[tokio::test]
 async fn an_unclaimed_instance_has_nobody_to_export_for() {
     let (app, _state, _dir) = setup().await;
-    // `require_owner` waves an unclaimed instance through everywhere else;
-    // here that would let anyone on the port fill the backup folder.
+    // The wall answers first now (ADR-0045): an unclaimed instance is not an
+    // open API, so a stranger on the port is refused before the handler is
+    // reached. `require_claimed_owner`'s own 409 -- "claim it first, then
+    // export" -- stays as the second lock, for a caller that somehow gets past
+    // the first.
     let (s, v) = send(&app, "POST", "/api/backup", Some(json!({})), None).await;
-    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
     let (s, _) = send(&app, "GET", "/api/backups", None, None).await;
-    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn once_claimed_the_export_is_the_owners_alone() {
-    let (app, _state, _dir) = setup().await;
-    let _cookie = claim(&app).await;
+    let (app, _state, dir) = setup().await;
+    let _cookie = claim(&app, &dir).await;
     let (s, _) = send(&app, "POST", "/api/backup", Some(json!({})), None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _) = send(&app, "GET", "/api/backups", None, None).await;
@@ -188,7 +195,7 @@ async fn once_claimed_the_export_is_the_owners_alone() {
 #[tokio::test]
 async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() {
     let (app, state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let _company = found(&app, &cookie, "Casa San Vito").await;
     std::fs::create_dir_all(dir.join("artifacts").join("s1")).expect("artifacts dir");
     std::fs::write(
@@ -302,7 +309,7 @@ async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() 
 #[tokio::test]
 async fn the_folder_lists_what_it_holds_and_names_only_bare_entries() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let (s, first) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let name = first["name"].as_str().expect("name").to_string();
@@ -338,7 +345,7 @@ async fn the_folder_lists_what_it_holds_and_names_only_bare_entries() {
 async fn the_backup_folder_is_the_servers_alone() {
     use std::os::unix::fs::PermissionsExt;
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let (s, report) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::OK);
     let folder = dir.join("backups");
@@ -358,7 +365,7 @@ const TOKEN: &str = "sk-ant-oat01-THIS-IS-THE-SUBSCRIPTION-TOKEN-0123456789abcde
 #[tokio::test]
 async fn a_token_on_the_box_needs_a_passphrase_to_travel() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
     let (s, v) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
@@ -374,7 +381,7 @@ async fn a_token_on_the_box_needs_a_passphrase_to_travel() {
 #[tokio::test]
 async fn no_credential_is_readable_in_the_archive_bytes() {
     let (app, state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let company = found(&app, &cookie, "Acme").await;
     std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
 
@@ -508,7 +515,7 @@ async fn no_credential_is_readable_in_the_archive_bytes() {
 #[tokio::test]
 async fn without_a_token_no_passphrase_is_asked_and_nothing_is_sealed() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let (s, report) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(report["sealed_token"], false);
@@ -531,7 +538,7 @@ async fn without_a_token_no_passphrase_is_asked_and_nothing_is_sealed() {
 #[tokio::test]
 async fn the_room_an_agent_works_in_stays_out_of_the_archive() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     // A meeting room is handed to the agent uid for every turn and outlives
     // the meeting; what the meeting decided is in the database.
     std::fs::create_dir_all(dir.join("meetings").join("m1")).expect("room");
@@ -557,7 +564,7 @@ async fn the_room_an_agent_works_in_stays_out_of_the_archive() {
 #[tokio::test]
 async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     // The credential the whole seal exists to keep out of an archive.
     std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
     let shelf = dir.join("artifacts").join("s1");
@@ -607,7 +614,7 @@ async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
 #[tokio::test]
 async fn a_passphrase_that_leaves_the_machine_has_a_floor() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
     // The door refuses under eight characters for a password that never
     // leaves the box; this one is carried away on a disk, where nothing
@@ -650,7 +657,7 @@ async fn a_backup_folder_that_holds_the_data_dir_is_refused() {
     .await
     .expect("init");
     let app = overmind_server::app(state);
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &data_dir).await;
 
     let (s, v) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
@@ -666,7 +673,7 @@ async fn a_backup_folder_that_holds_the_data_dir_is_refused() {
 #[tokio::test]
 async fn the_listing_says_whether_a_sign_in_would_travel() {
     let (app, _state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let (s, before) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(before["sign_in_travels"], false);
@@ -679,7 +686,7 @@ async fn the_listing_says_whether_a_sign_in_would_travel() {
 #[tokio::test]
 async fn an_archive_is_deleted_by_its_owner_and_the_chain_says_so() {
     let (app, state, dir) = setup().await;
-    let cookie = claim(&app).await;
+    let cookie = claim(&app, &dir).await;
     let (s, report) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::OK, "{report}");
     let name = report["name"].as_str().expect("name").to_string();

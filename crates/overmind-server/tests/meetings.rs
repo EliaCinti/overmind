@@ -3,6 +3,8 @@
 //! deliberate — bounded, to a recorded decision that follows every participant
 //! back into its work.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -71,7 +73,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, company) = send(
         &app,

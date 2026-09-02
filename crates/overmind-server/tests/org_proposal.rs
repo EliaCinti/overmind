@@ -2,6 +2,8 @@
 //! idea and it proposes a team; nothing is hired until you accept; and the
 //! manual road — hiring everyone yourself — is never blocked by any of it.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -58,7 +60,7 @@ async fn setup(stub: &str) -> (axum::Router, String, String) {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
     let (status, company) = send(
         &app,
         "POST",

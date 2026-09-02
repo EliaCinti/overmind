@@ -10,6 +10,8 @@
 //! identical run succeeds without the sandbox, otherwise the test could be
 //! passing because the script was broken.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -83,14 +85,14 @@ async fn probe_at(
 
     let config = overmind_server::Config {
         agent_cmd: Some(format!("sh {}", script.display())),
-        data_dir,
+        data_dir: data_dir.clone(),
         sandbox,
         ..overmind_server::Config::default()
     };
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &data_dir).await;
 
     let (_, company) = send(
         &app,

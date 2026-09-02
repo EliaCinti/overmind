@@ -9,6 +9,8 @@
 //! No test here spawns the real CLI: the economy is declared with
 //! `economy_override` and the adapter is `/usr/bin/true`.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -31,7 +33,10 @@ async fn setup(economy: Economy) -> (axum::Router, std::path::PathBuf) {
     .await
     .expect("init");
     state.set_economy(economy);
-    (overmind_server::app(state), data_dir)
+    (
+        common::claimed(overmind_server::app(state), &data_dir).await,
+        data_dir,
+    )
 }
 
 async fn send(

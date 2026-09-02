@@ -88,6 +88,7 @@ export function Door({
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [invite, setInvite] = useState("");
+  const [setupCode, setSetupCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [shake, setShake] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -137,8 +138,13 @@ export function Door({
     setBusy(true);
     setError(null);
     try {
-      if (screen === "signup") await api.authSignup(name.trim(), password, invite.trim());
-      else await api.authLogin(name.trim(), password);
+      if (screen === "signup") {
+        // On an instance nobody owns, the first account is the *claim*, and it
+        // costs the setup code. Signing up here used to make you the owner
+        // without one (ADR-0045).
+        if (mode === "unclaimed") await api.authClaim(name.trim(), password, setupCode.trim());
+        else await api.authSignup(name.trim(), password, invite.trim());
+      } else await api.authLogin(name.trim(), password);
       onEntered();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -347,6 +353,21 @@ export function Door({
                       </p>
                     )}
                   </div>
+                  {screen === "signup" && mode === "unclaimed" && (
+                    <div>
+                      <RoundInput
+                        icon={KeyRound}
+                        value={setupCode}
+                        onChange={(e) => setSetupCode(e.target.value)}
+                        placeholder={t("door.setupCode")}
+                        className="font-mono"
+                        aria-label={t("door.setupCode")}
+                      />
+                      <p className="mt-1.5 pl-4 text-xs text-muted-foreground">
+                        {t("door.setupHint")}
+                      </p>
+                    </div>
+                  )}
                   {screen === "signup" && mode === "locked" && (
                     <div>
                       <RoundInput

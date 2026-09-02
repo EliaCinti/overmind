@@ -47,12 +47,43 @@ async fn send_raw(
     (status, value, set_cookie)
 }
 
-async fn setup() -> axum::Router {
+/// The app, and the directory the server writes its setup code into -- a test
+/// that claims legitimately has to read that code the way the person at the
+/// machine does. Derefs to the router so every `send_raw(&app, …)` still reads
+/// the way it did before the code existed.
+struct Door {
+    app: axum::Router,
+    data_dir: std::path::PathBuf,
+}
+
+impl std::ops::Deref for Door {
+    type Target = axum::Router;
+    fn deref(&self) -> &axum::Router {
+        &self.app
+    }
+}
+
+impl Door {
+    /// What the server minted at boot, as the installer would read it.
+    fn setup_code(&self) -> String {
+        std::fs::read_to_string(self.data_dir.join("setup-code"))
+            .expect("the server minted a setup code")
+            .trim()
+            .to_string()
+    }
+}
+
+async fn setup() -> Door {
+    setup_with_data_dir().await
+}
+
+async fn setup_with_data_dir() -> Door {
+    let data_dir =
+        std::env::temp_dir().join(format!("overmind-door-{}", uuid::Uuid::now_v7().simple()));
     let state = overmind_server::init_with(
         "sqlite::memory:",
         overmind_server::Config {
-            data_dir: std::env::temp_dir()
-                .join(format!("overmind-door-{}", uuid::Uuid::now_v7().simple())),
+            data_dir: data_dir.clone(),
             // Never the real CLI: on a machine that has it, a test touching
             // the subscription sign-in would open the owner's browser.
             agent_cmd: Some("/usr/bin/true".into()),
@@ -61,16 +92,43 @@ async fn setup() -> axum::Router {
     )
     .await
     .expect("init");
-    overmind_server::app(state)
+    Door {
+        app: overmind_server::app(state),
+        data_dir,
+    }
+}
+
+/// An unclaimed instance is open by construction -- whoever reaches the port
+/// first owns it -- and the wiki teaches binding to a tailnet address, because
+/// sharing a company is the product. So the claim costs a code the server
+/// minted and only somebody at the machine can read (ADR-0045).
+#[tokio::test]
+async fn a_claim_without_the_setup_code_is_refused() {
+    let door = setup_with_data_dir().await;
+
+    let (s, v, cookie) = send_raw(
+        &door,
+        "POST",
+        "/api/auth/claim",
+        Some(json!({ "name": "a stranger", "password": "a long enough password" })),
+        None,
+    )
+    .await;
+
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+    assert!(
+        cookie.is_none(),
+        "a refused claim must not hand out a session: {cookie:?}"
+    );
 }
 
 /// Claim the owner and hand back the session cookie's `k=v` pair.
-async fn claim(app: &axum::Router, name: &str, pass: &str) -> String {
+async fn claim(door: &Door, name: &str, pass: &str) -> String {
     let (s, _, cookie) = send_raw(
-        app,
+        door,
         "POST",
         "/api/auth/claim",
-        Some(json!({ "name": name, "password": pass })),
+        Some(json!({ "name": name, "password": pass, "setup": door.setup_code() })),
         None,
     )
     .await;
@@ -90,14 +148,19 @@ async fn mint(app: &axum::Router, cookie: &str) -> String {
     v["invite"].as_str().expect("the raw code").to_string()
 }
 
-/// Before an owner exists the API is exactly as open as it was before M24:
-/// a fresh install must be able to work and to claim itself.
+/// Before an owner exists the door answers about itself -- a fresh install has
+/// to be able to see its own state and claim itself. **Nothing else does.**
+/// Until ADR-0045 an unclaimed instance waved the whole API through, so
+/// whoever reached the port first could found a company and start a task,
+/// which runs an agent CLI on this machine.
 #[tokio::test]
-async fn an_unclaimed_instance_is_open_and_says_so() {
+async fn an_unclaimed_instance_says_so_and_answers_nothing_else() {
     let app = setup().await;
+
     let (s, v, _) = send_raw(&app, "GET", "/api/auth", None, None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["state"], json!("unclaimed"));
+
     let (s, _, _) = send_raw(
         &app,
         "POST",
@@ -106,7 +169,67 @@ async fn an_unclaimed_instance_is_open_and_says_so() {
         None,
     )
     .await;
-    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "a passer-by must not found a company on an instance nobody has claimed"
+    );
+}
+
+/// The code guards the claim, so signup must not be the way around it. While
+/// nobody has claimed the instance there is nobody to invite anybody: the
+/// first person in is the owner, and the owner pays the code. Until ADR-0045
+/// the invite gate was skipped entirely while `users` was empty, so a stranger
+/// could sign up, get a session, and walk through the wall.
+#[tokio::test]
+async fn signup_is_not_a_way_around_the_claim() {
+    let app = setup().await;
+
+    let (s, v, cookie) = send_raw(
+        &app,
+        "POST",
+        "/api/auth/signup",
+        Some(json!({ "name": "a stranger", "password": "a long enough password" })),
+        None,
+    )
+    .await;
+
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+    assert!(
+        cookie.is_none(),
+        "a refused signup must not hand out a session: {cookie:?}"
+    );
+}
+
+/// The four routes `docs/NEXT.md` named as open before an owner exists, each
+/// of which does something a stranger should not be able to do: choose who
+/// pays, start the subscription sign-in that opens a browser, and mint an
+/// invite to an instance that is not theirs.
+#[tokio::test]
+async fn the_owner_only_routes_are_shut_before_an_owner_exists() {
+    let app = setup().await;
+
+    for (method, path, body) in [
+        (
+            "POST",
+            "/api/economy/pay-with",
+            Some(json!({ "payer": "plan" })),
+        ),
+        ("POST", "/api/claude-auth/start", None),
+        (
+            "POST",
+            "/api/claude-auth/code",
+            Some(json!({ "code": "whatever" })),
+        ),
+        ("POST", "/api/auth/invites", None),
+    ] {
+        let (s, v, _) = send_raw(&app, method, path, body, None).await;
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} answered a stranger on an unclaimed instance: {v}"
+        );
+    }
 }
 
 /// Once claimed, the wall stands: no session, no API -- and the health
@@ -148,16 +271,20 @@ async fn a_real_session_enters_and_a_forged_one_does_not() {
 #[tokio::test]
 async fn the_owner_is_claimed_exactly_once_even_racing() {
     let app = setup().await;
+    // Every racer holds the same code: what must be exactly-once is the
+    // claim, not the knowledge of the code.
+    let code = app.setup_code();
     let mut wins = 0;
     let mut handles = Vec::new();
     for i in 0..6 {
         let app = app.clone();
+        let code = code.clone();
         handles.push(tokio::spawn(async move {
             let (s, _, _) = send_raw(
                 &app,
                 "POST",
                 "/api/auth/claim",
-                Some(json!({ "name": format!("racer{i}"), "password": "long-enough-pass" })),
+                Some(json!({ "name": format!("racer{i}"), "password": "long-enough-pass", "setup": code })),
                 None,
             )
             .await;
@@ -262,7 +389,7 @@ async fn the_cookie_wears_its_armor() {
         &app,
         "POST",
         "/api/auth/claim",
-        Some(json!({ "name": "ck_own", "password": "correct-horse-battery" })),
+        Some(json!({ "name": "ck_own", "password": "correct-horse-battery", "setup": app.setup_code() })),
         None,
     )
     .await;
@@ -283,7 +410,7 @@ async fn a_short_password_is_refused_at_the_door() {
         &app,
         "POST",
         "/api/auth/claim",
-        Some(json!({ "name": "elia", "password": "short" })),
+        Some(json!({ "name": "elia", "password": "short", "setup": app.setup_code() })),
         None,
     )
     .await;
@@ -399,6 +526,10 @@ async fn signup_adds_users_and_does_not_enumerate_names() {
 /// after is a member -- and today the difference is exactly one thing,
 /// billing. A member touching the subscription gets 403: who they are was
 /// never in question, their standing was.
+///
+/// The first account is the *claim*, holding the setup code. It used to be a
+/// signup, which is precisely the bypass ADR-0045 closed: an unclaimed
+/// instance handed ownership to whoever signed up, no invite, no code.
 #[tokio::test]
 async fn the_first_user_owns_and_billing_is_the_owners() {
     let app = setup().await;
@@ -406,8 +537,8 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
     let (s, v, owner_cookie) = send_raw(
         &app,
         "POST",
-        "/api/auth/signup",
-        Some(json!({ "name": "fo_own", "password": "correct-horse-battery" })),
+        "/api/auth/claim",
+        Some(json!({ "name": "fo_own", "password": "correct-horse-battery", "setup": app.setup_code() })),
         None,
     )
     .await;
