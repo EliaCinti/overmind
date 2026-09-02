@@ -4,6 +4,12 @@ web/node_modules/
 web/dist/
 .git/
 overmind-data/
+# An instance created by running the installer's compose from a checkout
+# (ADR-0047): sending somebody's database, brains and artifacts into the build
+# context is wrong on every host, and on Linux the CLI cannot even stat them —
+# they are 0700 and root's, so the build fails outright.
+data/
+agent/
 *.sqlite
 *.sqlite-*
 .DS_Store

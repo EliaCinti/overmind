@@ -1,7 +1,7 @@
 # ADR-0047: The folder is the installation
 
 - **Date:** 2026-09-02
-- **Status:** proposed
+- **Status:** accepted
 - **Supersedes** ADR-0043's choice of Docker named volumes (the rest of ADR-0043 — one image, one command to start and update, the compose shipped as a release asset — stands).
 
 ## Context
@@ -54,6 +54,13 @@ And **`container_name: overmind`**, so it is `docker logs overmind` rather than
 and which reads like a mistake.
 
 ## Consequences
+
+- **An existing 0.2.x install does not migrate itself.** Downloading this file
+  over one and starting it gives a fresh, empty, *unclaimed* instance while the
+  real data sits untouched in `overmind_overmind-data`. The README carries the
+  one-time move (`docker run --rm -v overmind_overmind-data:/from -v
+  "$PWD/data":/to alpine cp -a /from/. /to/`, and the same for the agent's
+  volume) and it is the most likely way this change bites somebody.
 
 - **`docker compose down -v` becomes harmless.** A bind mount is not a named
   volume; the flag cannot reach it. Verified end to end against the 0.2.3

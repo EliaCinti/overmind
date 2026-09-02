@@ -220,20 +220,25 @@ The image is self-contained: the agent CLI (Claude Code, pinned) and the memory 
 # and Windows, the docker engine package on Linux. No clone needed. On Windows
 # run this in WSL2 or Git Bash: in PowerShell `curl` is not curl.
 mkdir -p ~/overmind && cd ~/overmind
-curl -fsSLO https://github.com/EliaCinti/overmind/releases/latest/download/docker-compose.yml
+# `main`, not the release asset, until the next tag: 0.2.3's file still keeps
+# its data in Docker named volumes, and everything below describes this one.
+curl -fsSLO https://raw.githubusercontent.com/EliaCinti/overmind/main/docker-compose.yml
 
 # EITHER: pay with an API key — export it before starting
 export ANTHROPIC_API_KEY=sk-ant-…
 
 docker compose up -d --pull always   # the published image → http://localhost:7070
-docker compose logs -f overmind      # what it is doing, who pays, the version
+
+# The code the first claim costs: minted at first boot, asked for once, then
+# spent, so nobody who cannot read this machine can take your instance. On
+# Linux the file is root's (the server runs as root in the container), so it
+# is `sudo cat`; on macOS Docker Desktop maps it to you and plain `cat` works.
+sudo cat data/setup-code          # or: docker logs overmind | grep 'setup code'
+
+docker logs -f overmind              # what it is doing, who pays, the version
 # The same `up` line is the update: `--pull always` fetches the newest image
 # first. Offline, plain `docker compose up -d` starts the image you have.
 # (Building from source is the developer's path — see "From source".)
-
-# The code the first claim costs. Minted at first boot, asked for once, then
-# spent — nobody who cannot read this machine can take your instance.
-cat data/setup-code
 
 # OR: pay with a Claude subscription — sign in from the product (the notice
 # above the first screen walks you through it), or once from the shell:
@@ -247,6 +252,22 @@ Open the browser, **create the owner account** — the first run offers exactly 
 Everything durable is in `./data` beside the compose file, in plain sight: the database, every brain, the audit chain, attachments, artifacts and the subscription token. `./agent` holds the agent CLI's own sign-in. They are bind mounts, not Docker volumes, so **`docker compose down -v` cannot destroy them** — and the other side of that bargain is that the folder *is* the installation: run `docker compose` from somewhere else and you get an empty instance, because `./data` is somewhere else too. Keep them together, or set `OVERMIND_DATA` to an absolute path on purpose.
 
 To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover the memory server (`OVERMIND_MEMORY_CMD`); the agent CLI is swapped with `OVERMIND_AGENT_CMD` (the [environment table](#configuration) below). Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time, from a checkout (see *From source*), and keep starting from the same two files — the plain update line would put the published image back: `docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`, then `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d`.
+
+### Coming from a 0.2.x install (named volumes)
+
+Overmind used to keep everything in two Docker volumes. If you have one of those, **downloading this compose file and starting it gives you a fresh, empty, unclaimed instance** — your data is not lost, it is still in the volumes, but the new file does not look there. Move it once, with the container stopped:
+
+```sh
+docker compose down                       # stop it; without -v, the volumes stay
+mkdir -p data agent
+docker run --rm -v overmind_overmind-data:/from -v "$PWD/data":/to \
+  alpine cp -a /from/. /to/
+docker run --rm -v overmind_overmind-agent-home:/from -v "$PWD/agent":/to \
+  alpine cp -a /from/. /to/
+docker compose up -d --pull always        # same instance, now beside the file
+```
+
+The old volumes are still there afterwards; remove them with `docker volume rm overmind_overmind-data overmind_overmind-agent-home` once you have logged in and seen your companies.
 
 ### From source
 
@@ -275,9 +296,9 @@ Overmind binds to loopback by default, on purpose. To share it, bind to a **Tail
 
 The data has a way out. **Archive** in the top bar (owner only) exports the whole instance as one `tar.gz` — the database and every company's brain taken as consistent snapshots, your attachments and artifacts, and the subscription sign-in **sealed** under a passphrase the server never keeps (at least twelve characters; the field appears only when there is a sign-in to seal). No credential is readable in the bytes: a run's MCP bearer and the editor's integration tokens are scrubbed from the snapshot. Scratch — sessions, chat copies, worktrees, meeting rooms — stays out; a meeting's transcript is in the database and comes back with it.
 
-One thing an archive deliberately does not carry: `overmind-agent-home`, the agent CLI's **own** login. It does not need to when you signed in **from the product** — that token is Overmind's, kept under `/data` and handed to every agent it spawns, so a restore with the passphrase pays again. If instead you signed in from the shell with `claude setup-token`, that credential is the CLI's and lives in that volume: back it up the raw way too, with the recipe in [`docker-compose.yml`](docker-compose.yml).
+One thing an archive deliberately does not carry: the agent CLI's **own** login, in `./agent`. It does not need to when you signed in **from the product** — that token is Overmind's, kept under `/data` and handed to every agent it spawns, so a restore with the passphrase pays again. If instead you signed in from the shell with `claude setup-token`, that credential is the CLI's and lives in `./agent` beside the compose file: copy that folder too.
 
-Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/` — which since [ADR-0047](docs/adr/0047-the-folder-is-the-installation.md) is `./data/backups/` beside the compose file, so you can simply copy one out) and download from the same dialog. **Keep one somewhere the data disk isn't** — and in the container that means a mount, not just a variable: a path nothing is mounted at is the container's writable layer, and the next `docker compose up -d --pull always` recreates the container and takes every archive with it.
+Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/` — which since [ADR-0047](docs/adr/0047-the-folder-is-the-installation.md) is `./data/backups/` beside the compose file, so you can copy one out — with `sudo` on Linux, where the folder is `0700` root's) and download from the same dialog. **Keep one somewhere the data disk isn't** — and in the container that means a mount, not just a variable: a path nothing is mounted at is the container's writable layer, and the next `docker compose up -d --pull always` recreates the container and takes every archive with it.
 
 ```yaml
 # docker-compose.yml — archives on a disk that outlives the container
