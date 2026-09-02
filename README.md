@@ -214,10 +214,13 @@ The result: an organization of agents that doesn't start from zero every morning
 The image is self-contained: the agent CLI (Claude Code, pinned) and the memory engine (Wadachi, semantic model included) are already inside. The one thing it cannot bring is a way to pay — **give the agent credentials first**, or your first conversation will fail instead of answering:
 
 ```sh
-# One file, on top of Docker (Docker Desktop on macOS and Windows, the docker
-# engine package on Linux). No clone needed. On Windows run this in WSL2 or
-# Git Bash — in PowerShell `curl` is not curl.
-curl -fsSLO https://raw.githubusercontent.com/EliaCinti/overmind/main/docker-compose.yml
+# The folder you put this file in IS your Overmind: `./data` and `./agent` are
+# created beside it on the first start, and the whole install moves by moving
+# the folder (ADR-0047). One file, on top of Docker — Docker Desktop on macOS
+# and Windows, the docker engine package on Linux. No clone needed. On Windows
+# run this in WSL2 or Git Bash: in PowerShell `curl` is not curl.
+mkdir -p ~/overmind && cd ~/overmind
+curl -fsSLO https://github.com/EliaCinti/overmind/releases/latest/download/docker-compose.yml
 
 # EITHER: pay with an API key — export it before starting
 export ANTHROPIC_API_KEY=sk-ant-…
@@ -228,6 +231,10 @@ docker compose logs -f overmind      # what it is doing, who pays, the version
 # first. Offline, plain `docker compose up -d` starts the image you have.
 # (Building from source is the developer's path — see "From source".)
 
+# The code the first claim costs. Minted at first boot, asked for once, then
+# spent — nobody who cannot read this machine can take your instance.
+cat data/setup-code
+
 # OR: pay with a Claude subscription — sign in from the product (the notice
 # above the first screen walks you through it), or once from the shell:
 docker compose exec --user agent overmind claude setup-token
@@ -235,7 +242,9 @@ docker compose exec --user agent overmind claude setup-token
 
 Both at once — a key exported in your shell *and* a claude.ai login (the usual state of a developer's machine, and of Overmind run natively)? The key wins and your plan sits unused. Overmind says so at the top of every page and offers **Let the plan pay**: one click keeps the key out of the agents' environment, the CLI is asked again who pays, and the org chart reads *Covered by a Max subscription*. Refused with the reason if the key lives somewhere the environment does not reach ([ADR-0037](docs/adr/0037-who-pays-is-asked.md)).
 
-Open the browser, **create the owner account** (the first run offers exactly that), found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is. The DB, worktrees, brains and the agent's sign-in persist on named volumes across restarts.
+Open the browser, **create the owner account** — the first run offers exactly that, and asks for the setup code you just read. Then found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is.
+
+Everything durable is in `./data` beside the compose file, in plain sight: the database, every brain, the audit chain, attachments, artifacts and the subscription token. `./agent` holds the agent CLI's own sign-in. They are bind mounts, not Docker volumes, so **`docker compose down -v` cannot destroy them** — and the other side of that bargain is that the folder *is* the installation: run `docker compose` from somewhere else and you get an empty instance, because `./data` is somewhere else too. Keep them together, or set `OVERMIND_DATA` to an absolute path on purpose.
 
 To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover the memory server (`OVERMIND_MEMORY_CMD`); the agent CLI is swapped with `OVERMIND_AGENT_CMD` (the [environment table](#configuration) below). Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time, from a checkout (see *From source*), and keep starting from the same two files — the plain update line would put the published image back: `docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`, then `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d`.
 
@@ -268,7 +277,7 @@ The data has a way out. **Archive** in the top bar (owner only) exports the whol
 
 One thing an archive deliberately does not carry: `overmind-agent-home`, the agent CLI's **own** login. It does not need to when you signed in **from the product** — that token is Overmind's, kept under `/data` and handed to every agent it spawns, so a restore with the passphrase pays again. If instead you signed in from the shell with `claude setup-token`, that credential is the CLI's and lives in that volume: back it up the raw way too, with the recipe in [`docker-compose.yml`](docker-compose.yml).
 
-Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/`, the server's alone) and download from the same dialog. **Keep one somewhere the data disk isn't** — and in the container that means a mount, not just a variable: a path nothing is mounted at is the container's writable layer, and the next `docker compose up -d --pull always` recreates the container and takes every archive with it.
+Archives land in `OVERMIND_BACKUP_DIR` (default `<data>/backups/` — which since [ADR-0047](docs/adr/0047-the-folder-is-the-installation.md) is `./data/backups/` beside the compose file, so you can simply copy one out) and download from the same dialog. **Keep one somewhere the data disk isn't** — and in the container that means a mount, not just a variable: a path nothing is mounted at is the container's writable layer, and the next `docker compose up -d --pull always` recreates the container and takes every archive with it.
 
 ```yaml
 # docker-compose.yml — archives on a disk that outlives the container

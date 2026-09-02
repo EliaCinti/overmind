@@ -4,6 +4,14 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+### Changed
+
+- **The folder that holds `docker-compose.yml` is the installation** ([ADR-0047](docs/adr/0047-the-folder-is-the-installation.md)). `./data` and `./agent` are created beside the file on the first start, and everything Overmind keeps lives there in plain sight — the database, every company's brain, the audit chain, attachments, artifacts, the subscription token, and the agent CLI's own sign-in. They are bind mounts rather than Docker named volumes, so **`docker compose down -v` cannot destroy an instance**: that flag removes named volumes, and these are not.
+  What this buys, beyond the flag: the data is `ls`-able and `cp`-able and part of any ordinary backup; the whole install moves by moving the folder; and the setup code is `cat data/setup-code` rather than a grep through the logs. What it costs, said plainly: run `docker compose` from another directory and you get an empty instance, because `./data` is somewhere else too. Keep the file and its folders together, or set `OVERMIND_DATA` to an absolute path on purpose. The named-volume version could not lose data that way — but when it went wrong it went wrong *invisibly*, under a volume name nobody chose in a directory nobody opens; an empty `./data` beside the file is understood in seconds.
+  Also `container_name: overmind`, so it is `docker logs overmind` instead of the `overmind-overmind-1` Compose builds from `<project>-<service>-<index>`.
+- **The Quickstart takes the compose file from the release**, now that `releases/latest/download/docker-compose.yml` exists — it answered 404 until 0.2.3, because `files:` entered `release.yml` after the 0.2.2 tag. What you install is what a release published, rather than the tip of `main`.
+
+
 ## [0.2.3] — 2026-09-02
 
 **The data has a way out.** Until now one owner, one SQLite, one brain per company and one Docker volume held everything, and nothing could take it off the machine — an unplugged disk had already proved the volume can vanish under a running factory. M31 answers it: the instance exports as one archive, sealed, verified on the way back in, and restored into a fresh instance that swaps it in at its next start. Accepted on a real instance: 261 MB, 321 entries and a chain of 920 events exported from the owner's own Overmind and restored into a fresh container, companies, agents, tasks, messages, artifacts and attachments identical row for row.
