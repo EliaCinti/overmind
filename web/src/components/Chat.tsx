@@ -378,7 +378,11 @@ function MessageRow({
   if (message.role === "system") {
     return (
       <div className="flex justify-center">
-        <span className="rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
+        {/* `whitespace-pre-line` and a rounded box rather than a pill: a
+            system notice can carry one line per start the CEO asked for
+            (ADR-0046), and three of them collapsed into one unbroken run of
+            text. A single line still reads as the chip it always was. */}
+        <span className="max-w-[85%] whitespace-pre-line rounded-2xl bg-muted px-3 py-1 text-center text-xs text-muted-foreground">
           {message.content}
         </span>
       </div>

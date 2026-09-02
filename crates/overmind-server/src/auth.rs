@@ -303,8 +303,16 @@ pub async fn mint_setup_code(
     std::fs::create_dir_all(&config.data_dir)?;
     let code = new_setup_code();
     let path = setup_code_path(config);
-    std::fs::write(&path, format!("{code}\n"))?;
-    keep_to_the_server(&path);
+    // Written whole or not at all. `fs::write` truncates first, so a reader
+    // arriving mid-write sees an empty file -- and since an empty file is a
+    // refusal (it must be: "I could not read the key" is not "there is no
+    // door"), that window turns into a boot that will not serve. Write to a
+    // neighbour, tighten it, then rename: rename is atomic on every
+    // filesystem the data dir can sit on.
+    let tmp = path.with_extension("writing");
+    std::fs::write(&tmp, format!("{code}\n"))?;
+    keep_to_the_server(&tmp);
+    std::fs::rename(&tmp, &path)?;
     println!(
         "setup code for the first claim: {code}  (also in {}; it is asked for once, then deleted)",
         path.display()
