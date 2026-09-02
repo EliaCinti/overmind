@@ -109,12 +109,35 @@ else:
     print("  the CLI is present, runs as the agent, and was allowed the flag.")
 CHECK
 
+# The owner's session, once claimed. Every call below carries it: since
+# ADR-0045 an instance nobody has claimed answers about its door and nothing
+# else, so a smoke test that founds a company has to be somebody first.
+COOKIE_JAR=""
+
 api() { # method path [body]
     if [ $# -ge 3 ]; then
-        curl -fsS -X "$1" "${API}$2" -H 'content-type: application/json' -d "$3"
+        curl -fsS -b "$COOKIE_JAR" -X "$1" "${API}$2" -H 'content-type: application/json' -d "$3"
     else
-        curl -fsS -X "$1" "${API}$2"
+        curl -fsS -b "$COOKIE_JAR" -X "$1" "${API}$2"
     fi
+}
+
+# Claim the instance with the code it minted at first boot, the way the person
+# at the machine does: read it out of the container's own data dir.
+claim_instance() { # container-name label
+    local name="$1" label="$2" code
+    code=$(docker exec "$name" sh -c 'cat /data/setup-code 2>/dev/null' | tr -d '\r\n')
+    if [ -z "$code" ]; then
+        echo "[$label] the server minted no setup code — nothing can claim it"
+        docker logs "$name" 2>&1 | tail -20
+        exit 1
+    fi
+    COOKIE_JAR="$WORK/cookies-$label"
+    curl -fsS -c "$COOKIE_JAR" -X POST "${API}/auth/claim" \
+        -H 'content-type: application/json' \
+        -d "{\"name\":\"ci\",\"password\":\"a long enough password\",\"setup\":\"$code\"}" \
+        >/dev/null || { echo "[$label] the claim was refused"; exit 1; }
+    echo "[$label] claimed with the setup code"
 }
 
 json() { python3 -c "import sys,json;print(json.load(sys.stdin)$1)"; }
@@ -152,6 +175,8 @@ scenario() { # label [extra docker -e args…]
     # The line the server prints about what is holding its agents. Worth showing:
     # when this pair disagrees with expectation, this is the first thing to read.
     docker logs "$NAME" 2>&1 | grep -i "agent confinement" || true
+
+    claim_instance "$NAME" "$label"
 
     echo "[$label] founding a company…"
     local company company_id agent_id task task_id started session_id status
