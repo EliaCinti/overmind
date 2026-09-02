@@ -1225,22 +1225,48 @@ async fn run_agent_turn_inner(
     let mut unreported: Vec<(String, Outcome)> = Vec::new();
     for title in starts {
         if digest_block.is_some() {
-            let task: Option<(String, Option<String>)> = sqlx::query_as(
-                "SELECT id, assignee_agent_id FROM tasks
-                 WHERE company_id = ? AND title = ? AND status IN ('backlog', 'todo', 'blocked')
+            // The unprompted path reports what it did too (ADR-0046). It
+            // used to drop the same three facts the prompted one dropped --
+            // no task by that title, nobody on it, and the failure itself --
+            // which is the bug this milestone exists to close, and leaving it
+            // in the branch a person never asked for would be worse, not
+            // better: an update they did not request is the one they read
+            // least carefully.
+            let task: Option<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT id, status, assignee_agent_id FROM tasks
+                 WHERE company_id = ? AND title = ? AND status NOT IN ('done', 'cancelled')
                  ORDER BY created_at DESC LIMIT 1",
             )
             .bind(company_id)
             .bind(&title)
             .fetch_optional(&state.pool)
             .await?;
-            if let Some((task_id, Some(assignee))) = task
-                && let Err(e) = crate::runner::file_start_approval(
-                    state, company_id, &task_id, &assignee, &title,
-                )
-                .await
-            {
-                eprintln!("digest could not propose the start of «{title}»: {e}");
+            let said = match task {
+                None => Some(Outcome::NoSuchTask),
+                Some((_, status, _)) if matches!(status.as_str(), "in_progress" | "in_review") => {
+                    Some(Outcome::AlreadyRunning)
+                }
+                Some((_, _, None)) => Some(Outcome::NobodyOnIt),
+                Some((task_id, _, Some(assignee))) => {
+                    match crate::runner::file_start_approval(
+                        state, company_id, &task_id, &assignee, &title,
+                    )
+                    .await
+                    {
+                        // Filed: it is in the inbox, which is the whole point
+                        // of the digest path -- and worth saying, because
+                        // "waiting for you" is the answer to "why is nothing
+                        // running".
+                        Ok(_approval_id) => Some(Outcome::Asked),
+                        Err(e) => {
+                            eprintln!("digest could not propose the start of «{title}»: {e}");
+                            Some(Outcome::Refused)
+                        }
+                    }
+                }
+            };
+            if let Some(outcome) = said {
+                unreported.push((title.clone(), outcome));
             }
         } else {
             // The outcome, not a shrug. Until ADR-0046 this matched only on
