@@ -588,8 +588,14 @@ export const api = {
   /** Bring a registered colleague in by name -- any member's verb (ADR-0033). */
   addMember: (companyId: string, name: string) =>
     req<unknown>("POST", `/companies/${companyId}/members`, { name }),
-  authClaim: (name: string, password: string) =>
-    req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password }),
+  /**
+   * Claim an instance nobody owns yet -- which costs the setup code the server
+   * minted at first boot and printed to its log and `<data>/setup-code`
+   * (ADR-0045). Until then the door signed the first person up instead, which
+   * handed ownership to whoever reached the port first.
+   */
+  authClaim: (name: string, password: string, setup: string) =>
+    req<{ state: "in"; name: string }>("POST", "/auth/claim", { name, password, setup }),
   authLogin: (name: string, password: string) =>
     req<{ state: "in"; name: string }>("POST", "/auth/login", { name, password }),
   authLogout: () => req<{ state: "locked" }>("POST", "/auth/logout"),

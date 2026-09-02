@@ -2,6 +2,8 @@
 //! cost, read from the ledger -- not a flat guess that is wrong in both
 //! directions.
 
+mod common;
+
 use std::path::PathBuf;
 
 use axum::body::Body;
@@ -91,7 +93,7 @@ async fn setup() -> Env {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state.clone());
+    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
     let (_, co) = send(
         &app,
         "POST",

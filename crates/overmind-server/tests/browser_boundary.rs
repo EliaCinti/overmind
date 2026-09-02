@@ -5,6 +5,8 @@
 //! your shell is that cross-origin requests are refused. These tests hold that
 //! line — they fail the day someone "fixes a CORS error" by widening it.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -27,7 +29,7 @@ async fn app() -> axum::Router {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    overmind_server::app(state)
+    common::claimed(overmind_server::app(state), &root.join("data")).await
 }
 
 #[tokio::test]

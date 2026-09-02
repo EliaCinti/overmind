@@ -12,6 +12,8 @@
 //! The forgery half of the finding lives in `ceo.rs`'s unit tests, where the
 //! rendering is pure and can be tested directly.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -71,7 +73,7 @@ async fn an_escalation_never_speaks_with_the_systems_voice() {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, company) = send(
         &app,

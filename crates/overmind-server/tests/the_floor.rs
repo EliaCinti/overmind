@@ -8,6 +8,8 @@
 //! `after` (a task waits for another and inherits its deliverables), and
 //! digest-proposed starts (always an approval, never a spend).
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -117,7 +119,7 @@ async fn setup() -> Env {
     )
     .await
     .expect("init");
-    let app = overmind_server::app(state.clone());
+    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
     let (s, co) = send(
         &app,
         "POST",

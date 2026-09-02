@@ -3,6 +3,8 @@
 //! - the audit log replays the full history
 //! - tampering with an event breaks chain verification
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -10,10 +12,23 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 async fn setup() -> (axum::Router, overmind_server::AppState) {
-    let state = overmind_server::init("sqlite::memory:")
-        .await
-        .expect("init in-memory db");
-    (overmind_server::app(state.clone()), state)
+    // A data directory of its own: the setup code is written there at boot,
+    // and `claimed` reads it the way the person at the machine would.
+    let data_dir =
+        std::env::temp_dir().join(format!("overmind-api-{}", uuid::Uuid::now_v7().simple()));
+    let state = overmind_server::init_with(
+        "sqlite::memory:",
+        overmind_server::Config {
+            data_dir: data_dir.clone(),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init in-memory db");
+    (
+        common::claimed(overmind_server::app(state.clone()), &data_dir).await,
+        state,
+    )
 }
 
 async fn send(
@@ -246,7 +261,9 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["valid"], json!(true), "report: {report}");
-    assert_eq!(report["events_checked"], json!(10));
+    // Eleven, not ten: the claim that opens the instance is itself on the
+    // chain now that every suite claims one (ADR-0045).
+    assert_eq!(report["events_checked"], json!(11));
 }
 
 #[tokio::test]
@@ -527,7 +544,7 @@ async fn deleting_a_company_sweeps_its_directory() {
     )
     .await
     .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &data_dir).await;
 
     let (_, company) = send(
         &app,

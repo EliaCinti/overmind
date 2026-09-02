@@ -2,6 +2,8 @@
 //! reassignment, and the reporting-DAG invariant (no cycles), all enforced
 //! server-side.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -39,10 +41,20 @@ async fn send(
 }
 
 async fn app() -> axum::Router {
-    let state = overmind_server::init("sqlite::memory:")
-        .await
-        .expect("init db");
-    overmind_server::app(state)
+    // A data directory of its own: the setup code is written there at boot,
+    // and `claimed` reads it the way the person at the machine would.
+    let data_dir =
+        std::env::temp_dir().join(format!("overmind-org-{}", uuid::Uuid::now_v7().simple()));
+    let state = overmind_server::init_with(
+        "sqlite::memory:",
+        overmind_server::Config {
+            data_dir: data_dir.clone(),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init db");
+    common::claimed(overmind_server::app(state), &data_dir).await
 }
 
 async fn hire(

@@ -2,6 +2,8 @@
 //! (`OVERMIND_AGENT_TOOLS`), granted per agent as a structured trait, written
 //! into the run's own MCP config -- and nothing else is.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -88,7 +90,7 @@ async fn setup(registry: Option<Value>, agent_body: &str) -> Env {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
     let (_, co) = send(
         &app,
         "POST",

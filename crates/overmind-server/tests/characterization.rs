@@ -9,6 +9,8 @@
 //!
 //! Here it is two clicks: the function `reviewer`, the field `media-av`.
 
+mod common;
+
 use std::time::Duration;
 
 use axum::body::Body;
@@ -120,7 +122,7 @@ async fn setup() -> TestEnv {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, company) = send(
         &app,

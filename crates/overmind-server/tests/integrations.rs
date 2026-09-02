@@ -7,6 +7,8 @@
 //! starting it is authority, and since M6 that authority has been a human's.
 //! A tool list is only a boundary if something checks it.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -100,7 +102,7 @@ async fn setup() -> Env {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, company) = send(
         &app,

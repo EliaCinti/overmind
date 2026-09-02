@@ -2,6 +2,8 @@
 //! release, restart recovery of orphaned sessions, and heartbeat wakeups
 //! that enforce agent autonomy.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -111,7 +113,7 @@ async fn build_env(
     let state = overmind_server::init_with(&url, config)
         .await
         .expect("init db");
-    let app = overmind_server::app(state.clone());
+    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
 
     let (_, company) = send(
         &app,
@@ -383,7 +385,8 @@ async fn restart_recovery_resumes_orphaned_session() {
     let state2 = overmind_server::init_with(&db_url, config)
         .await
         .expect("reopen db");
-    let app2 = overmind_server::app(state2.clone());
+    // The same owner, entering a server that has already been claimed.
+    let app2 = common::claimed(overmind_server::app(state2.clone()), &root.join("data")).await;
     let _scheduler = overmind_server::scheduler::spawn(state2.clone());
 
     let session = wait_for_session(&app2, "orphan-sess").await;

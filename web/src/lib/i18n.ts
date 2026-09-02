@@ -327,6 +327,8 @@ export const en = {
     membersYou: "you",
     inviteCopied: "Copied.",
     restoreOffer: "Restoring from an archive instead?",
+    setupCode: "Setup code",
+    setupHint: "Printed by the server the first time it started, and kept in setup-code inside its data folder. It is asked for once — claiming spends it.",
   },
   backup: {
     title: "Backups",
@@ -902,6 +904,8 @@ export const it: Dictionary = {
     membersYou: "tu",
     inviteCopied: "Copiato.",
     restoreOffer: "Stai ripristinando da un archivio?",
+    setupCode: "Codice di configurazione",
+    setupHint: "Il server lo ha stampato al primo avvio e lo tiene in setup-code, dentro la sua cartella dati. Viene chiesto una volta sola: reclamare lo consuma.",
   },
   backup: {
     title: "Backup",

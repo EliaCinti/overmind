@@ -2,6 +2,8 @@
 //! blocks a start until a human decides, agents can be paused/terminated, and
 //! config revisions can be rolled back — all reflected in the audit chain.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -96,7 +98,7 @@ async fn setup(tweak: impl FnOnce(&mut overmind_server::Config)) -> Env {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, co) = send(
         &app,

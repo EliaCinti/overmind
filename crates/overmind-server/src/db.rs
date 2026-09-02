@@ -782,6 +782,13 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
         }
     }
 
+    // An unclaimed instance is open by construction, so it mints the code its
+    // first claim will cost (ADR-0045). Idempotent: already claimed clears it,
+    // already minted leaves it alone.
+    if let Err(e) = crate::auth::mint_setup_code(&pool, &config).await {
+        eprintln!("cannot write the setup code (the first claim would be open): {e}");
+    }
+
     // Whatever was declared; the binary probes and refines it at startup.
     let economy =
         config

@@ -664,6 +664,7 @@ async fn restore_instance(
     let taken = take_upload(
         &mut form,
         &upload,
+        &state.config,
         &mut passphrase,
         &mut skip_token,
         &mut arrived,
@@ -703,11 +704,16 @@ async fn restore_instance(
 async fn take_upload(
     form: &mut Multipart,
     upload: &std::path::Path,
+    config: &crate::db::Config,
     passphrase: &mut Option<String>,
     skip_token: &mut bool,
     arrived: &mut bool,
 ) -> Result<(), ApiError> {
     use tokio::io::AsyncWriteExt;
+    // A restore is a claim with a payload (ADR-0044), so it costs the same
+    // code (ADR-0045). `None` is already right when the instance has no code
+    // waiting -- one that was claimed before this existed, or claimed at all.
+    let mut code_ok = crate::auth::setup_code_ok(config, None);
     while let Some(mut field) = form
         .next_field()
         .await
@@ -721,7 +727,19 @@ async fn take_upload(
                 let said = field.text().await.unwrap_or_default();
                 *skip_token = matches!(said.trim(), "true" | "1" | "on" | "yes");
             }
+            "setup" => {
+                let given = field.text().await.unwrap_or_default();
+                code_ok = crate::auth::setup_code_ok(config, Some(&given));
+            }
             "archive" => {
+                // Before a single byte reaches the disk. An archive is the
+                // size of somebody's whole instance, and a stranger must not
+                // be able to make this machine write one -- so the code is
+                // demanded here rather than after the upload, and a client
+                // that sends the archive first is refused without it.
+                if !code_ok {
+                    return Err(ApiError::Unauthorized);
+                }
                 let mut file = tokio::fs::File::create(upload)
                     .await
                     .map_err(|e| ApiError::Internal(e.into()))?;

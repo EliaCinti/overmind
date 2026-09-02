@@ -6,6 +6,8 @@
 //! because "answering" lived only in the chat component's memory. And a
 //! second message sent before the reply started a second, concurrent turn.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -79,7 +81,7 @@ async fn setup() -> Env {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
     let (s, co) = send(
         &app,
         "POST",

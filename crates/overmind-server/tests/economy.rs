@@ -5,6 +5,8 @@
 //! reaches a client at all, and that not knowing is a state the API can express
 //! rather than a hole it falls into.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
@@ -12,10 +14,11 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 async fn health(config: overmind_server::Config) -> Value {
+    let data_dir = config.data_dir.clone();
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init in-memory db");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &data_dir).await;
     let response = app
         .oneshot(
             Request::builder()

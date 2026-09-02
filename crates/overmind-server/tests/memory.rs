@@ -4,6 +4,8 @@
 //! - with no memory server configured, everything works identically;
 //! - a broken memory server degrades gracefully — the task still completes.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -138,7 +140,7 @@ async fn setup(memory_cmd: Option<String>) -> Env {
     let state = overmind_server::init_with("sqlite::memory:", config)
         .await
         .expect("init");
-    let app = overmind_server::app(state);
+    let app = common::claimed(overmind_server::app(state), &root.join("data")).await;
 
     let (_, co) = send(
         &app,

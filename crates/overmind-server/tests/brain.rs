@@ -12,6 +12,8 @@
 //! `OVERMIND_MANAGED_BRAIN=off` still shares one brain, because someone who
 //! deliberately pointed Overmind at their own brain must keep getting it.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -353,7 +355,7 @@ async fn setup_full(managed: bool, with_memory: bool, stub_env: &str, agent_body
         .await
         .expect("init");
     Env {
-        app: overmind_server::app(state),
+        app: common::claimed(overmind_server::app(state), &root.join("data")).await,
         root,
     }
 }

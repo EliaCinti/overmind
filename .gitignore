@@ -1,4 +1,7 @@
-/target
+# Every target/, not only the workspace root's: a nested
+# crates/*/target/ escaped `/target` and a test's data dir landed in the
+# index, setup code and all.
+target/
 node_modules/
 dist/
 *.sqlite

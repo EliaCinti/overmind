@@ -7,6 +7,8 @@
 //! stored, the turn (and every later one) reads summary + recent tail, and
 //! the person sees a quiet system chip saying it happened.
 
+mod common;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -94,7 +96,7 @@ async fn setup(threshold: usize) -> Env {
     )
     .await
     .expect("init");
-    let app = overmind_server::app(state.clone());
+    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
     let (s, co) = send(
         &app,
         "POST",

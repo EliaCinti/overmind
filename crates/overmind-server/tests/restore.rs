@@ -87,13 +87,18 @@ async fn send(
     (status, value)
 }
 
-async fn claim(app: &axum::Router) -> String {
+async fn claim(app: &axum::Router, data_dir: &std::path::Path) -> String {
+    let code = std::fs::read_to_string(data_dir.join("setup-code"))
+        .expect("the server minted a setup code")
+        .trim()
+        .to_string();
     let request = Request::builder()
         .method("POST")
         .uri("/api/auth/claim")
         .header("content-type", "application/json")
         .body(Body::from(
-            json!({ "name": "elia", "password": "a long enough password" }).to_string(),
+            json!({ "name": "elia", "password": "a long enough password", "setup": code })
+                .to_string(),
         ))
         .expect("build");
     let response = app.clone().oneshot(request).await.expect("responds");
@@ -112,7 +117,7 @@ async fn claim(app: &axum::Router) -> String {
 /// An instance with something in it, and the archive of it.
 async fn an_instance_worth_restoring() -> (Instance, Vec<u8>) {
     let source = instance().await;
-    let cookie = claim(&source.app).await;
+    let cookie = claim(&source.app, &source.dir).await;
     let (s, company) = send(
         &source.app,
         "POST",
@@ -150,13 +155,23 @@ async fn an_instance_worth_restoring() -> (Instance, Vec<u8>) {
     (source, archive)
 }
 
-/// `POST /api/restore`, multipart, the way the browser sends it.
+/// `POST /api/restore`, multipart, the way the browser sends it -- carrying
+/// the setup code, because a restore is a claim with a payload and costs what
+/// a claim costs (ADR-0045). `restore_as` is the raw form, for the tests that
+/// are about what happens when a field is missing or wrong.
 async fn restore(
     app: &axum::Router,
+    dir: &std::path::Path,
     archive: &[u8],
     fields: &[(&str, &str)],
 ) -> (StatusCode, Value) {
-    restore_as(app, archive, fields, None).await
+    let code = std::fs::read_to_string(dir.join("setup-code"))
+        .expect("the instance minted a setup code at boot")
+        .trim()
+        .to_string();
+    let mut with_code: Vec<(&str, &str)> = vec![("setup", code.as_str())];
+    with_code.extend_from_slice(fields);
+    restore_as(app, archive, &with_code, None).await
 }
 
 async fn restore_as(
@@ -259,7 +274,13 @@ async fn an_archive_restores_into_an_empty_instance_and_the_chain_still_verifies
     let (source, archive) = an_instance_worth_restoring().await;
     let target = instance().await;
 
-    let (s, v) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &archive,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["restarting"], true);
     assert_eq!(v["token"], "restored");
@@ -341,14 +362,34 @@ async fn an_archive_restores_into_an_empty_instance_and_the_chain_still_verifies
     let _ = source;
 }
 
+/// A restore is a claim with a payload (ADR-0044), so it costs what a claim
+/// costs. An archive from a stranger is a claim from a stranger: without the
+/// code the instance minted at boot, nothing is unpacked and nothing is
+/// staged (ADR-0045).
+#[tokio::test]
+async fn a_restore_without_the_setup_code_is_refused() {
+    let (_source, archive) = an_instance_worth_restoring().await;
+    let target = instance().await;
+
+    let (s, v) = restore_as(&target.app, &archive, &[("passphrase", PASSPHRASE)], None).await;
+
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+    assert!(
+        !target.dir.join("restore-pending").exists(),
+        "a refused restore must not stage anything"
+    );
+}
+
 #[tokio::test]
 async fn a_restore_lands_only_on_an_empty_instance() {
     let (_source, archive) = an_instance_worth_restoring().await;
     let target = instance().await;
-    let cookie = claim(&target.app).await;
+    let cookie = claim(&target.app, &target.dir).await;
 
-    // A stranger gets the door's answer, not the instance's state.
-    let (s, _) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    // A stranger gets the door's answer, not the instance's state. The raw
+    // form: this instance is claimed, so its setup code is spent and gone --
+    // the wall is what refuses here, before the handler is reached at all.
+    let (s, _) = restore_as(&target.app, &archive, &[("passphrase", PASSPHRASE)], None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // The owner gets the reason, and the way out.
@@ -381,7 +422,13 @@ async fn a_tampered_archive_is_refused_by_name_and_nothing_is_staged() {
     let tampered = rebuild(&entries);
 
     let target = instance().await;
-    let (s, v) = restore(&target.app, &tampered, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &tampered,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     let said = v["error"].as_str().unwrap_or_default();
     assert!(
@@ -408,7 +455,13 @@ async fn an_entry_the_manifest_does_not_name_is_refused() {
     let smuggled = rebuild(&entries);
 
     let target = instance().await;
-    let (s, v) = restore(&target.app, &smuggled, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &smuggled,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     assert!(
         v["error"]
@@ -426,6 +479,7 @@ async fn a_wrong_passphrase_refuses_the_whole_restore_while_a_retry_is_free() {
 
     let (s, v) = restore(
         &target.app,
+        &target.dir,
         &archive,
         &[("passphrase", "not the one at all")],
     )
@@ -444,7 +498,13 @@ async fn a_wrong_passphrase_refuses_the_whole_restore_while_a_retry_is_free() {
     );
 
     // Still empty, so the same archive goes in on the second try.
-    let (s, v) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &archive,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
 }
 
@@ -453,7 +513,13 @@ async fn a_restore_without_the_sign_in_leaves_nothing_claiming_the_plan_pays() {
     let (_source, archive) = an_instance_worth_restoring().await;
     let target = instance().await;
 
-    let (s, v) = restore(&target.app, &archive, &[("skip_token", "true")]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &archive,
+        &[("skip_token", "true")],
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["token"], "skipped");
     target.state.pool.close().await;
@@ -475,7 +541,7 @@ async fn a_restore_without_the_sign_in_leaves_nothing_claiming_the_plan_pays() {
 async fn an_archive_that_needs_a_passphrase_says_so_instead_of_guessing() {
     let (_source, archive) = an_instance_worth_restoring().await;
     let target = instance().await;
-    let (s, v) = restore(&target.app, &archive, &[]).await;
+    let (s, v) = restore(&target.app, &target.dir, &archive, &[]).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     let said = v["error"].as_str().unwrap_or_default();
     assert!(said.contains("passphrase"), "{v}");
@@ -496,7 +562,13 @@ async fn an_archive_from_a_newer_overmind_is_refused_before_the_migrations() {
     let from_the_future = rebuild(&entries);
 
     let target = instance().await;
-    let (s, v) = restore(&target.app, &from_the_future, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &from_the_future,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     let said = v["error"].as_str().unwrap_or_default();
     assert!(
@@ -563,7 +635,13 @@ async fn a_broken_chain_is_refused_even_when_every_hash_matches() {
     let rewritten = rebuild(&entries);
 
     let target = instance().await;
-    let (s, v) = restore(&target.app, &rewritten, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &rewritten,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     let said = v["error"].as_str().unwrap_or_default();
     assert!(
@@ -633,13 +711,19 @@ async fn a_claim_that_lands_after_a_restore_was_staged_wins_at_the_next_boot() {
 
     // The attacker's request: passes the emptiness check, stages an archive,
     // asks to be restarted -- exactly what the API does.
-    let (s, v) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &archive,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(target.dir.join("restore-pending").is_file());
 
     // Before any restart happens, the real operator claims the instance --
     // the race the review's exploit walks through step by step.
-    let cookie = claim(&target.app).await;
+    let cookie = claim(&target.app, &target.dir).await;
     let (s, mine) = send(
         &target.app,
         "POST",
@@ -691,11 +775,17 @@ async fn a_claim_clears_a_restore_staged_earlier_the_instant_it_lands() {
     let (_source, archive) = an_instance_worth_restoring().await;
     let target = instance().await;
 
-    let (s, _) = restore(&target.app, &archive, &[("passphrase", PASSPHRASE)]).await;
+    let (s, _) = restore(
+        &target.app,
+        &target.dir,
+        &archive,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert!(target.dir.join("restore-pending").is_file());
 
-    let _cookie = claim(&target.app).await;
+    let _cookie = claim(&target.app, &target.dir).await;
 
     // Not just "the boot refuses it" -- the claim itself clears the note, so
     // an operator inspecting the data directory right after claiming does
@@ -734,7 +824,13 @@ async fn a_manifest_asking_the_kdf_for_a_terabyte_is_refused_before_it_is_spent(
     // KDF's time first.
     let target = instance().await;
     let started = std::time::Instant::now();
-    let (s, v) = restore(&target.app, &greedy, &[("passphrase", PASSPHRASE)]).await;
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &greedy,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
     assert!(
         started.elapsed() < std::time::Duration::from_secs(5),
         "the request took {:?} -- it is spending the KDF's time instead of refusing it",
