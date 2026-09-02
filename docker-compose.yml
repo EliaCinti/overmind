@@ -7,8 +7,8 @@
 # not a rebuild, not a reinstall. The image brings its own agent CLI, so a
 # task works out of the box once the agent can authenticate -- see
 # ANTHROPIC_API_KEY below, or the subscription sign-in. The database,
-# worktrees and (optional) managed brains persist on a named volume; so do
-# the agent's credentials. Logs: `docker compose logs -f overmind`.
+# worktrees, managed brains and the agent's credentials live in `./data` and
+# `./agent`, beside this file (ADR-0047). Logs: `docker logs -f overmind`.
 #
 # `--pull always` asks the registry every time. Offline -- a plane, a captive
 # portal, a registry outage -- plain `docker compose up -d` starts the image
@@ -23,12 +23,14 @@
 # the repository `docker compose up --build` therefore builds NOTHING now; the
 # from-source command is in that other file.
 
-# The project's name is fixed here, not taken from the directory the file
-# sits in: the container and the volumes are `overmind-…` whether you curled
-# this file into ~/Downloads or cloned the repository, so an update from
-# another directory finds YOUR data instead of starting an empty instance --
-# and the backup recipe at the bottom names a volume that exists.
-name: overmind
+# No fixed project name any more (ADR-0047 supersedes ADR-0043 on this point).
+# It used to be pinned so an update from another directory found your data --
+# true of a named volume, meaningless now that the data is `./data` beside
+# this file. And pinned it made the folder NOT the unit of installation: a
+# second folder would target the same Compose project, collide on the
+# container name, and `docker compose down` in one would stop the other.
+# Compose takes the project from the directory, so two folders are two
+# instances -- which is what "the folder is the installation" has to mean.
 
 services:
   overmind:
@@ -44,7 +46,7 @@ services:
     # So it is `docker logs overmind`, not `overmind-overmind-1` — Compose
     # builds that name from <project>-<service>-<index>, and here both are
     # the same word.
-    container_name: overmind
+    container_name: ${OVERMIND_NAME:-overmind}
     image: ghcr.io/eliacinti/overmind:latest
     ports:
       # Loopback ONLY, on purpose. Since M24 the API answers to a credential
@@ -68,7 +70,12 @@ services:
       # you get an empty instance, because `./data` is somewhere else too.
       # Keep this file and its folders together. To put the data elsewhere on
       # purpose, set OVERMIND_DATA to an absolute path, in a `.env` beside
-      # this file or in your shell.
+      # this file or in your shell — absolute, or at least starting with
+      # `./`: Compose reads a bare `mydata` as a *named volume*, which hands
+      # your instance back to `down -v`. It must also be a filesystem that
+      # honours ownership: the cage (ADR-0029) gives run directories to the
+      # agent uid with chown, and on exFAT, NTFS or a network share that is
+      # either decorative or an outright failure.
       - ${OVERMIND_DATA:-./data}:/data
       # The agent's credentials, kept across updates.
       #
@@ -79,7 +86,7 @@ services:
       # anyone should have to opt into. The server takes ownership of it
       # at startup: a fresh named volume arrives owned by root, and the agent is
       # not root (ADR-0029).
-      - ${OVERMIND_AGENT_HOME:-./agent}:/home/agent/.claude
+      - ${OVERMIND_AGENT_DIR:-./agent}:/home/agent/.claude
       # Repositories agents work on. Uncomment and point at yours:
       # - ${HOME}/code:/repos:rw
       #
