@@ -9,3 +9,9 @@ dist/
 .env
 .DS_Store
 /overmind-data
+# What `docker compose up` creates beside the compose file (ADR-0047): the
+# instance's own data. Running the installer's file from a checkout must not
+# put somebody's database in the index — the `/target` lesson, which covered
+# only the workspace root.
+/data/
+/agent/

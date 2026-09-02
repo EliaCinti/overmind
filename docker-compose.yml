@@ -41,6 +41,10 @@ services:
     # node). If yours need more -- a LaTeX toolchain, a linter, a compiler --
     # build from this tree with docker-compose.build.yml and its
     # EXTRA_APT_PACKAGES argument instead of deriving an image.
+    # So it is `docker logs overmind`, not `overmind-overmind-1` — Compose
+    # builds that name from <project>-<service>-<index>, and here both are
+    # the same word.
+    container_name: overmind
     image: ghcr.io/eliacinti/overmind:latest
     ports:
       # Loopback ONLY, on purpose. Since M24 the API answers to a credential
@@ -54,7 +58,18 @@ services:
       # and set OVERMIND_COOKIE_SECURE=on. Never "0.0.0.0:7070:7070".
       - "127.0.0.1:7070:7070"
     volumes:
-      - overmind-data:/data
+      # THE FOLDER THIS FILE IS IN *IS* THE INSTALLATION (ADR-0047). Docker
+      # creates it on the first start; everything Overmind keeps lives here,
+      # in plain sight, and you move the whole install by moving this folder.
+      # `docker compose down -v` cannot touch it — that flag removes named
+      # volumes, and this is not one.
+      #
+      # The other side of that: run `docker compose` from somewhere else and
+      # you get an empty instance, because `./data` is somewhere else too.
+      # Keep this file and its folders together. To put the data elsewhere on
+      # purpose, set OVERMIND_DATA to an absolute path, in a `.env` beside
+      # this file or in your shell.
+      - ${OVERMIND_DATA:-./data}:/data
       # The agent's credentials, kept across updates.
       #
       # The CLI writes its session under the agent's $HOME, which is not on
@@ -64,7 +79,7 @@ services:
       # anyone should have to opt into. The server takes ownership of it
       # at startup: a fresh named volume arrives owned by root, and the agent is
       # not root (ADR-0029).
-      - overmind-agent-home:/home/agent/.claude
+      - ${OVERMIND_AGENT_HOME:-./agent}:/home/agent/.claude
       # Repositories agents work on. Uncomment and point at yours:
       # - ${HOME}/code:/repos:rw
       #
@@ -116,22 +131,14 @@ services:
       # - OVERMIND_MANAGED_BRAIN=off
     restart: unless-stopped
 
-volumes:
-  # EVERYTHING lives in these two: the database, every company's brain, the
-  # audit chain, attachments, the subscription token (overmind-data) and the
-  # agent CLI's sign-in (overmind-agent-home). `docker compose down -v`
-  # DELETES BOTH — that flag removes named volumes, and there is no undo.
-  #
-  # `POST /api/backup` (or the Backups button, owner only) is the everyday
-  # answer: one archive with the database, every brain, attachments and
-  # artifacts, the sign-in sealed under a passphrase you choose
-  # (ADR-0044). `POST /api/restore` takes it back into an EMPTY instance —
-  # a fresh `up` on this file, before anyone claims it.
-  #
-  # The one thing an archive does not carry is `overmind-agent-home` — the
-  # agent CLI's own login, set by `claude setup-token` rather than from the
-  # product. If you signed in that way, back that volume up the raw way too:
-  #   docker run --rm -v overmind_overmind-agent-home:/d -v "$PWD/backup":/b \
-  #     alpine cp -a /d/. /b/
-  overmind-data:
-  overmind-agent-home:
+# No `volumes:` block any more: nothing here is a Docker-managed volume.
+# `./data` holds the database, every company's brain, the audit chain,
+# attachments, artifacts and the subscription token; `./agent` holds the agent
+# CLI's own sign-in — the one thing an archive does not carry, because it is
+# set by `claude setup-token` rather than from the product. If you signed in
+# that way, copy that folder too.
+#
+# The everyday safety net is still the archive: `POST /api/backup`, or the
+# Backups button, owner only — one file with the database, every brain,
+# attachments and artifacts, the sign-in sealed under a passphrase you choose
+# (ADR-0044). `POST /api/restore` takes it back into an EMPTY instance.
