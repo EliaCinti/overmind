@@ -410,6 +410,103 @@ async fn a_digest_proposed_start_is_an_approval_never_a_spend() {
     );
 }
 
+/// Everything the person can read in the thread after a turn, waited for
+/// rather than guessed at: the turn runs off the request, so the messages land
+/// after `tell_the_ceo` returns. Every role, because what became of a start is
+/// the server's word, not the CEO's -- the CEO's sentence was committed before
+/// the start was tried (ADR-0046).
+async fn await_thread(env: &Env) -> String {
+    for _ in 0..150 {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT group_concat(content, '\n') FROM messages WHERE role IN ('ceo', 'system')",
+        )
+        .fetch_optional(&env.state.pool)
+        .await
+        .expect("q");
+        if let Some((content,)) = row
+            && !content.trim().is_empty()
+        {
+            return content;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("nothing was ever said in the thread");
+}
+
+/// The reply and the `start` list are one JSON object: the words are delivered,
+/// and only then does the server try the starts. So the CEO cannot have seen
+/// what happened — and until ADR-0046 the outcome was discarded, `Ok(None)`
+/// and all. Measured on a real company on 2 Sep 2026: three claimed starts,
+/// zero in progress, and a CEO apologising for forgetting to press a button it
+/// had in fact pressed.
+#[tokio::test]
+async fn a_start_that_matched_nothing_is_not_reported_as_running() {
+    let env = setup().await;
+
+    env.set_chat_plan(&json!({
+        "reply": "Ho messo in run il calendario delle condizioni.",
+        "tasks": [],
+        "start": ["Un titolo che sulla lavagna non esiste"]
+    }));
+    tell_the_ceo(&env, "Vai.").await;
+
+    let thread = await_thread(&env).await;
+    assert!(
+        thread.contains("Un titolo che sulla lavagna non esiste"),
+        "the CEO claimed a start, the title matched nothing, and the person was \
+         told none of it: {thread}"
+    );
+}
+
+/// The refusal that actually stopped a real company. On *TravelAgency*, 2 Sep
+/// 2026, one agent had spent EUR 50.38 against a EUR 50.00 cap; six starts in
+/// two hours were refused, each recorded as `budget.blocked` on the chain and
+/// told to nobody — while the CEO reported "now I have put three in run". The
+/// gate was right. Its silence was the bug (ADR-0046).
+#[tokio::test]
+async fn a_start_refused_for_budget_says_so_with_the_numbers() {
+    let env = setup().await;
+    let agent = hire(&env, "Spendacciona", "act_within_budget").await;
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO tasks (id, company_id, title, description, status, priority,
+                            execution_kind, assignee_agent_id, created_at, updated_at)
+         VALUES (?, ?, ?, '', 'todo', 'medium', 'knowledge', ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::now_v7().to_string())
+    .bind(&env.company)
+    .bind("Il lavoro che non partirà")
+    .bind(&agent)
+    .bind(&now)
+    .bind(&now)
+    .execute(&env.state.pool)
+    .await
+    .expect("task");
+    // One cent: smaller than any run's estimate, the way EUR 50.00 was smaller
+    // than EUR 50.38. (Zero would not do it — `governance::check` reads a cap
+    // of zero or less as "no cap at all".)
+    sqlx::query(
+        "UPDATE agents SET traits = json_set(traits, '$.monthly_budget_cents', 1) WHERE id = ?",
+    )
+    .bind(&agent)
+    .execute(&env.state.pool)
+    .await
+    .expect("cap");
+
+    env.set_chat_plan(&json!({
+        "reply": "Messo in run.",
+        "tasks": [],
+        "start": ["Il lavoro che non partirà"]
+    }));
+    tell_the_ceo(&env, "Vai.").await;
+
+    let thread = await_thread(&env).await;
+    assert!(
+        thread.contains("tetto mensile") || thread.contains("monthly cap"),
+        "the budget gate refused the start and the person was told nothing: {thread}"
+    );
+}
+
 /// Deleting a company still works after the schema grew (measured 27 Aug
 /// 2026: FOREIGN KEY constraint failed — three references born after
 /// ADR-0034's children-first list: conversation_summaries (ADR-0040),

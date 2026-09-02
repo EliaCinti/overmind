@@ -1181,6 +1181,8 @@ async fn run_agent_turn_inner(
                 .collect()
         })
         .unwrap_or_default();
+    // What did not simply run, to be said out loud below.
+    let mut unreported: Vec<(String, String)> = Vec::new();
     for title in starts {
         if digest_block.is_some() {
             let task: Option<(String, Option<String>)> = sqlx::query_as(
@@ -1200,9 +1202,76 @@ async fn run_agent_turn_inner(
             {
                 eprintln!("digest could not propose the start of «{title}»: {e}");
             }
-        } else if let Err(e) = crate::runner::start_existing(state, company_id, &title).await {
-            eprintln!("could not start «{title}»: {e}");
+        } else {
+            // The outcome, not a shrug. Until ADR-0046 this matched only on
+            // `Err` and wrote it to stderr, so "no task by that title", "in
+            // your inbox" and "nobody is on it" all reached the person as
+            // "running".
+            let said = match crate::runner::start_existing(state, company_id, &title).await {
+                Ok(crate::runner::Started::Offered(crate::runner::Offer::Started)) => None,
+                Ok(crate::runner::Started::NoSuchTask) => Some("no_such_task".to_string()),
+                Ok(crate::runner::Started::NobodyOnIt) => Some("nobody_on_it".to_string()),
+                Ok(crate::runner::Started::Offered(crate::runner::Offer::Asked { .. })) => {
+                    Some("asked".to_string())
+                }
+                Ok(crate::runner::Started::Offered(crate::runner::Offer::Waiting)) => {
+                    Some("waiting".to_string())
+                }
+                // The one refusal that has actually stopped work on a real
+                // company, so it gets the numbers and the remedy rather than
+                // the error's own words.
+                Err(crate::runner::RunnerError::OverBudget {
+                    limit_cents,
+                    observed_cents,
+                }) => Some(format!("over_budget:{limit_cents}:{observed_cents}")),
+                Err(e) => {
+                    eprintln!("could not start «{title}»: {e}");
+                    Some(e.to_string())
+                }
+            };
+            if let Some(outcome) = said {
+                unreported.push((title.clone(), outcome));
+            }
         }
+    }
+
+    // The server says what became of the starts, in its own voice and in the
+    // company's language. Not by rewriting the CEO's words -- those were
+    // committed before any of this was tried, and editing somebody's sentence
+    // after the fact is worse than speaking after them.
+    if !unreported.is_empty() {
+        let code = crate::i18n::company_language(state, company_id).await;
+        let body = unreported
+            .iter()
+            .map(
+                |(title, outcome)| match outcome.strip_prefix("over_budget:") {
+                    Some(rest) => {
+                        let mut n = rest.split(':').filter_map(|x| x.parse::<i64>().ok());
+                        match (n.next(), n.next()) {
+                            (Some(cap), Some(observed)) => {
+                                crate::i18n::start_over_budget(&code, title, cap, observed)
+                            }
+                            _ => crate::i18n::start_outcome(&code, title, outcome),
+                        }
+                    }
+                    None => crate::i18n::start_outcome(&code, title, outcome),
+                },
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut tx = state.write_tx().await?;
+        sqlx::query(
+            "INSERT INTO messages (id, conversation_id, role, content, created_at)
+             VALUES (?, ?, 'system', ?, ?)",
+        )
+        .bind(new_id())
+        .bind(conversation_id)
+        .bind(&body)
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        state.push(json!({ "type": "changed", "company_id": company_id }));
     }
 
     // Cross-impact: a specialist can escalate to the leader (its own thread).

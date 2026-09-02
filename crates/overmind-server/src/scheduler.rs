@@ -292,7 +292,7 @@ async fn wakeup_outcome(
             Some(company_id),
             format!("task {task_id} was taken by someone else"),
         )),
-        Err(RunnerError::OverBudget) => Ok((
+        Err(RunnerError::OverBudget { .. }) => Ok((
             Some(company_id),
             format!("task {task_id} blocked: over budget"),
         )),
