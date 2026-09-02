@@ -814,7 +814,12 @@ impl From<crate::runner::RunnerError> for ApiError {
             }
             RunnerError::Blocked(msg) => ApiError::Conflict(msg),
             RunnerError::Remediable { message, remedy } => ApiError::Remediable { message, remedy },
-            RunnerError::OverBudget => ApiError::Blocked("agent is over its monthly budget".into()),
+            RunnerError::OverBudget {
+                limit_cents,
+                observed_cents,
+            } => ApiError::Blocked(format!(
+                "agent is over its monthly budget: {observed_cents} of {limit_cents} cents"
+            )),
             RunnerError::Git(msg) => ApiError::Internal(msg.into()),
             RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
         }

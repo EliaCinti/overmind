@@ -85,6 +85,56 @@ pub fn chat_compacted_notice(code: &str, covered: usize) -> String {
     }
 }
 
+/// What became of a start the CEO asked for, said by the server in its own
+/// voice (ADR-0046). The CEO's words are written before the start is tried, so
+/// it cannot report this itself — and reporting "running" for all five
+/// outcomes is how a company sat at zero in progress for a day.
+pub fn start_outcome(code: &str, title: &str, outcome: &str) -> String {
+    match (code, outcome) {
+        ("it", "no_such_task") => format!(
+            "«{title}» non è partito: sulla lavagna non c'è nessun task aperto con questo titolo."
+        ),
+        ("it", "nobody_on_it") => {
+            format!("«{title}» non è partito: il task c'è, ma non è incaricato a nessuno.")
+        }
+        ("it", "asked") => format!(
+            "«{title}» non è ancora in corso: l'avvio è nella tua posta in arrivo e aspetta la tua approvazione."
+        ),
+        ("it", "waiting") => format!(
+            "«{title}» non è partito da sé: chi lo ha in carico propone soltanto, quindi deve avviarlo una persona."
+        ),
+        ("it", _) => format!("«{title}» non è partito: {outcome}"),
+        (_, "no_such_task") => {
+            format!("\"{title}\" did not start: no open task on the board carries that title.")
+        }
+        (_, "nobody_on_it") => {
+            format!("\"{title}\" did not start: the task is there, but nobody is on it.")
+        }
+        (_, "asked") => format!(
+            "\"{title}\" is not running yet: the start is in your inbox, waiting for your approval."
+        ),
+        (_, "waiting") => format!(
+            "\"{title}\" did not start on its own: whoever holds it only proposes, so a person has to start it."
+        ),
+        (_, _) => format!("\"{title}\" did not start: {outcome}"),
+    }
+}
+/// A start the budget gate refused, with the two numbers and the remedy
+/// (ADR-0046). The gate has always worked; it simply never said so to anyone
+/// — six refusals on the owner's own company in two hours, recorded on the
+/// chain and nowhere else.
+pub fn start_over_budget(code: &str, title: &str, limit_cents: i64, observed_cents: i64) -> String {
+    let cap = format!("{:.2}", limit_cents as f64 / 100.0);
+    let spent = format!("{:.2}", observed_cents as f64 / 100.0);
+    match code {
+        "it" => format!(
+            "«{title}» non è partito: chi lo ha in carico è oltre il suo tetto mensile — {spent} contro {cap}.              Alza il tetto dalla sua scheda, oppure aspetta il mese nuovo."
+        ),
+        _ => format!(
+            "\"{title}\" did not start: whoever holds it is over their monthly cap — {spent} against {cap}.              Raise it from their card, or wait for the new month."
+        ),
+    }
+}
 /// The meeting-request approval's summary, in the company's language.
 pub fn meeting_request_summary(code: &str, convener: &str, topic: &str) -> String {
     match code {

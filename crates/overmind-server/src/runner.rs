@@ -206,8 +206,14 @@ pub enum RunnerError {
         message: String,
         remedy: serde_json::Value,
     },
-    #[error("agent is over its monthly budget")]
-    OverBudget,
+    /// Carries the two numbers a person needs to act (ADR-0046): until now it
+    /// was a bare variant whose message named neither the cap nor the spend,
+    /// so a refused start could not say what to raise or by how much.
+    #[error("agent is over its monthly budget: {observed_cents} of {limit_cents} cents")]
+    OverBudget {
+        limit_cents: i64,
+        observed_cents: i64,
+    },
     #[error("git error: {0}")]
     Git(String),
     #[error(transparent)]
@@ -661,7 +667,7 @@ pub(crate) async fn start_existing(
     state: &AppState,
     company_id: &str,
     title: &str,
-) -> Result<Option<Offer>, RunnerError> {
+) -> Result<Started, RunnerError> {
     let task: Option<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, status, assignee_agent_id FROM tasks
          WHERE company_id = ? AND title = ? AND status IN ('backlog', 'todo', 'blocked')
@@ -672,10 +678,10 @@ pub(crate) async fn start_existing(
     .fetch_optional(&state.pool)
     .await?;
     let Some((task_id, status, assignee)) = task else {
-        return Ok(None);
+        return Ok(Started::NoSuchTask);
     };
     let Some(assignee) = assignee else {
-        return Ok(None);
+        return Ok(Started::NobodyOnIt);
     };
     if status != "todo" {
         sqlx::query("UPDATE tasks SET status = 'todo', updated_at = ? WHERE id = ?")
@@ -684,7 +690,25 @@ pub(crate) async fn start_existing(
             .execute(&state.pool)
             .await?;
     }
-    Ok(Some(offer_start(state, &task_id, &assignee).await?))
+    Ok(Started::Offered(
+        offer_start(state, &task_id, &assignee).await?,
+    ))
+}
+
+/// What asking for a start by title actually did (ADR-0046).
+///
+/// It used to be `Option<Offer>`, and `None` meant two different facts with
+/// two different remedies — no open task carries that title, or one does and
+/// nobody is on it. The caller cannot act on a shrug, and the CEO reported
+/// both as "running".
+#[derive(Debug)]
+pub enum Started {
+    /// No open task on the board carries that title.
+    NoSuchTask,
+    /// The task is there and has nobody assigned, so there is nobody to start.
+    NobodyOnIt,
+    /// It reached the autonomy gates, and this is what they said.
+    Offered(Offer),
 }
 
 /// What offering a start did (ADR-0038).
@@ -932,7 +956,10 @@ pub async fn start_task(
         governance::record_overrun(&mut tx, &company_id, agent_id, Some(task_id), &check).await?;
         tx.commit().await?;
         state.notify(&company_id);
-        return Err(RunnerError::OverBudget);
+        return Err(RunnerError::OverBudget {
+            limit_cents: check.cap,
+            observed_cents: check.observed(),
+        });
     }
 
     // Atomic checkout: exactly one concurrent caller wins this UPDATE.

@@ -42,18 +42,26 @@ tell them what is happening.
 ## Decision
 
 1. **The CEO never reports a start whose outcome it has not been told.** The
-   server appends the outcome to the reply it is about to deliver — one short
-   line per start that did not simply run, composed through `i18n` in the
-   company's language, the way every other sentence the server writes for a
-   person is. "Started" adds nothing: the board already shows it.
+   server says what became of it — one short line per start that did not simply
+   run, composed through `i18n` in the company's language, the way every other
+   sentence the server writes for a person is. "Started" adds nothing: the
+   board already shows it.
+   It lands as a **`system` message in the same thread**, immediately after the
+   CEO's, rather than being appended to the CEO's own words. Two reasons, and
+   the second is the one that decided it: the reply is committed inside a write
+   transaction *before* any start is attempted, so appending would mean editing
+   a row already delivered; and rewriting somebody's sentence after the fact is
+   worse than speaking after them. The server has a voice — the compaction
+   notice already uses it — and this is the server's fact, not the CEO's.
 2. **`start_existing` stops saying `Ok(None)` for two different things.** No
    task by that title and a task with nobody on it are different facts with
    different remedies, and the caller cannot act on a shrug. It returns an
    outcome that names which.
-3. **A refused start reaches the inbox.** `budget.blocked` gets the
-   notification the other incidents have, naming the agent, the cap, what was
-   observed, and the remedy that already exists — raise the cap or wait for the
-   window. A limit that stops work silently is indistinguishable from a broken
+3. **A refused start says which numbers refused it.** `RunnerError::OverBudget`
+   was a bare variant whose message named neither the cap nor the spend, so
+   even a caller that wanted to explain could not. It carries both now, and the
+   line the person reads gives the two amounts and the remedy — raise the cap
+   from that agent's card, or wait for the new month. A limit that stops work silently is indistinguishable from a broken
    product, and this is the third time it has been read as one.
 4. **A start is matched by identity, not by prose.** The CEO is given the
    board's task **ids** alongside their titles, and `"start"` accepts an id;
