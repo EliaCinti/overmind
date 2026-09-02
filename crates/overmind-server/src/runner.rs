@@ -670,7 +670,7 @@ pub(crate) async fn start_existing(
 ) -> Result<Started, RunnerError> {
     let task: Option<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT id, status, assignee_agent_id FROM tasks
-         WHERE company_id = ? AND title = ? AND status IN ('backlog', 'todo', 'blocked')
+         WHERE company_id = ? AND title = ? AND status NOT IN ('done', 'cancelled')
          ORDER BY created_at DESC LIMIT 1",
     )
     .bind(company_id)
@@ -683,6 +683,14 @@ pub(crate) async fn start_existing(
     let Some(assignee) = assignee else {
         return Ok(Started::NobodyOnIt);
     };
+    // Already working, or waiting to be reviewed. Relaunching it would be a
+    // second run of the same thing, and calling it "no such task" -- which is
+    // what the old `status IN (...)` filter did, by not matching it at all --
+    // is the false report this whole change exists to remove. The CEO's board
+    // lists these, so it will ask.
+    if matches!(status.as_str(), "in_progress" | "in_review") {
+        return Ok(Started::AlreadyRunning);
+    }
     if status != "todo" {
         sqlx::query("UPDATE tasks SET status = 'todo', updated_at = ? WHERE id = ?")
             .bind(now())
@@ -705,6 +713,8 @@ pub(crate) async fn start_existing(
 pub enum Started {
     /// No open task on the board carries that title.
     NoSuchTask,
+    /// It is already under way — running, or waiting for review.
+    AlreadyRunning,
     /// The task is there and has nobody assigned, so there is nobody to start.
     NobodyOnIt,
     /// It reached the autonomy gates, and this is what they said.

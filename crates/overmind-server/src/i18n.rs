@@ -103,7 +103,10 @@ pub fn start_outcome(code: &str, title: &str, outcome: &str) -> String {
         ("it", "waiting") => format!(
             "«{title}» non è partito da sé: chi lo ha in carico propone soltanto, quindi deve avviarlo una persona."
         ),
-        ("it", _) => format!("«{title}» non è partito: {outcome}"),
+        ("it", "already_running") => {
+            format!("«{title}» era già in corso: non l'ho fatto ripartire una seconda volta.")
+        }
+        ("it", _) => format!("«{title}» non è partito. Il motivo è nel log del server."),
         (_, "no_such_task") => {
             format!("\"{title}\" did not start: no open task on the board carries that title.")
         }
@@ -116,7 +119,10 @@ pub fn start_outcome(code: &str, title: &str, outcome: &str) -> String {
         (_, "waiting") => format!(
             "\"{title}\" did not start on its own: whoever holds it only proposes, so a person has to start it."
         ),
-        (_, _) => format!("\"{title}\" did not start: {outcome}"),
+        (_, "already_running") => {
+            format!("\"{title}\" was already under way: I did not run it a second time.")
+        }
+        (_, _) => format!("\"{title}\" did not start. The reason is in the server's log."),
     }
 }
 /// A start the budget gate refused, with the two numbers and the remedy
@@ -124,14 +130,16 @@ pub fn start_outcome(code: &str, title: &str, outcome: &str) -> String {
 /// — six refusals on the owner's own company in two hours, recorded on the
 /// chain and nowhere else.
 pub fn start_over_budget(code: &str, title: &str, limit_cents: i64, observed_cents: i64) -> String {
-    let cap = format!("{:.2}", limit_cents as f64 / 100.0);
-    let spent = format!("{:.2}", observed_cents as f64 / 100.0);
+    // `governance::euros`, like every other budget line in the codebase: nobody
+    // should read cents in one refusal and euros in the next.
+    let cap = crate::governance::euros(limit_cents);
+    let spent = crate::governance::euros(observed_cents);
     match code {
         "it" => format!(
-            "«{title}» non è partito: chi lo ha in carico è oltre il suo tetto mensile — {spent} contro {cap}.              Alza il tetto dalla sua scheda, oppure aspetta il mese nuovo."
+            "«{title}» non è partito: chi lo ha in carico è oltre il suo tetto mensile — {spent} contro {cap}. Alza il tetto dalla sua scheda, oppure aspetta il mese nuovo."
         ),
         _ => format!(
-            "\"{title}\" did not start: whoever holds it is over their monthly cap — {spent} against {cap}.              Raise it from their card, or wait for the new month."
+            "\"{title}\" did not start: whoever holds it is over their monthly cap — {spent} against {cap}. Raise it from their card, or wait for the new month."
         ),
     }
 }

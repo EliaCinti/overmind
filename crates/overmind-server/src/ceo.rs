@@ -374,6 +374,46 @@ pub async fn post_user_message(
 ///
 /// Structured params, not a finished sentence: the inbox words it in the
 /// company's language (M16 slice D). `title`/`body` stay as the durable record
+/// What became of a start the CEO asked for (ADR-0046). An enum rather than a
+/// string that gets encoded and re-parsed: the earlier draft carried
+/// `"over_budget:5000:5038"` and a parse miss would have shown that marker to
+/// a person.
+#[derive(Debug)]
+enum Outcome {
+    /// No open task on the board carries that title.
+    NoSuchTask,
+    /// The task is there and nobody is on it.
+    NobodyOnIt,
+    /// Already under way, or waiting for review.
+    AlreadyRunning,
+    /// It is in the inbox, waiting for the person.
+    Asked,
+    /// Whoever holds it only proposes; a person has to start it.
+    Waiting,
+    /// The budget gate refused it, with the two numbers a person needs.
+    OverBudget {
+        limit_cents: i64,
+        observed_cents: i64,
+    },
+    /// Something else went wrong; the log has it, the person gets the fact.
+    Refused,
+}
+
+impl Outcome {
+    /// The key `i18n` renders. `OverBudget` has its own sentence, with numbers.
+    fn slug(&self) -> &'static str {
+        match self {
+            Outcome::NoSuchTask => "no_such_task",
+            Outcome::NobodyOnIt => "nobody_on_it",
+            Outcome::AlreadyRunning => "already_running",
+            Outcome::Asked => "asked",
+            Outcome::Waiting => "waiting",
+            Outcome::OverBudget { .. } => "over_budget",
+            Outcome::Refused => "refused",
+        }
+    }
+}
+
 /// and the fallback, in English, like every other notification.
 pub(crate) async fn budget_exhausted_notice(
     state: &AppState,
@@ -1182,7 +1222,7 @@ async fn run_agent_turn_inner(
         })
         .unwrap_or_default();
     // What did not simply run, to be said out loud below.
-    let mut unreported: Vec<(String, String)> = Vec::new();
+    let mut unreported: Vec<(String, Outcome)> = Vec::new();
     for title in starts {
         if digest_block.is_some() {
             let task: Option<(String, Option<String>)> = sqlx::query_as(
@@ -1209,24 +1249,31 @@ async fn run_agent_turn_inner(
             // "running".
             let said = match crate::runner::start_existing(state, company_id, &title).await {
                 Ok(crate::runner::Started::Offered(crate::runner::Offer::Started)) => None,
-                Ok(crate::runner::Started::NoSuchTask) => Some("no_such_task".to_string()),
-                Ok(crate::runner::Started::NobodyOnIt) => Some("nobody_on_it".to_string()),
+                Ok(crate::runner::Started::NoSuchTask) => Some(Outcome::NoSuchTask),
+                Ok(crate::runner::Started::NobodyOnIt) => Some(Outcome::NobodyOnIt),
                 Ok(crate::runner::Started::Offered(crate::runner::Offer::Asked { .. })) => {
-                    Some("asked".to_string())
+                    Some(Outcome::Asked)
                 }
                 Ok(crate::runner::Started::Offered(crate::runner::Offer::Waiting)) => {
-                    Some("waiting".to_string())
+                    Some(Outcome::Waiting)
                 }
                 // The one refusal that has actually stopped work on a real
                 // company, so it gets the numbers and the remedy rather than
                 // the error's own words.
+                Ok(crate::runner::Started::AlreadyRunning) => Some(Outcome::AlreadyRunning),
                 Err(crate::runner::RunnerError::OverBudget {
                     limit_cents,
                     observed_cents,
-                }) => Some(format!("over_budget:{limit_cents}:{observed_cents}")),
+                }) => Some(Outcome::OverBudget {
+                    limit_cents,
+                    observed_cents,
+                }),
                 Err(e) => {
+                    // The error's own words can carry a database message or a
+                    // workspace path. The person gets the fact; the log keeps
+                    // the detail.
                     eprintln!("could not start «{title}»: {e}");
-                    Some(e.to_string())
+                    Some(Outcome::Refused)
                 }
             };
             if let Some(outcome) = said {
@@ -1243,35 +1290,28 @@ async fn run_agent_turn_inner(
         let code = crate::i18n::company_language(state, company_id).await;
         let body = unreported
             .iter()
-            .map(
-                |(title, outcome)| match outcome.strip_prefix("over_budget:") {
-                    Some(rest) => {
-                        let mut n = rest.split(':').filter_map(|x| x.parse::<i64>().ok());
-                        match (n.next(), n.next()) {
-                            (Some(cap), Some(observed)) => {
-                                crate::i18n::start_over_budget(&code, title, cap, observed)
-                            }
-                            _ => crate::i18n::start_outcome(&code, title, outcome),
-                        }
-                    }
-                    None => crate::i18n::start_outcome(&code, title, outcome),
-                },
-            )
+            .map(|(title, outcome)| match outcome {
+                Outcome::OverBudget {
+                    limit_cents,
+                    observed_cents,
+                } => crate::i18n::start_over_budget(&code, title, *limit_cents, *observed_cents),
+                other => crate::i18n::start_outcome(&code, title, other.slug()),
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        let mut tx = state.write_tx().await?;
-        sqlx::query(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at)
-             VALUES (?, ?, 'system', ?, ?)",
-        )
-        .bind(new_id())
-        .bind(conversation_id)
-        .bind(&body)
-        .bind(now())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        state.push(json!({ "type": "changed", "company_id": company_id }));
+        // Through the helper, so it lands on the audit chain like every other
+        // message the server writes -- a raw INSERT left the chain unable to
+        // account for a message in its own conversation. And `let _`, like the
+        // compaction notice: this is the last word about work already done, so
+        // a write failure must not abort the escalation and the meeting
+        // request that follow it.
+        // Through the helper, so it lands on the audit chain like every other
+        // message the server writes -- a raw INSERT left the chain unable to
+        // account for a message in its own conversation. And `let _`, like the
+        // compaction notice: this is the last word about work already done, so
+        // a write failure must not abort the escalation and the meeting
+        // request that follow it.
+        let _ = post_system_message(state, company_id, conversation_id, &body).await;
     }
 
     // Cross-impact: a specialist can escalate to the leader (its own thread).

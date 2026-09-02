@@ -818,7 +818,9 @@ impl From<crate::runner::RunnerError> for ApiError {
                 limit_cents,
                 observed_cents,
             } => ApiError::Blocked(format!(
-                "agent is over its monthly budget: {observed_cents} of {limit_cents} cents"
+                "agent is over its monthly budget: {} of {}",
+                crate::governance::euros(observed_cents),
+                crate::governance::euros(limit_cents)
             )),
             RunnerError::Git(msg) => ApiError::Internal(msg.into()),
             RunnerError::Db(e) => ApiError::Internal(Box::new(e)),
