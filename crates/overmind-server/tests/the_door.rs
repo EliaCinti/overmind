@@ -122,6 +122,42 @@ async fn a_claim_without_the_setup_code_is_refused() {
     );
 }
 
+/// The live socket keeps no exception for an unclaimed instance either.
+///
+/// It used to: `ws_wall` waved one through the way the API wall did. That is
+/// worse on a socket than on a request, because a socket is authorised once,
+/// at the upgrade, and never again — a stranger who opened it while nobody
+/// owned the instance went on receiving every company's events after the owner
+/// claimed it and began working. `guard_origin` deliberately admits a request
+/// with no `Origin` at all, so a non-browser client reaches this wall
+/// directly (ADR-0045).
+#[tokio::test]
+async fn the_live_socket_refuses_a_stranger_on_an_unclaimed_instance() {
+    let app = setup().await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ws")
+                .header(header::HOST, "127.0.0.1:7070")
+                .header(header::CONNECTION, "Upgrade")
+                .header(header::UPGRADE, "websocket")
+                .header(header::SEC_WEBSOCKET_VERSION, "13")
+                .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "an unclaimed instance handed its live feed to a stranger"
+    );
+}
+
 /// Claim the owner and hand back the session cookie's `k=v` pair.
 async fn claim(door: &Door, name: &str, pass: &str) -> String {
     let (s, _, cookie) = send_raw(

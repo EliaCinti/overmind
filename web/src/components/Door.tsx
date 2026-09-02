@@ -114,6 +114,7 @@ export function Door({
     try {
       const staged = await api.restore(
         restoreFile,
+        setupCode.trim(),
         restoreNeedsPassphrase ? restorePassphrase.trim() || undefined : undefined,
         restoreSkipToken,
       );
@@ -256,6 +257,18 @@ export function Door({
                         }}
                       />
                     </label>
+
+                    <div className="flex flex-col gap-2">
+                      <RoundInput
+                        icon={KeyRound}
+                        value={setupCode}
+                        onChange={(e) => setSetupCode(e.target.value)}
+                        placeholder={t("door.setupCode")}
+                        className="font-mono"
+                        aria-label={t("door.setupCode")}
+                      />
+                      <p className="pl-1 text-xs text-muted-foreground">{t("door.setupHint")}</p>
+                    </div>
 
                     {restoreNeedsPassphrase && (
                       <div className="flex flex-col gap-2">

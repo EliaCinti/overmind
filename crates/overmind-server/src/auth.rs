@@ -218,19 +218,42 @@ pub fn setup_code_path(config: &crate::db::Config) -> std::path::PathBuf {
     config.data_dir.join(SETUP_CODE_FILE)
 }
 
-/// The code, if this instance still has one. `None` once it has been claimed.
-pub fn stored_setup_code(config: &crate::db::Config) -> Option<String> {
-    let c = std::fs::read_to_string(setup_code_path(config)).ok()?;
-    let c = c.trim().to_string();
-    (!c.is_empty()).then_some(c)
+/// The code this instance is waiting for.
+///
+/// `Ok(None)` only when the file is genuinely absent -- the claim spent it, or
+/// this instance was claimed before the code existed. Every other failure is
+/// an `Err`, because "I could not read the door's key" and "there is no door"
+/// must never take the same branch.
+pub fn stored_setup_code(config: &crate::db::Config) -> std::io::Result<Option<String>> {
+    match std::fs::read_to_string(setup_code_path(config)) {
+        Ok(c) => {
+            let c = c.trim().to_string();
+            // An empty file is not "no code": something wrote it and lost the
+            // contents, and treating that as open would be the fail-open this
+            // whole mechanism exists to remove.
+            if c.is_empty() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the setup code file is empty",
+                ))
+            } else {
+                Ok(Some(c))
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Compare without letting the clock say how much of the code was right.
 fn codes_match(given: &str, expected: &str) -> bool {
     let (a, b) = (given.as_bytes(), expected.as_bytes());
-    let mut diff = (a.len() ^ b.len()) as u8;
+    // The length difference folded as a `usize`, not truncated to a byte: as
+    // `u8` any difference that is a multiple of 256 vanishes, and the right
+    // code followed by 256 NULs would have compared equal.
+    let mut diff: usize = a.len() ^ b.len();
     for i in 0..a.len().max(b.len()) {
-        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+        diff |= (a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0)) as usize;
     }
     diff == 0
 }
@@ -273,7 +296,7 @@ pub async fn mint_setup_code(
         let _ = std::fs::remove_file(setup_code_path(config));
         return Ok(());
     }
-    if stored_setup_code(config).is_some() {
+    if stored_setup_code(config)?.is_some() {
         // Already minted, and somebody may have copied it.
         return Ok(());
     }
@@ -307,12 +330,20 @@ pub fn clear_setup_code(config: &crate::db::Config) {
 
 /// Does this request carry the code the instance is waiting for?
 ///
-/// An instance with no code waiting has already been claimed, or was created
-/// before this existed; either way the claim's own checks decide.
+/// **Only a code that was read and matched is a yes.** An earlier draft
+/// answered `true` when the file was absent, reasoning that such an instance
+/// had already been claimed -- but the two callers are the claim and the
+/// restore, and both of them only ever run on an instance nobody owns. There,
+/// a missing or unreadable code file is not "already claimed", it is "the
+/// guard is gone", and answering yes would hand the instance to whoever asked.
 pub fn setup_code_ok(config: &crate::db::Config, given: Option<&str>) -> bool {
     match stored_setup_code(config) {
-        None => true,
-        Some(expected) => given.is_some_and(|g| codes_match(g.trim(), &expected)),
+        Ok(Some(expected)) => given.is_some_and(|g| codes_match(g.trim(), &expected)),
+        Ok(None) => false,
+        Err(e) => {
+            eprintln!("the setup code could not be read, so nothing is admitted: {e}");
+            false
+        }
     }
 }
 
@@ -355,6 +386,12 @@ pub async fn claim(state: &AppState, req: &Credentials) -> Result<Response, ApiE
     // Before anything else, and before the password is even hashed: an
     // unclaimed instance has nobody to refuse on its behalf, so the code it
     // minted at boot is the whole of its door (ADR-0045).
+    // Deliberately *not* rate limited, unlike signup and login. The limiter is
+    // keyed by a string in one process-wide map, and the only honest key for a
+    // claim is the instance itself -- a guesser would offer a different name
+    // each time. That hands a stranger the power to lock the real owner out of
+    // claiming their own instance: six attempts a minute, forever. Against
+    // eighty bits of code it buys nothing, and it would be an attack we added.
     if !setup_code_ok(&state.config, req.setup.as_deref()) {
         return Err(ApiError::Unauthorized);
     }
@@ -641,12 +678,13 @@ async fn audit_auth(state: &AppState, kind: &str, who: &str) {
 /// The wall for the live socket: an unauthenticated upgrade is refused
 /// before it becomes a stream. Same unclaimed-instance exception as the API.
 pub async fn ws_wall(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
-    let owner_exists: bool = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
-        .fetch_one(&state.pool)
-        .await
-        .map(|n| n > 0)
-        .unwrap_or(false);
-    if !owner_exists || session_user(&state, req.headers()).await.is_some() {
+    // No exception for an unclaimed instance any more (ADR-0045). It used to
+    // wave one through the way `wall` did, and the socket is worse than a
+    // request: it is authorised once, at the upgrade, and never again. A
+    // stranger who opened it while nobody owned the instance kept receiving
+    // the live stream -- tasks, notifications, meetings -- for as long as it
+    // stayed open, including after the owner claimed and began working.
+    if session_user(&state, req.headers()).await.is_some() {
         return next.run(req).await;
     }
     ApiError::Unauthorized.into_response()
