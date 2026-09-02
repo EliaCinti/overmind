@@ -410,27 +410,30 @@ async fn a_digest_proposed_start_is_an_approval_never_a_spend() {
     );
 }
 
-/// Everything the person can read in the thread after a turn, waited for
-/// rather than guessed at: the turn runs off the request, so the messages land
-/// after `tell_the_ceo` returns. Every role, because what became of a start is
-/// the server's word, not the CEO's -- the CEO's sentence was committed before
-/// the start was tried (ADR-0046).
-async fn await_thread(env: &Env) -> String {
+/// Wait until `needle` is in the thread, and return what the person can read.
+///
+/// Not "until any row exists": the CEO's reply is committed *before* the starts
+/// are attempted, so a poll landing in that window would see only the reply and
+/// the assertion would fail on timing rather than on behaviour. Every role,
+/// because what became of a start is the server's word, not the CEO's.
+async fn await_thread(env: &Env, needle: &str) -> String {
+    let mut seen = String::new();
     for _ in 0..150 {
-        let row: Option<(String,)> = sqlx::query_as(
+        let row: Option<(Option<String>,)> = sqlx::query_as(
             "SELECT group_concat(content, '\n') FROM messages WHERE role IN ('ceo', 'system')",
         )
         .fetch_optional(&env.state.pool)
         .await
         .expect("q");
-        if let Some((content,)) = row
-            && !content.trim().is_empty()
-        {
-            return content;
+        if let Some((Some(content),)) = row {
+            if content.contains(needle) {
+                return content;
+            }
+            seen = content;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("nothing was ever said in the thread");
+    panic!("{needle:?} never reached the thread; what did: {seen}");
 }
 
 /// The reply and the `start` list are one JSON object: the words are delivered,
@@ -450,7 +453,7 @@ async fn a_start_that_matched_nothing_is_not_reported_as_running() {
     }));
     tell_the_ceo(&env, "Vai.").await;
 
-    let thread = await_thread(&env).await;
+    let thread = await_thread(&env, "Un titolo che sulla lavagna non esiste").await;
     assert!(
         thread.contains("Un titolo che sulla lavagna non esiste"),
         "the CEO claimed a start, the title matched nothing, and the person was \
@@ -500,7 +503,10 @@ async fn a_start_refused_for_budget_says_so_with_the_numbers() {
     }));
     tell_the_ceo(&env, "Vai.").await;
 
-    let thread = await_thread(&env).await;
+    // The needle is what this company's language actually produces: `setup()`
+    // founds an English one, and waiting for the Italian sentence would time
+    // out on a line that was written correctly.
+    let thread = await_thread(&env, "monthly cap").await;
     assert!(
         thread.contains("tetto mensile") || thread.contains("monthly cap"),
         "the budget gate refused the start and the person was told nothing: {thread}"
