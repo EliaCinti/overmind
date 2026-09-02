@@ -701,6 +701,11 @@ pub enum InitError {
     Seed(#[from] serde_json::Error),
     #[error("invalid database url: {0}")]
     Url(String),
+    /// The setup code could not be written, so the first claim would be free
+    /// to whoever reaches the port (ADR-0045). A boot that cannot guard its
+    /// own door does not open it.
+    #[error("cannot write the setup code that guards the first claim: {0}")]
+    SetupCode(std::io::Error),
 }
 
 /// The database file and the two SQLite keeps beside it in WAL mode.
@@ -785,9 +790,13 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
     // An unclaimed instance is open by construction, so it mints the code its
     // first claim will cost (ADR-0045). Idempotent: already claimed clears it,
     // already minted leaves it alone.
-    if let Err(e) = crate::auth::mint_setup_code(&pool, &config).await {
-        eprintln!("cannot write the setup code (the first claim would be open): {e}");
-    }
+    // Fatal on purpose: if this fails -- a read-only mount, a data dir owned
+    // by another uid, a full disk -- the instance would start with its first
+    // claim free to whoever reaches the port, which is the hole this exists to
+    // close. Refusing to serve is the safe direction.
+    crate::auth::mint_setup_code(&pool, &config)
+        .await
+        .map_err(InitError::SetupCode)?;
 
     // Whatever was declared; the binary probes and refines it at startup.
     let economy =

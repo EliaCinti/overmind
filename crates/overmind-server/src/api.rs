@@ -36,8 +36,8 @@ pub fn app(state: AppState) -> Router {
             get(crate::ws::handler)
                 .layer(axum::middleware::from_fn(crate::ws::guard_origin))
                 // The socket authenticates like everything else (M24): the
-                // cookie rides the upgrade request. Same wall, same
-                // exception for an unclaimed instance.
+                // cookie rides the upgrade request. Same wall -- and since
+                // ADR-0045 no exception for an unclaimed instance either.
                 .layer(axum::middleware::from_fn_with_state(
                     state.clone(),
                     crate::auth::ws_wall,
@@ -737,6 +737,12 @@ async fn take_upload(
                 // be able to make this machine write one -- so the code is
                 // demanded here rather than after the upload, and a client
                 // that sends the archive first is refused without it.
+                // Wordless 401, like the claim's: a missing credential is not
+                // a malformed request, and this is the same credential. The
+                // ordering requirement -- `setup` before `archive` -- is in
+                // ADR-0045 and the threat model, where a client author reads
+                // it, rather than in an answer to somebody who has not proved
+                // they may ask.
                 if !code_ok {
                     return Err(ApiError::Unauthorized);
                 }

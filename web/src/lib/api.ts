@@ -545,8 +545,12 @@ export const api = {
   /** Hand an archive back to an empty instance. Multipart, because the
    *  archive is a file and the server streams it to disk rather than holding
    *  it in memory. */
-  restore: async (archive: File, passphrase?: string, skipToken?: boolean) => {
+  restore: async (archive: File, setup: string, passphrase?: string, skipToken?: boolean) => {
     const form = new FormData();
+    // Before the archive, always: the server checks the code as the `archive`
+    // field opens, so that a stranger cannot make it write a file the size of
+    // somebody's whole instance (ADR-0045).
+    form.append("setup", setup);
     if (passphrase) form.append("passphrase", passphrase);
     if (skipToken) form.append("skip_token", "true");
     form.append("archive", archive, archive.name || "overmind.tar.gz");
