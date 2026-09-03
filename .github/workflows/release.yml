@@ -115,6 +115,24 @@ jobs:
           ' CHANGELOG.md > notes.md
           test -s notes.md || { echo "no changelog entry for $v"; exit 1; }
           cat notes.md
+      # The installers carry their own release's tag and the digest of the
+      # compose file that release publishes (ADR-0045). Stamped here rather
+      # than fetched at run time: the file and the hash it is checked against
+      # then come from one place, and no release cut can land between two
+      # requests. Their own checksums ride along, so somebody who would rather
+      # read the script before running it can verify what they read.
+      - name: Stamp the installers with this release
+        run: |
+          v="${GITHUB_REF_NAME}"
+          sha=$(sha256sum docker-compose.yml | cut -d' ' -f1)
+          for f in scripts/install.sh scripts/install.ps1; do
+            sed -i "s|__OVERMIND_TAG__|${v}|g; s|__OVERMIND_COMPOSE_SHA256__|${sha}|g" "$f"
+            grep -q "__OVERMIND_" "$f" && { echo "$f still has a placeholder"; exit 1; }
+            cp "$f" "$(basename "$f")"
+          done
+          sha256sum install.sh   | cut -d' ' -f1 > install.sh.sha256
+          sha256sum install.ps1  | cut -d' ' -f1 > install.ps1.sha256
+          echo "compose sha256: $sha"
       - uses: softprops/action-gh-release@v2
         with:
           body_path: notes.md
@@ -122,5 +140,11 @@ jobs:
           # The install is one file on top of Docker: ship that file with
           # every release so nobody has to clone a repository to run an image.
           # It names `latest` -- a release asset is where you get the file,
-          # not a pin; the one update line keeps working from it.
-          files: docker-compose.yml
+          # not a pin; the one update line keeps working from it. The two
+          # installers and their checksums ride with it.
+          files: |
+            docker-compose.yml
+            install.sh
+            install.sh.sha256
+            install.ps1
+            install.ps1.sha256
