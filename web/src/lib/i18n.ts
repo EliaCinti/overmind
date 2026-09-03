@@ -359,9 +359,9 @@ export const en = {
     keyMeaning: "The cap is a ceiling in real money.",
     keyOverridesLogin: "You are signed in with a subscription, and it is not paying.",
     keyOverridesLoginFix:
-      "An API key takes precedence over a claude.ai login. Overmind can let the plan pay instead:",
-    keyCanUsePlan:
-      "A Claude subscription can pay instead of the key. Connect one and you can switch whenever you like.",
+      "An API key takes precedence over a claude.ai login. Overmind can let the plan pay instead.",
+    keyCanUsePlan: "A Claude subscription can pay instead of the key.",
+    connectPlanDoneChoosing: "Signed in. Letting the plan pay…",
     payerPlanChosen: "You chose the plan; the key is kept out of the agents' environment.",
     letPlanPay: "Let the plan pay",
     letPlanPayBody:
@@ -938,9 +938,9 @@ export const it: Dictionary = {
     keyMeaning: "Il tetto è un limite in denaro vero.",
     keyOverridesLogin: "Hai l'accesso con un abbonamento, e non è lui che sta pagando.",
     keyOverridesLoginFix:
-      "Una chiave API ha la precedenza su un login claude.ai. Overmind può far pagare il piano al suo posto:",
-    keyCanUsePlan:
-      "Al posto della chiave può pagare un abbonamento Claude. Collegane uno e potrai passare all'uno o all'altro quando vuoi.",
+      "Una chiave API ha la precedenza su un login claude.ai. Overmind può far pagare il piano al suo posto.",
+    keyCanUsePlan: "Al posto della chiave può pagare un abbonamento Claude.",
+    connectPlanDoneChoosing: "Accesso eseguito. Faccio pagare il piano…",
     payerPlanChosen: "Hai scelto il piano: la chiave resta fuori dall'ambiente degli agenti.",
     letPlanPay: "Fai pagare il piano",
     letPlanPayBody:

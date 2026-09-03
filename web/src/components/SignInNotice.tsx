@@ -41,28 +41,36 @@ export function SignInNotice({
             <KeyRound className="h-4 w-4" />
           </span>
           <div className="min-w-0 flex-1 space-y-2.5">
-            <div>
-              <p className="text-sm font-medium">{t("economy.notSignedIn")}</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {t("economy.notSignedInBody")}
-              </p>
-            </div>
+            {/* Only while it is still true. Once the sign-in lands the economy
+                stops being "nobody can pay", and leaving the heading up would
+                print "the agents cannot pay yet" directly above the line
+                saying they can. */}
+            {wanted && (
+              <div>
+                <p className="text-sm font-medium">{t("economy.notSignedIn")}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {t("economy.notSignedInBody")}
+                </p>
+              </div>
+            )}
 
             {/* The guided way: the subscription, from the product. */}
             <ConnectPlan onSignedIn={onSignedIn} onEngaged={() => setEngaged(true)} />
 
             {/* The manual ways stay, quieter, below the guided one. */}
-            <details className="pt-1">
-              <summary className="cursor-pointer text-[11px] text-muted-foreground">
-                {t("economy.notSignedInKey")}
-              </summary>
-              <code className="mt-1 block overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-[11px]">
-                export ANTHROPIC_API_KEY=sk-ant-…
-              </code>
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {t("economy.notSignedInPlanHost")}
-              </p>
-            </details>
+            {wanted && (
+              <details className="pt-1">
+                <summary className="cursor-pointer text-[11px] text-muted-foreground">
+                  {t("economy.notSignedInKey")}
+                </summary>
+                <code className="mt-1 block overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-[11px]">
+                  export ANTHROPIC_API_KEY=sk-ant-…
+                </code>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  {t("economy.notSignedInPlanHost")}
+                </p>
+              </details>
+            )}
           </div>
         </div>
       </div>

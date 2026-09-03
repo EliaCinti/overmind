@@ -485,13 +485,17 @@ async fn pay_with(
     };
     crate::economy::prefer_plan(&state.config, plan).map_err(|e| ApiError::Internal(e.into()))?;
     let economy = crate::economy::detect(&state.config).await;
-    let refusal = if !plan {
+    // Only one of the two ways this can fail is something Overmind can repair
+    // from here, so the refusal says which — as a remedy the interface can act
+    // on, not as English prose it would have to match against.
+    let refusal: Option<(&str, Option<&str>)> = if !plan {
         None
     } else if economy.is_metered() {
-        Some(
+        Some((
             "the key still pays: it is not coming from the environment Overmind controls \
              (a settings file or an apiKeyHelper, most likely), so the plan cannot be made to pay from here",
-        )
+            None,
+        ))
     } else if matches!(
         economy,
         crate::economy::Economy::Unknown {
@@ -499,17 +503,24 @@ async fn pay_with(
             ..
         }
     ) {
-        Some(
+        Some((
             "there is no plan to pay: with the key out of the way the agent CLI is not signed in, \
              so every run would fail. Connect a Claude subscription first, then choose it",
-        )
+            Some("connect_plan"),
+        ))
     } else {
         None
     };
-    if let Some(why) = refusal {
+    if let Some((why, remedy)) = refusal {
         crate::economy::prefer_plan(&state.config, false)
             .map_err(|e| ApiError::Internal(e.into()))?;
-        return Err(ApiError::Conflict(why.into()));
+        return Err(match remedy {
+            Some(kind) => ApiError::Remediable {
+                message: why.into(),
+                remedy: json!({ "kind": kind }),
+            },
+            None => ApiError::Conflict(why.into()),
+        });
     }
     state.set_economy(economy.clone());
     eprintln!(

@@ -106,6 +106,10 @@ async fn letting_the_plan_pay_is_refused_when_the_key_would_still_pay() {
         !data_dir.join("pay-with-plan").exists(),
         "a refused choice is not remembered"
     );
+    assert!(
+        body["remedy"].is_null(),
+        "a key Overmind cannot reach is not something it can repair: {body}"
+    );
     let (_, health) = send(&app, "GET", "/api/health", None).await;
     assert_eq!(health["pay_with"], json!("detected"));
 }
@@ -135,6 +139,14 @@ async fn letting_the_plan_pay_is_refused_when_nobody_is_signed_in() {
     assert!(
         body["error"].as_str().unwrap_or("").contains("signed in"),
         "the refusal says what is missing, not merely that it refused: {body}"
+    );
+    // And says it to the interface as well as the person: this refusal has a
+    // repair Overmind can offer on the spot, and matching on English prose to
+    // discover that is not a contract (ADR-0038 addendum).
+    assert_eq!(
+        body["remedy"]["kind"],
+        json!("connect_plan"),
+        "the refusal carries the repair: {body}"
     );
     assert!(
         !data_dir.join("pay-with-plan").exists(),

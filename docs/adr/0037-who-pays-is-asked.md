@@ -53,6 +53,13 @@ words: *Overmind should ask, and on approval, do it itself.*
    naming what is missing. `custom_adapter` and `unreadable` are left alone:
    those mean *we do not know*, and ADR-0030's whole point is not to invent.
 
+   The two refusals are not the same kind of thing, and the body says which.
+   A key Overmind cannot reach is a dead end — a plain `409`. Nobody signed in
+   is a **repair Overmind can perform on the spot**, so it answers with the
+   `remedy` of ADR-0038's addendum, `{"kind": "connect_plan"}`. The interface
+   acts on that rather than matching English prose, which is not a contract
+   and is not even in the reader's language.
+
 3. **Remembered as a file, read per spawn.** `<data-dir>/pay-with-plan`,
    presence is the setting — exactly like the stored OAuth token
    (`claude-oauth-token`) and for the same reasons: it survives a restart, it
@@ -76,10 +83,17 @@ words: *Overmind should ask, and on approval, do it itself.*
    way to say otherwise. A notice announces a state that is wrong; preferring
    your own subscription is not a wrong state, it is a preference, and a
    preference needs a place that is always there rather than one that appears.
-   So the economy line offers *connect a subscription* when there is no login
-   behind the key, and *let the plan pay* once there is — in that order,
-   because the switch only hides the key, and hiding it with nothing behind it
-   is the refusal added above.
+
+   It is **one** control, not two steps, and that is a correction: the first
+   attempt offered *connect a subscription* or *let the plan pay* depending on
+   `overrides_login`, which is set only for `authMethod: "claude.ai"` — and
+   the sign-in this product performs is `setup-token`, whose measured payload
+   answers `oauth_token`. The second step would never have appeared for anyone
+   who used the first. So the line offers *let the plan pay*, and when the
+   server refuses it with `connect_plan` the sign-in appears there, at the
+   refusal; when it completes, the choice the person already made is applied
+   for them. The ordering that matters — sign in before hiding the key — is
+   enforced by the server, which is the only party that can actually see it.
 
    A permanent badge in the top bar was built and taken out the same day: the
    owner found the bar already full, and a fact that is only worth acting on in

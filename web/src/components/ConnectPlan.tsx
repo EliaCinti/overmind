@@ -23,10 +23,17 @@ import { useT } from "../lib/i18n";
 export function ConnectPlan({
   onSignedIn,
   onEngaged,
+  doneText,
 }: {
   onSignedIn: () => void;
   /** Called once, when the person starts the flow. */
   onEngaged?: () => void;
+  /**
+   * What success means *here*. The default — "your subscription is paying" —
+   * is true where a sign-in is the whole remedy, and false where the key is
+   * still the payer until a switch lands, so that caller says so instead.
+   */
+  doneText?: string;
 }) {
   const t = useT();
   const [flow, setFlow] = useState<
@@ -97,7 +104,11 @@ export function ConnectPlan({
   };
 
   if (flow.step === "done") {
-    return <p className="text-sm font-medium text-primary">{t("economy.connectPlanDone")}</p>;
+    return (
+      <p className="text-sm font-medium text-primary">
+        {doneText ?? t("economy.connectPlanDone")}
+      </p>
+    );
   }
 
   return (

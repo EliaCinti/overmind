@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
 import type { Agent, AgentBudget, Economy, OrgProposal, PayWith, PlanWindow, Tool } from "../lib/api";
 import { PLAN_WINDOWS } from "../lib/api";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
 import { Chip } from "./ui/controls";
@@ -330,10 +330,41 @@ function EconomyNote({
 }) {
   const t = useT();
   const [undoing, setUndoing] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [choosing, setChoosing] = useState<
-    { step: "idle" } | { step: "working" } | { step: "failed"; why: string }
+  const [pay, setPay] = useState<
+    | { step: "idle" }
+    | { step: "working" }
+    | { step: "signin" }
+    | { step: "failed"; why: string }
   >({ step: "idle" });
+
+  // The other direction, and one button rather than two steps to guess at.
+  // Hiding the key has to leave somebody able to pay; the server is the only
+  // one who can say whether it does, and when the answer is "nobody is signed
+  // in" it says so as a remedy this can act on rather than as prose to match.
+  // Anything else it refuses is shown in its own words.
+  const choosePlan = useCallback(async () => {
+    setPay({ step: "working" });
+    try {
+      await api.payWith("plan");
+      setPay({ step: "idle" });
+      onPayerChanged();
+    } catch (e) {
+      if (e instanceof ApiError && e.remedy?.kind === "connect_plan") {
+        setPay({ step: "signin" });
+        return;
+      }
+      setPay({ step: "failed", why: e instanceof Error ? e.message : String(e) });
+    }
+  }, [onPayerChanged]);
+
+  // The sign-in was only ever the first half of what the person asked for, so
+  // the choice they clicked is applied for them rather than left as a second
+  // button they have to find again.
+  const afterSignIn = useCallback(() => {
+    onPayerChanged();
+    void choosePlan();
+  }, [onPayerChanged, choosePlan]);
+
   if (!economy) return null;
   const undo = async () => {
     setUndoing(true);
@@ -343,21 +374,7 @@ function EconomyNote({
       setUndoing(false);
       onPayerChanged();
     }
-  };
-  // The other direction. The server checks that hiding the key leaves somebody
-  // able to pay and refuses otherwise, so a failure here is worth showing
-  // rather than swallowing: it is the reason, in the server's own words.
-  const choosePlan = async () => {
-    setChoosing({ step: "working" });
-    try {
-      await api.payWith("plan");
-      setChoosing({ step: "idle" });
-      onPayerChanged();
-    } catch (e) {
-      setChoosing({ step: "failed", why: e instanceof Error ? e.message : String(e) });
-    }
-  };
-  const what =
+  };  const what =
     economy.kind === "key"
       ? t("economy.key")
       : economy.kind === "subscription"
@@ -405,38 +422,31 @@ function EconomyNote({
           ) : (
             <p className="text-[11px] text-muted-foreground">{t("economy.keyCanUsePlan")}</p>
           )}
-          {economy.overrides_login ? (
-            // A login is already there, so the switch is all that is needed.
+          {pay.step === "signin" ? (
+            // The server said the plan cannot pay because nobody is signed in.
+            // That is the one refusal it can repair from here, so the repair
+            // appears where the refusal happened.
+            <ConnectPlan
+              doneText={t("economy.connectPlanDoneChoosing")}
+              onSignedIn={afterSignIn}
+            />
+          ) : (
             <p className="text-[11px] text-muted-foreground">
               <button
                 type="button"
                 className="underline underline-offset-2 hover:text-foreground disabled:opacity-50"
                 onClick={choosePlan}
-                disabled={choosing.step === "working"}
+                disabled={pay.step === "working"}
               >
-                {choosing.step === "working"
+                {pay.step === "working"
                   ? t("economy.letPlanPayWorking")
                   : t("economy.letPlanPay")}
               </button>
             </p>
-          ) : connecting ? (
-            // Nothing behind the key, so the switch alone would sign the agent
-            // in as nobody. Connect first; the switch appears after.
-            <ConnectPlan onSignedIn={onPayerChanged} />
-          ) : (
-            <p className="text-[11px] text-muted-foreground">
-              <button
-                type="button"
-                className="underline underline-offset-2 hover:text-foreground"
-                onClick={() => setConnecting(true)}
-              >
-                {t("economy.connectPlan")}
-              </button>
-            </p>
           )}
-          {choosing.step === "failed" && (
+          {pay.step === "failed" && (
             <p className="text-[11px] text-destructive">
-              {t("economy.letPlanPayFailed")} {choosing.why}
+              {t("economy.letPlanPayFailed")} {pay.why}
             </p>
           )}
         </div>
