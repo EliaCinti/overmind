@@ -76,9 +76,17 @@ it is ready, then run this installer again.
     # Absolute before anything compares it, and before it exists: OVERMIND_HOME
     # may be relative and every path below is matched against Docker's.
     if (-not [System.IO.Path]::IsPathRooted($dir)) { $dir = Join-Path (Get-Location).Path $dir }
+    # Resolved, not logical: Docker reports the resolved path, so an unresolved
+    # one never matches and the installer reports your own instance as one that
+    # lives elsewhere.
+    $_p = Split-Path $dir -Parent
+    if (Test-Path $_p) { $dir = Join-Path (Resolve-Path $_p).Path (Split-Path $dir -Leaf) }
     # Asked before the folder is made, or answering "update that one instead"
     # leaves an empty .\overmind behind in whatever directory you were in.
-    if (-not (Test-Path (Join-Path $dir 'data\overmind.sqlite'))) {
+    # What makes a folder an install is the compose file the installer writes
+    # there — never data\overmind.sqlite, because ADR-0047 lets OVERMIND_DATA
+    # put the database anywhere, and then an existing instance looks brand new.
+    if (-not (Test-Path (Join-Path $dir 'docker-compose.yml'))) {
         $dir = Show-Elsewhere $dir
     }
     try {
@@ -88,7 +96,7 @@ it is ready, then run this installer again.
     }
     Set-Location $dir
     $dir = (Get-Location).Path
-    if (Test-Path (Join-Path $dir 'data\overmind.sqlite')) {
+    if (Test-Path (Join-Path $dir 'docker-compose.yml')) {
         Write-Host "There is already an Overmind in $dir - updating it in place."
     }
     Write-Identity
@@ -215,7 +223,10 @@ function Show-Elsewhere([string]$dir) {
     Write-Host ""
 
     if (($others.Count -ne 1) -or [Console]::IsOutputRedirected) {
-        Write-Host "  Installing here. To update one of those instead, run this from its folder."
+        # Not "run this from its folder": the installer makes .\overmind
+        # beside you, so from the instance folder that is a third instance
+        # nested inside the one you meant to update.
+        Write-Host "  Installing here. To update one of those instead: cd <that folder> ; docker compose up -d --pull always"
         return $dir
     }
     $answer = Read-Host "    [u] update that one instead   [n] new instance here   [q] quit"
@@ -247,12 +258,18 @@ function Write-Identity {
     # this very file, so a .env that exists is not a .env that names an
     # instance - and returning on one that only relocates the data left the
     # install with no project name, which is the collision this prevents.
-    if ((Test-Path '.env') -and (Select-String -Path '.env' -Pattern '^COMPOSE_PROJECT_NAME=' -Quiet)) { return }
-    if (Test-Path 'data\overmind.sqlite') {
+    if ((Test-Path '.env') -and
+        (Select-String -Path '.env' -Pattern '^COMPOSE_PROJECT_NAME=' -Quiet) -and
+        (Select-String -Path '.env' -Pattern '^OVERMIND_NAME=' -Quiet) -and
+        (Select-String -Path '.env' -Pattern '^OVERMIND_PORT=' -Quiet)) { return }
+    if (Test-Path 'docker-compose.yml') {
         # Older than this file. Compose has been naming its containers after
         # the directory all along, so keep exactly that - inventing a new name
         # here would orphan a container that is running right now.
-        $project = ((Split-Path $dir -Leaf).ToLower() -replace '[^a-z0-9_-]', '')
+        # Compose's own normalisation: lowercase, drop what is outside
+        # [a-z0-9_-], THEN trim leading _ and -. Missing that last step pins a
+        # name Compose never used, orphaning the container running right now.
+        $project = ((Split-Path $dir -Leaf).ToLower() -replace '[^a-z0-9_-]', '').TrimStart('_', '-')
         if (-not $project) { $project = 'overmind' }
         $port = Get-ComposePort
     } else {
@@ -279,6 +296,10 @@ function Write-Identity {
     }
     $have = if (Test-Path '.env') { Get-Content '.env' } else { @() }
     if (-not ($have | Where-Object { $_ -match '^COMPOSE_PROJECT_NAME=' })) { $lines += "COMPOSE_PROJECT_NAME=$project" }
+    # A project name somebody chose by hand is the name of this instance, so
+    # the container follows it rather than carrying an invented second one.
+    $chosenName = ($have | Where-Object { $_ -match '^COMPOSE_PROJECT_NAME=(.*)' } | Select-Object -First 1)
+    if ($chosenName -and ($chosenName -match '^COMPOSE_PROJECT_NAME=(.+)')) { $project = $Matches[1] }
     if (-not ($have | Where-Object { $_ -match '^OVERMIND_NAME=' }))        { $lines += "OVERMIND_NAME=$project" }
     if (-not ($have | Where-Object { $_ -match '^OVERMIND_PORT=' }))        { $lines += "OVERMIND_PORT=$port" }
     if ($lines.Count -gt 0) {
@@ -295,47 +316,19 @@ function Get-PathSlug {
     return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 8)
 }
 
-# Is somebody already on this port?
-function Test-PortTaken([int]$p) {
-    try {
-        $c = New-Object System.Net.Sockets.TcpClient
-        $ok = $c.ConnectAsync('127.0.0.1', $p).Wait(500)
-        $c.Close()
-        if ($ok) { return $true }
-    } catch { }
-    # A container can hold a published port while still starting, and answer
-    # nothing on it. The sh twin asks both questions; so does this.
-    if (docker ps --format '{{.Ports}}' 2>$null | Where-Object { $_ -match ":$p->" }) { return $true }
-    return $false
-}
-
-# Ports already spoken for by an install that is not running right now: a
-# stopped instance owns its address without listening on it.
-function Test-PortClaimed([int]$p) {
-    foreach ($d in Get-KnownInstances) {
-        $f = Join-Path $d '.env'
-        if (Test-Path $f) {
-            $line = Select-String -Path $f -Pattern '^OVERMIND_PORT=(\d+)' | Select-Object -First 1
-            if ($line -and ([int]$line.Matches[0].Groups[1].Value -eq $p)) { return $true }
-        }
-    }
-    return $false
-}
-
-# 7070 when it is free - the address every document names. Otherwise a port
-# belonging to THIS folder, derived from its path rather than from whatever
-# happens to be listening at this second: "the first free one" hands the same
-# number to two installs made while both were stopped.
+# This folder's port.
+#
+# Nothing is probed, and that is the point. "Is anything listening right now"
+# says free for every instance that is merely stopped, and says free again for
+# a foreign service answering an error. The right question is who else EXISTS,
+# and Docker has already answered it. Deterministic, so the same folder is
+# always the same address and two folders differ without anyone running.
 function Get-FreePort {
-    if ((-not (Test-PortTaken 7070)) -and (-not (Test-PortClaimed 7070))) { return 7070 }
+    $others = @(Get-KnownInstances | Where-Object { $_ -ne $dir })
+    if ($others.Count -eq 0) { return 7070 }
     $n = 0
     foreach ($b in [System.Text.Encoding]::UTF8.GetBytes($dir)) { $n = ($n * 31 + $b) % 100000 }
-    $p = 7071 + ($n % 29)
-    for ($i = 0; $i -lt 29; $i++) {
-        if ((-not (Test-PortTaken $p)) -and (-not (Test-PortClaimed $p))) { return $p }
-        $p = 7071 + (($p - 7070) % 29)
-    }
-    return 7070
+    return (7071 + ($n % 29))
 }
 
 # This instance's port: what the identity says, falling back to the compose

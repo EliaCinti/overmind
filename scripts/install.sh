@@ -98,9 +98,18 @@ or open a new terminal, then run this installer again."
     # Absolute before anything compares it, and before it exists: OVERMIND_HOME
     # may be relative, and every path below is matched against Docker's.
     case "$dir" in /*) : ;; *) dir=$PWD/$dir ;; esac
+    # Physical, not logical: Docker reports the resolved path, and on macOS
+    # /tmp IS a symlink to /private/tmp — so a logical path never matches and
+    # the installer reports your own instance as one that lives "elsewhere".
+    _parent=$(dirname "$dir")
+    _base=$(basename "$dir")
+    [ -d "$_parent" ] && dir=$(cd "$_parent" && pwd -P)/$_base
     # Asked before the folder is made, or answering "update that one instead"
     # leaves an empty ./overmind behind in whatever directory you were in.
-    [ -e "$dir/data/overmind.sqlite" ] || elsewhere
+    # What makes a folder an install is the compose file the installer writes
+    # there — never `data/overmind.sqlite`, because ADR-0047 lets OVERMIND_DATA
+    # put the database anywhere, and then an existing instance looks brand new.
+    [ -f "$dir/docker-compose.yml" ] || elsewhere
     mkdir -p "$dir" 2>/dev/null || die "Cannot create $dir — this directory is not writable by you.
     Run it somewhere you own, or name the place yourself:
 
@@ -112,7 +121,7 @@ or open a new terminal, then run this installer again."
     #     Absolute from here on: the identity is derived from it, and every
     #     line printed below names it back to the person.
     dir=$PWD
-    if [ -e "$dir/data/overmind.sqlite" ]; then
+    if [ -f "$dir/docker-compose.yml" ]; then
         say "There is already an Overmind in $dir — updating it in place."
     fi
     identify
@@ -252,7 +261,10 @@ elsewhere() {
     # the device cannot be opened -- measured: it asked the question, printed
     # "Device not configured", and answered itself.
     if [ "$count" -ne 1 ] || [ ! -t 1 ]; then
-        say "  Installing here. To update one of those instead, run this from its folder."
+        # Not "run this from its folder": the installer makes ./overmind
+        # beside you, so from ~/overmind that is ~/overmind/overmind — a third
+        # instance, nested inside the one you meant to update.
+        say "  Installing here. To update one of those instead: cd <that folder> && docker compose up -d --pull always"
         return 0
     fi
 
@@ -286,14 +298,21 @@ identify() {
     # instance -- and returning here on one that only relocates the data left
     # the install with no project name at all, which is the collision this
     # whole mechanism exists to prevent.
-    if [ -f .env ] && grep -q '^COMPOSE_PROJECT_NAME=' .env; then
+    if [ -f .env ] \
+        && grep -q '^COMPOSE_PROJECT_NAME=' .env \
+        && grep -q '^OVERMIND_NAME=' .env \
+        && grep -q '^OVERMIND_PORT=' .env; then
         return 0
     fi
-    if [ -e data/overmind.sqlite ]; then
+    if [ -f docker-compose.yml ]; then
         # Older than this file. Compose has been naming its containers after
         # the directory all along, so keep exactly that name — inventing a new
         # one here would orphan a container that is running right now.
-        project=$(printf '%s' "${dir##*/}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+        # Compose's own normalisation: lowercase, drop what is outside
+        # [a-z0-9_-], THEN trim leading _ and -. Missing that last step pins a
+        # name Compose never used — and `_overmind` it rejects outright, which
+        # orphans the container running right now.
+        project=$(printf '%s' "${dir##*/}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')
         [ -n "$project" ] || project=overmind
         port=$(compose_port)
     else
@@ -317,6 +336,10 @@ identify() {
 EOF
     fi
     grep -q '^COMPOSE_PROJECT_NAME=' .env || printf 'COMPOSE_PROJECT_NAME=%s\n' "$project" >> .env
+    # A project name somebody chose by hand is the name of this instance, so
+    # the container follows it rather than carrying an invented second one.
+    existing=$(sed -n 's/^COMPOSE_PROJECT_NAME=\(.*\)/\1/p' .env | head -1)
+    [ -n "$existing" ] && project=$existing
     grep -q '^OVERMIND_NAME=' .env || printf 'OVERMIND_NAME=%s\n' "$project" >> .env
     grep -q '^OVERMIND_PORT=' .env || printf 'OVERMIND_PORT=%s\n' "$port" >> .env
 }
@@ -331,51 +354,26 @@ path_slug() {
     fi
 }
 
-# Is somebody already on this port? Two questions, because neither alone is
-# enough: something may answer HTTP without being a container, and a container
-# may hold the port while still starting and answering nothing.
-port_taken() {
-    curl -fsS -m 1 -o /dev/null "http://127.0.0.1:$1/" 2>/dev/null && return 0
-    docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":$1->" && return 0
-    return 1
-}
-
-# 7070 when it is free — that is the address every document names. Otherwise a
-# port belonging to THIS folder, derived from its path rather than from
-# whatever happens to be listening at this second: "the first free one" hands
-# the same number to two installs made while both were stopped, and they
-# collide the day somebody starts both. Measured, on the first test of this.
+# This folder's port.
+#
+# Nothing is probed, and that is the point. "Is anything listening right now"
+# is the wrong question twice over: it says free for every instance that is
+# merely stopped — which is how two installs were handed 7070 and collided the
+# day somebody started both — and it says free again when a foreign service
+# answers 404, because `curl -f` treats that as failure. The right question is
+# who else EXISTS, and Docker has already answered it.
+#
+# So: 7070 when this is the only instance, and otherwise a port of this
+# folder's own, derived from its path. Deterministic, so the same folder is
+# always the same address, and two folders differ without anyone having to be
+# running.
 free_port() {
-    if ! port_taken 7070 && ! port_claimed 7070; then
+    if [ -z "$(known_instances | grep -vxF -- "$dir" 2>/dev/null || true)" ]; then
         printf '7070'
         return 0
     fi
     n=$(printf '%s' "$dir" | cksum | cut -d' ' -f1)
-    p=$((7071 + n % 29))
-    i=0
-    while [ "$i" -lt 29 ]; do
-        if ! port_taken "$p" && ! port_claimed "$p"; then
-            printf '%s' "$p"
-            return 0
-        fi
-        p=$((7071 + (p - 7070) % 29))
-        i=$((i + 1))
-    done
-    printf '7070'
-}
-
-# Ports already spoken for by an install that is not running right now.
-#
-# `port_taken` can only see a listener, and an instance that is stopped -- or
-# a machine just rebooted with no restart policy -- is not listening while
-# still owning its address. Without this, two installs made while both were
-# down are handed the same number and collide the day somebody starts both.
-port_claimed() {
-    known_instances | while read -r d; do
-        [ -f "$d/.env" ] || continue
-        q=$(sed -n 's/^OVERMIND_PORT=\([0-9]\{1,\}\).*/\1/p' "$d/.env" | head -1)
-        [ "$q" = "$1" ] && printf 'yes\n'
-    done | grep -q yes
+    printf '%s' $((7071 + n % 29))
 }
 
 # This instance's port: what the identity says, falling back to the compose
