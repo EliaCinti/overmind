@@ -44,6 +44,15 @@ words: *Overmind should ask, and on approval, do it itself.*
    that will, and the disagreement is a bill. The choice therefore only ever
    exists in the state where it is also true.
 
+   *Amended 3 Sep 2026.* There is a second way it would be a lie, and the
+   first rule did not catch it: if the probe answers *not signed in*, hiding
+   the key has not moved the bill to a plan, it has removed the ability to pay
+   at all, and every run afterwards fails having been told the plan would pay.
+   Asking whether the result is *metered* cannot see this, because what is
+   left is not a key — it is no one. That answer is now refused the same way,
+   naming what is missing. `custom_adapter` and `unreadable` are left alone:
+   those mean *we do not know*, and ADR-0030's whole point is not to invent.
+
 3. **Remembered as a file, read per spawn.** `<data-dir>/pay-with-plan`,
    presence is the setting — exactly like the stored OAuth token
    (`claude-oauth-token`) and for the same reasons: it survives a restart, it
@@ -58,10 +67,23 @@ words: *Overmind should ask, and on approval, do it itself.*
    buttons: *Let the plan pay* and *Keep the key*; its success line leaves on
    its own after a few seconds. The resting state — who pays when nothing is
    wrong — stays where the money is read, the org chart's economy line, which
-   also names the choice and carries its undo. A permanent badge in the top
-   bar was built and taken out the same day: the owner found the bar already
-   full, and a fact that is only worth acting on in one state does not earn a
-   place in every state.
+   also names the choice and carries its undo.
+
+   *Amended 3 Sep 2026.* That line now carries the choice in **both**
+   directions, because the card at the top could not be reached from the
+   commonest setup of all: a key with no login behind it is not a conflict, so
+   the offer never appeared, and Overmind billed the key in silence with no
+   way to say otherwise. A notice announces a state that is wrong; preferring
+   your own subscription is not a wrong state, it is a preference, and a
+   preference needs a place that is always there rather than one that appears.
+   So the economy line offers *connect a subscription* when there is no login
+   behind the key, and *let the plan pay* once there is — in that order,
+   because the switch only hides the key, and hiding it with nothing behind it
+   is the refusal added above.
+
+   A permanent badge in the top bar was built and taken out the same day: the
+   owner found the bar already full, and a fact that is only worth acting on in
+   one state does not earn a place in every state.
 
 5. **Any session may choose.** Like the sign-in flow, this is an
    instance-level fact about the box, and the wall (M24) already limits the
@@ -80,6 +102,9 @@ words: *Overmind should ask, and on approval, do it itself.*
   two do not overlap: with an override set the probe is never consulted, so
   choosing the plan under `OVERMIND_ECONOMY=key` is refused (the declared key
   "still pays"), which is the honest answer.
+- The sign-in flow became [`ConnectPlan`](../../web/src/components/ConnectPlan.tsx),
+  used by both the top-of-page notice and the org chart's economy line. A flow
+  that long is not something to keep two copies of.
 - Tests: `tests/who_pays.rs` (the endpoint, with the economy declared — no
   test spawns the real CLI) and `sandbox::tests` (every agent-side command
   constructor drops the key while the marker exists, and leaves the

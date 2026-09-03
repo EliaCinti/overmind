@@ -457,11 +457,19 @@ struct PayWith {
 /// Let the plan pay — or go back to whatever the probe finds (ADR-0037).
 ///
 /// Choosing the plan keeps `ANTHROPIC_API_KEY` out of every command that runs
-/// as the agent, then asks the CLI again who pays. If the answer is still a
-/// key — it lives somewhere the environment does not reach, a settings file
-/// or an `apiKeyHelper` — the choice is withdrawn and the request refused:
-/// a setting that disagrees with who is billed is a setting that will cost
-/// someone money, and ADR-0030 exists to prevent that.
+/// as the agent, then asks the CLI again who pays. Hiding the key has to leave
+/// somebody able to pay, and there are two ways it does not:
+///
+/// - the key survives, because it lives somewhere the environment does not
+///   reach — a settings file, an `apiKeyHelper`;
+/// - nothing was behind it, so hiding it signs the agent in as nobody. This is
+///   the ordinary shape of a machine with `ANTHROPIC_API_KEY` exported and no
+///   `claude.ai` login, and it is not caught by asking whether the result is
+///   metered: what is left is not a key, it is no one.
+///
+/// Either way the choice is withdrawn and the request refused: a setting that
+/// disagrees with who is billed is a setting that will cost someone money, and
+/// ADR-0030 exists to prevent that.
 async fn pay_with(
     State(state): State<AppState>,
     Json(req): Json<PayWith>,
@@ -477,14 +485,31 @@ async fn pay_with(
     };
     crate::economy::prefer_plan(&state.config, plan).map_err(|e| ApiError::Internal(e.into()))?;
     let economy = crate::economy::detect(&state.config).await;
-    if plan && economy.is_metered() {
+    let refusal = if !plan {
+        None
+    } else if economy.is_metered() {
+        Some(
+            "the key still pays: it is not coming from the environment Overmind controls \
+             (a settings file or an apiKeyHelper, most likely), so the plan cannot be made to pay from here",
+        )
+    } else if matches!(
+        economy,
+        crate::economy::Economy::Unknown {
+            kind: crate::economy::UnknownKind::NotSignedIn,
+            ..
+        }
+    ) {
+        Some(
+            "there is no plan to pay: with the key out of the way the agent CLI is not signed in, \
+             so every run would fail. Connect a Claude subscription first, then choose it",
+        )
+    } else {
+        None
+    };
+    if let Some(why) = refusal {
         crate::economy::prefer_plan(&state.config, false)
             .map_err(|e| ApiError::Internal(e.into()))?;
-        return Err(ApiError::Conflict(
-            "the key still pays: it is not coming from the environment Overmind controls \
-             (a settings file or an apiKeyHelper, most likely), so the plan cannot be made to pay from here"
-                .into(),
-        ));
+        return Err(ApiError::Conflict(why.into()));
     }
     state.set_economy(economy.clone());
     eprintln!(

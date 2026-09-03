@@ -11,6 +11,7 @@ import { cn } from "../lib/utils";
 import { useT, useFormats } from "../lib/i18n";
 import { FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
 import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
+import { ConnectPlan } from "./ConnectPlan";
 
 export function OrgChart({
   agents,
@@ -308,6 +309,13 @@ function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy 
  * The meaning of a cap is a property of the whole server, so repeating it beside
  * each bar would be noise — and leaving it out entirely is how a number gets
  * read as a promise nobody made.
+ *
+ * It is also where who pays is *changed*, in both directions (3 Sep 2026). The
+ * notices at the top of the page are for the states where something is wrong;
+ * a person who simply prefers their subscription is not in an error state, and
+ * used to have nowhere to say so — a key with no login behind it satisfied
+ * neither notice's condition, so Overmind billed the key in silence. The way
+ * back lived here already; the way forward belongs beside it.
  */
 function EconomyNote({
   economy,
@@ -322,6 +330,10 @@ function EconomyNote({
 }) {
   const t = useT();
   const [undoing, setUndoing] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [choosing, setChoosing] = useState<
+    { step: "idle" } | { step: "working" } | { step: "failed"; why: string }
+  >({ step: "idle" });
   if (!economy) return null;
   const undo = async () => {
     setUndoing(true);
@@ -330,6 +342,19 @@ function EconomyNote({
     } finally {
       setUndoing(false);
       onPayerChanged();
+    }
+  };
+  // The other direction. The server checks that hiding the key leaves somebody
+  // able to pay and refuses otherwise, so a failure here is worth showing
+  // rather than swallowing: it is the reason, in the server's own words.
+  const choosePlan = async () => {
+    setChoosing({ step: "working" });
+    try {
+      await api.payWith("plan");
+      setChoosing({ step: "idle" });
+      onPayerChanged();
+    } catch (e) {
+      setChoosing({ step: "failed", why: e instanceof Error ? e.message : String(e) });
     }
   };
   const what =
@@ -367,14 +392,54 @@ function EconomyNote({
           </button>
         </p>
       )}
-      {economy.kind === "key" && economy.overrides_login && (
-        // Nothing is broken here, which is exactly why it goes unnoticed: the
-        // work runs, the plan sits unused, and the bill arrives later. The CLI
-        // warns in a log line; a log line is not being told.
-        <p className="text-[11px] text-[var(--color-status-in_review)]">
-          <span className="font-medium">{t("economy.keyOverridesLogin")}</span>{" "}
-          {t("economy.keyOverridesLoginFix")}
-        </p>
+      {economy.kind === "key" && (
+        <div className="space-y-1">
+          {economy.overrides_login ? (
+            // Nothing is broken here, which is exactly why it goes unnoticed:
+            // the work runs, the plan sits unused, and the bill arrives later.
+            // The CLI warns in a log line; a log line is not being told.
+            <p className="text-[11px] text-[var(--color-status-in_review)]">
+              <span className="font-medium">{t("economy.keyOverridesLogin")}</span>{" "}
+              {t("economy.keyOverridesLoginFix")}
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">{t("economy.keyCanUsePlan")}</p>
+          )}
+          {economy.overrides_login ? (
+            // A login is already there, so the switch is all that is needed.
+            <p className="text-[11px] text-muted-foreground">
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+                onClick={choosePlan}
+                disabled={choosing.step === "working"}
+              >
+                {choosing.step === "working"
+                  ? t("economy.letPlanPayWorking")
+                  : t("economy.letPlanPay")}
+              </button>
+            </p>
+          ) : connecting ? (
+            // Nothing behind the key, so the switch alone would sign the agent
+            // in as nobody. Connect first; the switch appears after.
+            <ConnectPlan onSignedIn={onPayerChanged} />
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-foreground"
+                onClick={() => setConnecting(true)}
+              >
+                {t("economy.connectPlan")}
+              </button>
+            </p>
+          )}
+          {choosing.step === "failed" && (
+            <p className="text-[11px] text-destructive">
+              {t("economy.letPlanPayFailed")} {choosing.why}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

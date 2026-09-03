@@ -8,7 +8,11 @@ dist/
 *.sqlite-*
 .env
 .DS_Store
-/overmind-data
+# Any depth, for the third time: the anchored `/overmind-data` written when a
+# nested target/ leaked a data dir was itself anchored, so a suite run from
+# crates/overmind-server/ left a live setup code untracked-but-offerable again
+# (3 Sep 2026).
+overmind-data/
 # What `docker compose up` creates beside the compose file (ADR-0047): the
 # instance's own data. Running the installer's file from a checkout must not
 # put somebody's database in the index — the `/target` lesson, which covered

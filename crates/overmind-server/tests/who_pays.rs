@@ -14,7 +14,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use overmind_server::economy::Economy;
+use overmind_server::economy::{Economy, UnknownKind};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -101,6 +101,40 @@ async fn letting_the_plan_pay_is_refused_when_the_key_would_still_pay() {
     assert!(
         body["error"].as_str().unwrap_or("").contains("key"),
         "the refusal names the key: {body}"
+    );
+    assert!(
+        !data_dir.join("pay-with-plan").exists(),
+        "a refused choice is not remembered"
+    );
+    let (_, health) = send(&app, "GET", "/api/health", None).await;
+    assert_eq!(health["pay_with"], json!("detected"));
+}
+
+/// Hiding the key must leave somebody able to pay.
+///
+/// A key with no claude.ai login behind it is the ordinary setup on any machine
+/// where `ANTHROPIC_API_KEY` is exported, and the switch only *hides* the key.
+/// Hide it with nothing behind it and the CLI is signed in as nobody: every run
+/// fails afterwards, having been told the plan would pay. `is_metered` does not
+/// catch this, because what is left is not a key — it is no one.
+#[tokio::test]
+async fn letting_the_plan_pay_is_refused_when_nobody_is_signed_in() {
+    let (app, data_dir) = setup(Economy::Unknown {
+        kind: UnknownKind::NotSignedIn,
+        reason: "the agent CLI is not signed in".into(),
+    })
+    .await;
+    let (s, body) = send(
+        &app,
+        "POST",
+        "/api/economy/pay-with",
+        Some(json!({ "with": "plan" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("signed in"),
+        "the refusal says what is missing, not merely that it refused: {body}"
     );
     assert!(
         !data_dir.join("pay-with-plan").exists(),

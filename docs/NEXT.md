@@ -62,6 +62,25 @@ M31 built the machinery; what is missing is the moment it is used on its own. Th
 
 **Accept:** update across a migration and find an archive of the previous version waiting, without having asked for it; roll the image back and read a sentence that says what happened and what to do; empty the volume, restore that archive, and be back where you were.
 
+### Who pays, and on which model *(from the org view)*
+*Found in use on 3 Sep 2026, on a Mac with `ANTHROPIC_API_KEY` in the shell.* Overmind went straight to the key and never offered the subscription. The striking part is not that the road is missing — **it is built, and locked.**
+
+**Both halves of the subscription road already work, and the ordinary setup can reach neither.** `SignInNotice` holds a full guided sign-in — `claudeAuthStart`, the clock-skew warning, the code paste — and shows itself only when there is *no* way to pay at all (`unknown_kind == "not_signed_in"`). `PayerNotice` holds the switch, and shows itself only when a key is *beating* a login (`kind == "key" && overrides_login`). A key present and no login satisfies neither condition, so the person sees nothing, and the product's own answer — connect the plan, then choose it — is unreachable from the product. Today it costs `claude setup-token` in a shell.
+
+Underneath, the machinery is sound and needs no change: `prefer_plan` writes `<data>/pay-with-plan`, and while that marker exists `sandbox.rs` strips `ANTHROPIC_API_KEY` from every command run as the agent, so the CLI bills the plan. **That is also why the order matters** — the switch only hides the key; hiding it with no login behind it leaves the agent with no credentials at all. Sign in first, choose second. The current gate enforces that ordering by accident, at the price of hiding the road.
+
+**The org view is where this belongs**, not in notices that appear when the system decides something is wrong. `EconomyNote` already names who pays, above the chart, and already carries the *undo* (`back to key`, whenever the plan was chosen). It is half a control today: the way back exists, the way forward does not. Make it symmetric — paying with a key offers *connect the subscription* (the guided flow, moved here) and then *let the plan pay*; paying with the plan keeps its undo. One place, both directions, reachable whether or not anything is contested.
+
+**And the model catalogue does not know who pays.** `Model` is `{ id, display_name, vision }` — nothing about entitlement. The hire dialog offers every model whatever the economy is, so an agent can be put on a model the subscription does not grant and the refusal arrives at run time, in the adapter's words, as a failed task. The choice also exists **per agent** only (a trait, passed as `--model`): a company cannot say "everyone runs on Sonnet unless I say otherwise", so ten agents are ten decisions and a change of mind is ten edits.
+
+In order of what it costs a person today:
+1. **The payer, from the org view** — the symmetric control above. Small, and it unlocks work already written.
+2. **Entitlement in the catalogue.** Each model declares which economies reach it; the hire dialog offers what *this* instance can run and greys the rest with the reason, rather than letting a task fail to teach it. The plan's limits are not readable from outside the CLI ([ADR-0030](adr/0030-who-pays.md)), so this is a declared table kept honest by the probe that already asks who pays.
+3. **A company default**, with an agent overriding it only for a reason, and the org view showing who differs.
+4. **A warning before the switch**, once entitlement exists: moving to a plan that does not grant a model somebody is already on should be said before the change, not at the next run.
+
+**Accept:** on an instance paying with a key, the org view offers the subscription, the guided sign-in completes there, and choosing the plan changes who pays without touching a shell; the hire dialog does not offer a model this instance cannot run; a company sets a default and a new agent inherits it.
+
 ### From diff to landed
 The loop's last step. After review, a person can **land** a code run: merge its branch into the workspace's default ref (fast-forward or merge commit, the repo's history kept honest), or — when the repository has a remote and `gh` is signed in — **open a pull request** with the task's brief as the description and the diff as the body. Both are the human's verb, audited with the actor; an agent never lands its own work. Conflicts are reported, not resolved by a machine.
 

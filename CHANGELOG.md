@@ -4,6 +4,12 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+### Fixed
+
+- **You can choose who pays, from the org chart** ([ADR-0037](docs/adr/0037-who-pays-is-asked.md), amended). Reported from a Mac with `ANTHROPIC_API_KEY` exported: Overmind went straight to the key and never offered the subscription. Both halves of that road were built and neither could be reached — the guided sign-in showed itself only when there was *no* way to pay at all, and the switch only when a key was already beating a login. A key with nothing behind it is neither, which is the commonest developer machine there is, so the key was billed in silence.
+  The choice now lives where the money is read, on the org chart's economy line, which already carried the way back: *connect a subscription* when there is no login behind the key, then *let the plan pay*. In that order, and not by convention — the switch only hides the key, so hiding it with nothing behind it signs the agent in as **nobody**.
+- **And the server refuses that switch instead of accepting it.** `POST /api/economy/pay-with {"with":"plan"}` withdrew the choice and answered `409` when the key survived being hidden, but *accepted* it when hiding the key left the CLI not signed in — recording that the plan pays while every subsequent run would fail. It could not see this by asking whether the result was metered: what is left is not a key, it is no one. Refused now, naming what is missing. `custom_adapter` and `unreadable` are untouched: those mean *we do not know*, and [ADR-0030](docs/adr/0030-who-pays.md) exists so Overmind does not invent.
+
 ## [0.2.4] — 2026-09-03
 
 **One line installs it.** `curl -fsSL https://overmind.eliacinti.dev/install.sh | sh` — and the folder that line runs in is your Overmind: the compose file, `./data` and `./agent` side by side, moved by moving the folder, and safe from `docker compose down -v`, which cannot reach a bind mount. The installer asks whether Docker is *there and answering* rather than whether the binary exists, never installs anything behind your back, checks the compose file against a digest it carries, and prints the setup code in the terminal you are already looking at instead of leaving you to find it in a log.
