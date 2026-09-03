@@ -95,6 +95,12 @@ or open a new terminal, then run this installer again."
     #     compose file, a data/ and an agent/ into whatever directory you
     #     happened to be in is not a gift.
     dir=${OVERMIND_HOME:-"$PWD/overmind"}
+    # Absolute before anything compares it, and before it exists: OVERMIND_HOME
+    # may be relative, and every path below is matched against Docker's.
+    case "$dir" in /*) : ;; *) dir=$PWD/$dir ;; esac
+    # Asked before the folder is made, or answering "update that one instead"
+    # leaves an empty ./overmind behind in whatever directory you were in.
+    [ -e "$dir/data/overmind.sqlite" ] || elsewhere
     mkdir -p "$dir" 2>/dev/null || die "Cannot create $dir — this directory is not writable by you.
     Run it somewhere you own, or name the place yourself:
 
@@ -108,8 +114,6 @@ or open a new terminal, then run this installer again."
     dir=$PWD
     if [ -e "$dir/data/overmind.sqlite" ]; then
         say "There is already an Overmind in $dir — updating it in place."
-    else
-        elsewhere
     fi
     identify
 
@@ -207,8 +211,19 @@ known_instances() {
     docker ps -a --format '{{.ID}} {{.Image}}' 2>/dev/null \
         | grep -i overmind | cut -d' ' -f1 \
         | while read -r c; do
-            src=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)
-            [ -n "$src" ] && printf '%s\n' "${src%/data}"
+            # Compose records the directory it was run from. That is the
+            # install, exactly -- and it survives OVERMIND_DATA pointing the
+            # data somewhere else entirely, which arithmetic on the /data
+            # mount does not: strip "/data" off "/Volumes/Ext/data" and you
+            # get "/Volumes/Ext", a directory with no compose file in it.
+            d=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null)
+            if [ -z "$d" ]; then
+                # Started without Compose, or by a version that did not label.
+                src=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)
+                case "$src" in */data) d=${src%/data} ;; esac
+            fi
+            # Only a directory that actually holds an installation.
+            [ -n "$d" ] && [ -f "$d/docker-compose.yml" ] && printf '%s\n' "$d"
         done | sort -u
 }
 
@@ -221,7 +236,10 @@ known_instances() {
 # no terminal — CI, a provisioning script — nothing is asked and the safe
 # thing happens, which is the new instance nobody has to undo.
 elsewhere() {
-    others=$(known_instances | grep -v "^${dir}$" || true)
+    # -F and -x: a path is a string. `~/dev.v2/overmind` as a pattern also
+    # matches `~/devxv2/overmind`, and would hide the very instance this
+    # exists to name.
+    others=$(known_instances | grep -vxF -- "$dir" || true)
     [ -n "$others" ] || return 0
 
     printf '\n  Overmind is already installed on this machine:\n\n'
@@ -263,7 +281,14 @@ elsewhere() {
 # Written once and never rewritten: re-running here must not rename a project
 # out from under containers that are already running under the old name.
 identify() {
-    [ -f .env ] && return 0
+    # The keys, not the file. ADR-0047 tells people to put OVERMIND_DATA in
+    # this very file, so a .env that exists is not a .env that names an
+    # instance -- and returning here on one that only relocates the data left
+    # the install with no project name at all, which is the collision this
+    # whole mechanism exists to prevent.
+    if [ -f .env ] && grep -q '^COMPOSE_PROJECT_NAME=' .env; then
+        return 0
+    fi
     if [ -e data/overmind.sqlite ]; then
         # Older than this file. Compose has been naming its containers after
         # the directory all along, so keep exactly that name — inventing a new
@@ -275,20 +300,25 @@ identify() {
         project=overmind-$(path_slug)
         port=$(free_port)
     fi
-    cat > .env <<EOF
+    # Appended, never written over: anything already here is somebody's
+    # setting -- OVERMIND_DATA above all -- and only the keys that are missing
+    # are added.
+    if [ ! -f .env ]; then
+        cat > .env <<'EOF'
 # Written by the installer, and read by every 'docker compose' you run here.
 # It is what makes this folder its own instance: Compose names a project after
 # its directory, and every default install is a directory called 'overmind'.
-# Two of them without this file would be ONE project — one set of containers,
-# one port — and starting the second would recreate the first onto this
-# folder's empty ./data.
+# Two of them without these names would be ONE project — one set of
+# containers, one port — and starting the second would recreate the first onto
+# this folder's empty ./data.
 #
-# Moving this folder is still how you move the instance. Delete this file only
-# if you also mean to give the instance a different name.
-COMPOSE_PROJECT_NAME=$project
-OVERMIND_NAME=$project
-OVERMIND_PORT=$port
+# Moving this folder is still how you move the instance. Change these only if
+# you also mean to give the instance a different name or address.
 EOF
+    fi
+    grep -q '^COMPOSE_PROJECT_NAME=' .env || printf 'COMPOSE_PROJECT_NAME=%s\n' "$project" >> .env
+    grep -q '^OVERMIND_NAME=' .env || printf 'OVERMIND_NAME=%s\n' "$project" >> .env
+    grep -q '^OVERMIND_PORT=' .env || printf 'OVERMIND_PORT=%s\n' "$port" >> .env
 }
 
 # Eight hex of the folder's full path: stable across runs, different for every
@@ -316,7 +346,7 @@ port_taken() {
 # the same number to two installs made while both were stopped, and they
 # collide the day somebody starts both. Measured, on the first test of this.
 free_port() {
-    if ! port_taken 7070; then
+    if ! port_taken 7070 && ! port_claimed 7070; then
         printf '7070'
         return 0
     fi
@@ -324,7 +354,7 @@ free_port() {
     p=$((7071 + n % 29))
     i=0
     while [ "$i" -lt 29 ]; do
-        if ! port_taken "$p"; then
+        if ! port_taken "$p" && ! port_claimed "$p"; then
             printf '%s' "$p"
             return 0
         fi
@@ -332,6 +362,20 @@ free_port() {
         i=$((i + 1))
     done
     printf '7070'
+}
+
+# Ports already spoken for by an install that is not running right now.
+#
+# `port_taken` can only see a listener, and an instance that is stopped -- or
+# a machine just rebooted with no restart policy -- is not listening while
+# still owning its address. Without this, two installs made while both were
+# down are handed the same number and collide the day somebody starts both.
+port_claimed() {
+    known_instances | while read -r d; do
+        [ -f "$d/.env" ] || continue
+        q=$(sed -n 's/^OVERMIND_PORT=\([0-9]\{1,\}\).*/\1/p' "$d/.env" | head -1)
+        [ "$q" = "$1" ] && printf 'yes\n'
+    done | grep -q yes
 }
 
 # This instance's port: what the identity says, falling back to the compose
@@ -345,7 +389,12 @@ instance_port() {
 # The published port, read from the compose file rather than assumed: somebody
 # who edited it should still be told the truth.
 compose_port() {
-    p=$(sed -n 's/.*"\{0,1\}127\.0\.0\.1:\([0-9]\{1,\}\):7070"\{0,1\}.*/\1/p' docker-compose.yml | head -1)
+    # Either a literal port or the default inside ${OVERMIND_PORT:-NNNN}: the
+    # compose file grew the variable and this pattern stopped matching, so it
+    # silently answered 7070 for everyone -- including somebody who had edited
+    # the default to something else.
+    p=$(sed -n 's/.*127\.0\.0\.1:\${OVERMIND_PORT:-\([0-9]\{1,\}\)}:7070.*/\1/p' docker-compose.yml | head -1)
+    [ -n "$p" ] || p=$(sed -n 's/.*"\{0,1\}127\.0\.0\.1:\([0-9]\{1,\}\):7070"\{0,1\}.*/\1/p' docker-compose.yml | head -1)
     [ -n "$p" ] || p=7070
     printf '%s' "$p"
 }
