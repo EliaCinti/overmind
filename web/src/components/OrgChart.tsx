@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { Crown, UserPlus, Pencil, Check, X, Pause, Play, Ban, ShieldCheck } from "lucide-react";
 import type { Agent, AgentBudget, Economy, OrgProposal, PayWith, PlanWindow, Tool } from "../lib/api";
 import { PLAN_WINDOWS } from "../lib/api";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { Button } from "./ui/button";
 import { Badge, Input } from "./ui/primitives";
 import { Chip } from "./ui/controls";
@@ -11,6 +11,7 @@ import { cn } from "../lib/utils";
 import { useT, useFormats } from "../lib/i18n";
 import { FALLBACK_ICON, FUNCTION_ICONS } from "../lib/catalog";
 import { OrgProposalPanel, TwoRoads } from "./OrgProposal";
+import { ConnectPlan } from "./ConnectPlan";
 
 export function OrgChart({
   agents,
@@ -308,6 +309,13 @@ function BudgetBar({ budget, economy }: { budget: AgentBudget; economy: Economy 
  * The meaning of a cap is a property of the whole server, so repeating it beside
  * each bar would be noise — and leaving it out entirely is how a number gets
  * read as a promise nobody made.
+ *
+ * It is also where who pays is *changed*, in both directions (3 Sep 2026). The
+ * notices at the top of the page are for the states where something is wrong;
+ * a person who simply prefers their subscription is not in an error state, and
+ * used to have nowhere to say so — a key with no login behind it satisfied
+ * neither notice's condition, so Overmind billed the key in silence. The way
+ * back lived here already; the way forward belongs beside it.
  */
 function EconomyNote({
   economy,
@@ -322,6 +330,41 @@ function EconomyNote({
 }) {
   const t = useT();
   const [undoing, setUndoing] = useState(false);
+  const [pay, setPay] = useState<
+    | { step: "idle" }
+    | { step: "working" }
+    | { step: "signin" }
+    | { step: "failed"; why: string }
+  >({ step: "idle" });
+
+  // The other direction, and one button rather than two steps to guess at.
+  // Hiding the key has to leave somebody able to pay; the server is the only
+  // one who can say whether it does, and when the answer is "nobody is signed
+  // in" it says so as a remedy this can act on rather than as prose to match.
+  // Anything else it refuses is shown in its own words.
+  const choosePlan = useCallback(async () => {
+    setPay({ step: "working" });
+    try {
+      await api.payWith("plan");
+      setPay({ step: "idle" });
+      onPayerChanged();
+    } catch (e) {
+      if (e instanceof ApiError && e.remedy?.kind === "connect_plan") {
+        setPay({ step: "signin" });
+        return;
+      }
+      setPay({ step: "failed", why: e instanceof Error ? e.message : String(e) });
+    }
+  }, [onPayerChanged]);
+
+  // The sign-in was only ever the first half of what the person asked for, so
+  // the choice they clicked is applied for them rather than left as a second
+  // button they have to find again.
+  const afterSignIn = useCallback(() => {
+    onPayerChanged();
+    void choosePlan();
+  }, [onPayerChanged, choosePlan]);
+
   if (!economy) return null;
   const undo = async () => {
     setUndoing(true);
@@ -331,8 +374,7 @@ function EconomyNote({
       setUndoing(false);
       onPayerChanged();
     }
-  };
-  const what =
+  };  const what =
     economy.kind === "key"
       ? t("economy.key")
       : economy.kind === "subscription"
@@ -367,14 +409,47 @@ function EconomyNote({
           </button>
         </p>
       )}
-      {economy.kind === "key" && economy.overrides_login && (
-        // Nothing is broken here, which is exactly why it goes unnoticed: the
-        // work runs, the plan sits unused, and the bill arrives later. The CLI
-        // warns in a log line; a log line is not being told.
-        <p className="text-[11px] text-[var(--color-status-in_review)]">
-          <span className="font-medium">{t("economy.keyOverridesLogin")}</span>{" "}
-          {t("economy.keyOverridesLoginFix")}
-        </p>
+      {economy.kind === "key" && (
+        <div className="space-y-1">
+          {economy.overrides_login ? (
+            // Nothing is broken here, which is exactly why it goes unnoticed:
+            // the work runs, the plan sits unused, and the bill arrives later.
+            // The CLI warns in a log line; a log line is not being told.
+            <p className="text-[11px] text-[var(--color-status-in_review)]">
+              <span className="font-medium">{t("economy.keyOverridesLogin")}</span>{" "}
+              {t("economy.keyOverridesLoginFix")}
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">{t("economy.keyCanUsePlan")}</p>
+          )}
+          {pay.step === "signin" ? (
+            // The server said the plan cannot pay because nobody is signed in.
+            // That is the one refusal it can repair from here, so the repair
+            // appears where the refusal happened.
+            <ConnectPlan
+              doneText={t("economy.connectPlanDoneChoosing")}
+              onSignedIn={afterSignIn}
+            />
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              <button
+                type="button"
+                className="underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+                onClick={choosePlan}
+                disabled={pay.step === "working"}
+              >
+                {pay.step === "working"
+                  ? t("economy.letPlanPayWorking")
+                  : t("economy.letPlanPay")}
+              </button>
+            </p>
+          )}
+          {pay.step === "failed" && (
+            <p className="text-[11px] text-destructive">
+              {t("economy.letPlanPayFailed")} {pay.why}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

@@ -62,6 +62,59 @@ M31 built the machinery; what is missing is the moment it is used on its own. Th
 
 **Accept:** update across a migration and find an archive of the previous version waiting, without having asked for it; roll the image back and read a sentence that says what happened and what to do; empty the volume, restore that archive, and be back where you were.
 
+### Choosing the payer writes first and asks afterwards
+*From the security review of the payer control, 3 Sep 2026.* `pay_with` writes `<data>/pay-with-plan`, **then** probes, then rolls the marker back if the answer is wrong. The rollback is a `remove_file`, and when it fails the request answers `500` with the marker still set — so the instance is left hiding the key from every agent while the person was told the change did not happen. My change made that path more reachable, not less: "nobody is signed in" used to be accepted silently and now takes the rollback.
+
+The order is backwards for a reason that no longer holds. The probe reads the marker through the sandbox, so the only way to ask "who would pay if the key were hidden" was to hide it for real. Give the probe that question directly — an argument saying *pretend the key is out* — and the write happens once, after the answer, with nothing to undo. It also removes the window where a concurrent run spawns against a marker that is about to be withdrawn.
+
+Small, and it touches the cage's command construction, so it wants its own change rather than a corner of another one.
+
+### More than one mind for hire *(a second provider, and who pays for it)*
+*Asked 3 Sep 2026, after the payer gap below.* The owner wants agents on models other than Claude's — added with an API key, and where the provider allows it, with a subscription. The subscription question has a real answer, and it is more encouraging than expected; the engineering question has a harder one.
+
+**Who actually allows a subscription, checked 3 Sep 2026.** All three major agent CLIs do, which means Overmind's existing shape — drive a CLI, ask it who pays — is the right shape for all three rather than a Claude-only trick:
+
+| Provider | Subscription path | API key |
+|---|---|---|
+| Claude Code | Pro / Max, via `setup-token` | yes — **already both, today** |
+| OpenAI Codex CLI | ChatGPT Plus, Pro, Business, Edu, Enterprise — browser login or `codex login --device-auth` | yes |
+| Gemini CLI | personal Google account (a free Code Assist licence) or a paid Code Assist subscription; `oauth-personal` is its default | yes |
+| Everything else — DeepSeek, Mistral, xAI, local models | none | key only, through an OpenAI-shaped endpoint |
+
+One detail worth carrying over rather than rediscovering: Codex's ChatGPT sign-in **auto-creates an API key** in the selected org, which can then quietly become the payer. That is the same deception Overmind already names for Anthropic — a key silently overriding a login — so the `overrides_login` idea generalises, and the probe must ask each CLI, not assume.
+
+**What it costs, measured rather than guessed.** `OVERMIND_AGENT_CMD` looks like an adapter seam and is not one. `runner.rs` builds a literal `claude -p … --model … --output-format stream-json --verbose --include-partial-messages`, hands the cap to a Claude-Code flag, and reads Claude Code's own event envelope for cost; `economy.rs` refuses to probe a custom adapter at all, on the stated grounds that `auth status` is not a contract anybody else signed; `claude_auth.rs` drives `setup-token` on a pty. Three files assume the name, and more than that assume the shape.
+
+So a second provider is not a catalogue entry. It is a **provider trait** with six honest members: how a turn is invoked, how its stream is read, how a turn's cost is learned, how the payer is probed, how a sign-in is driven, and which models it offers. Each new provider is then a small implementation rather than a new set of `if`s — and the first one costs the abstraction, which is why this is a milestone and not a patch.
+
+**Do it in this order**, because each step is worth having before the next exists:
+1. **The trait, with Claude Code as its only implementation.** No new behaviour, no new provider; the existing suite is the proof that nothing moved. This is the whole risk of the milestone, taken once, against tests that already exist.
+2. **A second provider, complete** — Codex CLI first, because its subscription is the one most Overmind owners already pay for, and because its auto-created key exercises the payer logic hardest.
+3. **Per-provider payer**, reusing the org view's control: each configured provider says who pays for it and can be switched there, since a company may reasonably run Claude on a plan and something else on a key.
+4. **Entitlement, then a company default** — the part written below: an agent cannot be hired onto a model this instance cannot actually run, and a company sets one default instead of ten decisions.
+5. **Gemini CLI**, once the trait has survived two.
+
+**Accept:** an owner adds a second provider from the interface, signs into it with a subscription where the provider allows one, hires an agent onto one of its models, and that agent does a real task — while another agent keeps working on Claude, and the org view says truthfully who is paying for each.
+
+### Who pays, and on which model *(from the org view)*
+*Found in use on 3 Sep 2026, on a Mac with `ANTHROPIC_API_KEY` in the shell.* Overmind went straight to the key and never offered the subscription. The striking part is not that the road is missing — **it is built, and locked.**
+
+**Both halves of the subscription road already work, and the ordinary setup can reach neither.** `SignInNotice` holds a full guided sign-in — `claudeAuthStart`, the clock-skew warning, the code paste — and shows itself only when there is *no* way to pay at all (`unknown_kind == "not_signed_in"`). `PayerNotice` holds the switch, and shows itself only when a key is *beating* a login (`kind == "key" && overrides_login`). A key present and no login satisfies neither condition, so the person sees nothing, and the product's own answer — connect the plan, then choose it — is unreachable from the product. Today it costs `claude setup-token` in a shell.
+
+Underneath, the machinery is sound and needs no change: `prefer_plan` writes `<data>/pay-with-plan`, and while that marker exists `sandbox.rs` strips `ANTHROPIC_API_KEY` from every command run as the agent, so the CLI bills the plan. **That is also why the order matters** — the switch only hides the key; hiding it with no login behind it leaves the agent with no credentials at all. Sign in first, choose second. The current gate enforces that ordering by accident, at the price of hiding the road.
+
+**The org view is where this belongs**, not in notices that appear when the system decides something is wrong. `EconomyNote` already names who pays, above the chart, and already carries the *undo* (`back to key`, whenever the plan was chosen). It is half a control today: the way back exists, the way forward does not. Make it symmetric — paying with a key offers *connect the subscription* (the guided flow, moved here) and then *let the plan pay*; paying with the plan keeps its undo. One place, both directions, reachable whether or not anything is contested.
+
+**And the model catalogue does not know who pays.** `Model` is `{ id, display_name, vision }` — nothing about entitlement. The hire dialog offers every model whatever the economy is, so an agent can be put on a model the subscription does not grant and the refusal arrives at run time, in the adapter's words, as a failed task. The choice also exists **per agent** only (a trait, passed as `--model`): a company cannot say "everyone runs on Sonnet unless I say otherwise", so ten agents are ten decisions and a change of mind is ten edits.
+
+In order of what it costs a person today:
+1. **The payer, from the org view** — the symmetric control above. Small, and it unlocks work already written.
+2. **Entitlement in the catalogue.** Each model declares which economies reach it; the hire dialog offers what *this* instance can run and greys the rest with the reason, rather than letting a task fail to teach it. The plan's limits are not readable from outside the CLI ([ADR-0030](adr/0030-who-pays.md)), so this is a declared table kept honest by the probe that already asks who pays.
+3. **A company default**, with an agent overriding it only for a reason, and the org view showing who differs.
+4. **A warning before the switch**, once entitlement exists: moving to a plan that does not grant a model somebody is already on should be said before the change, not at the next run.
+
+**Accept:** on an instance paying with a key, the org view offers the subscription, the guided sign-in completes there, and choosing the plan changes who pays without touching a shell; the hire dialog does not offer a model this instance cannot run; a company sets a default and a new agent inherits it.
+
 ### From diff to landed
 The loop's last step. After review, a person can **land** a code run: merge its branch into the workspace's default ref (fast-forward or merge commit, the repo's history kept honest), or — when the repository has a remote and `gh` is signed in — **open a pull request** with the task's brief as the description and the diff as the body. Both are the human's verb, audited with the actor; an agent never lands its own work. Conflicts are reported, not resolved by a machine.
 
