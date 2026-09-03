@@ -214,15 +214,23 @@ The result: an organization of agents that doesn't start from zero every morning
 The image is self-contained: the agent CLI (Claude Code, pinned) and the memory engine (Wadachi, semantic model included) are already inside. The one thing it cannot bring is a way to pay — **give the agent credentials first**, or your first conversation will fail instead of answering:
 
 ```sh
+# One line, and it does all of the below: checks Docker is there AND answering,
+# makes the folder, fetches the compose file for its own release and checks it
+# against a digest it carries, starts, and prints the code the first claim
+# costs. Windows: `irm https://overmind.eliacinti.dev/install.ps1 | iex`.
+curl -fsSL https://overmind.eliacinti.dev/install.sh | sh
+```
+
+Or by hand, which is the same thing with the steps visible:
+
+```sh
 # The folder you put this file in IS your Overmind: `./data` and `./agent` are
 # created beside it on the first start, and the whole install moves by moving
 # the folder (ADR-0047). One file, on top of Docker — Docker Desktop on macOS
 # and Windows, the docker engine package on Linux. No clone needed. On Windows
 # run this in WSL2 or Git Bash: in PowerShell `curl` is not curl.
 mkdir -p ~/overmind && cd ~/overmind
-# `main`, not the release asset, until the next tag: 0.2.3's file still keeps
-# its data in Docker named volumes, and everything below describes this one.
-curl -fsSLO https://raw.githubusercontent.com/EliaCinti/overmind/main/docker-compose.yml
+curl -fsSLO https://github.com/EliaCinti/overmind/releases/latest/download/docker-compose.yml
 
 # EITHER: pay with an API key — export it before starting
 export ANTHROPIC_API_KEY=sk-ant-…

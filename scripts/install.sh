@@ -133,13 +133,22 @@ Nothing was installed. Download the release by hand if you want to look."
 
     printf '\n'
     say "Overmind is running at http://localhost:${port}"
-    code=$(read_setup_code)
-    if [ -n "$code" ]; then
-        printf '\n  The first claim costs this code, and it is asked for once:\n\n      %s\n\n' "$code"
+    # Three states, and they must not be confused. The file being unreadable
+    # is the ORDINARY Linux case -- it is 0600 and root's, and `sudo -n` will
+    # not prompt -- so an earlier draft fell through to "already claimed" and
+    # told a brand-new user something false, in the one step this installer
+    # exists to make easy.
+    if [ -e "$dir/data/setup-code" ]; then
+        code=$(read_setup_code)
+        if [ -n "$code" ]; then
+            printf '\n  The first claim costs this code, and it is asked for once:\n\n      %s\n\n' "$code"
+        else
+            printf '\n  The first claim costs a code. It is root'"'"'s, so read it with:\n\n      sudo cat %s/data/setup-code\n\n' "$dir"
+        fi
     elif [ -e "$dir/data/overmind.sqlite" ]; then
         printf '\n  Already claimed — no setup code to give.\n\n'
     else
-        printf '\n  The setup code is in %s/data/setup-code (root owns it on Linux, so: sudo cat).\n\n' "$dir"
+        printf '\n  No setup code was written. The server log says why:\n\n      docker compose logs overmind\n\n'
     fi
 
     # 7 — the three things that come next.
