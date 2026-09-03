@@ -16,6 +16,33 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 
 ## The order, and why
 
+> **3 Sep 2026 — where the work stands, in the order it should be finished.**
+> Written after the owner said development had slowed and asked for a plan to
+> follow. Three horizons, and the rule that governs them: *finish what is half
+> done before opening anything new.*
+>
+> **Now.** PR #91 (M33, and M32's script) → tag **0.2.4**, which is the release
+> that publishes the new compose file *and* the stamped installers → the nginx
+> redirect for `/install.sh` on the VPS, **ahead of the SPA's catch-all**, or
+> `curl` pipes the landing page into a shell → then, and only then, move the
+> docs to the release asset URL, which until that tag still serves 0.2.3's
+> compose and its named volumes.
+>
+> **Then**, the debt already measured and written down: *Updating, and the way
+> back* (below); the `ClaimedOwner` extractor (below, now defence in depth
+> rather than a hole, since M32 slice A closed the wall); and M32's slice C,
+> the free graphical road, to be **decided on evidence about who actually
+> installs it** rather than on taste.
+>
+> **After that**, the queue below in its existing order: from diff to landed,
+> the browser walk in CI, the chain seen, Overmind in your pocket, the door on
+> the open internet.
+>
+> **And the owner's own:** raise the cap that is holding *TravelAgency* — one
+> agent at €50.38 against €50.00, six refused starts in two hours — and say the
+> word on M25, open since 29 August.
+
+
 > **23 Aug:** *Tools in the agent's hand* jumped the queue as **M28** — a real need named it (a Blender company for the owner's house, ADR-0036), which is exactly the rule at the bottom of this file. The milestones below keep their names; their numbers shift by one when they open.
 
 ### A week of use *(the owner's milestone)*
