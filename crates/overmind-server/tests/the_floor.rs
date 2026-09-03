@@ -453,11 +453,15 @@ async fn a_start_that_matched_nothing_is_not_reported_as_running() {
     }));
     tell_the_ceo(&env, "Vai.").await;
 
+    // Wait for the title to be mentioned at all, then assert on what is SAID
+    // about it. Asserting the title again would only re-check the helper's own
+    // condition, and would pass just as happily if the line claimed the task
+    // had started.
     let thread = await_thread(&env, "Un titolo che sulla lavagna non esiste").await;
     assert!(
-        thread.contains("Un titolo che sulla lavagna non esiste"),
+        thread.contains("no open task") || thread.contains("nessun task aperto"),
         "the CEO claimed a start, the title matched nothing, and the person was \
-         told none of it: {thread}"
+         not told that: {thread}"
     );
 }
 
@@ -508,7 +512,7 @@ async fn a_start_refused_for_budget_says_so_with_the_numbers() {
     // out on a line that was written correctly.
     let thread = await_thread(&env, "monthly cap").await;
     assert!(
-        thread.contains("tetto mensile") || thread.contains("monthly cap"),
+        thread.contains("€0.01") && thread.contains("did not start"),
         "the budget gate refused the start and the person was told nothing: {thread}"
     );
 }
