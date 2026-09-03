@@ -50,12 +50,13 @@ terminal it was meant to replace.
       it, *running but not reachable by you* says to log out and back in — and
       **none of them installs anything**. A prerequisite stated is not the same
       thing as a system changed behind someone's back;
-   3. creates its directory: **`./overmind`, beside whoever ran the command**,
-      unless `OVERMIND_HOME` names somewhere else.
+   3. creates its directory — **`./overmind`, beside whoever ran the command**,
+      unless `OVERMIND_HOME` names somewhere else — and gives it an
+      **identity**, which is the part that makes the location safe.
 
       *Corrected 3 Sep 2026, twice over.* This ADR described
       `$XDG_DATA_HOME/overmind` falling back to `~/.overmind`; the script has
-      never done that — ADR-0047 made the folder itself the installation, and
+      never done that — ADR-0047 made the folder itself the installation and
       the code went to `$HOME/overmind` without this line following it. It is
       now `./overmind`, because the owner ran the installer from his Desktop
       and went looking there for what it made. A subfolder rather than the
@@ -63,15 +64,37 @@ terminal it was meant to replace.
       `agent/` into whatever directory somebody happened to be in is not a
       gift.
 
-      That makes a *new* mistake reachable, and the script refuses it rather
-      than letting it happen: since a folder **is** an instance, installing
-      into a fresh one beside an existing Overmind does not update that
-      Overmind, it stands an empty one next to it and leaves the real database
-      where nobody is looking. So when the directory was defaulted rather than
-      chosen, and an instance exists at the previous default, the installer
-      stops and gives three lines — update the one you have, move it here, or
-      set `OVERMIND_HOME` and mean it. An explicit choice is never second-
-      guessed;
+      That change alone would have been worse than the problem. `docker-compose.yml`
+      carries no `name:` on the stated grounds that *Compose takes the project
+      from the directory, so two folders are two instances* — which holds only
+      while the folders have **different names**, and an installer that always
+      makes one called `overmind` gives every install one project, one
+      `container_name` and one published port. The second `up` would not stand
+      an instance beside the first; it would adopt its project and recreate its
+      container onto the new folder's empty `./data`. The old `$HOME/overmind`
+      was safe by accident: exactly one such folder ever existed.
+
+      So the installer writes a `.env` beside the compose file —
+      `COMPOSE_PROJECT_NAME`, `OVERMIND_NAME` and `OVERMIND_PORT`, the first two
+      derived from the folder's full path and the last from it too when 7070 is
+      taken. Written **once**: re-running must not rename a project out from
+      under containers already running under the old name, and a folder that
+      predates the file keeps the name Compose has been using for it, which is
+      what stops an update from orphaning a live container. Two folders are now
+      two instances *in fact*, which is what ADR-0047 had been claiming.
+
+      With the collision gone there is nothing left to forbid, so the installer
+      does not forbid anything. It **looks** instead: `docker inspect` on every
+      container whose image is Overmind's gives the `/data` bind mount, and that
+      names each existing install exactly — wherever it is, whatever its folder
+      is called, running or stopped. A folder merely *called* `overmind` with
+      nothing in it is correctly not one. When one is found and this is not it,
+      the person is told where it is and offered the choice: update that one,
+      make a new one here, or stop. Asked on `/dev/tty`, because piped to `sh`
+      the script's stdin **is** the pipe; gated on a terminal being there at
+      all, so CI and provisioning scripts are never asked and get the answer
+      nobody has to undo;
+
    4. downloads the compose file **from its own release, by tag, and checks it
       against the SHA-256 the script carries**. The script is stamped at release
       time with its release's tag and that asset's digest, so the file and its

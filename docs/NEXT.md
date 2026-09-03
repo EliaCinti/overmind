@@ -69,21 +69,6 @@ The order is backwards for a reason that no longer holds. The probe reads the ma
 
 Small, and it touches the cage's command construction, so it wants its own change rather than a corner of another one.
 
-### Where an install lands, and why "two folders are two instances" is not true yet
-*From the code review of `fix/the-installer-lands-where-you-are`, 3 Sep 2026. The branch exists and is **not** merged.* The owner ran the installer from his Desktop and went looking there; it had gone to `$HOME/overmind`. Making it land in `./overmind` beside him looked like a one-line fix and is not, because it removes the only thing that made the current design safe.
-
-`docker-compose.yml` deliberately carries no `name:`, and says why: *"Compose takes the project from the directory, so two folders are two instances — which is what 'the folder is the installation' has to mean."* That holds **only while the folders have different names.** An installer that always creates a directory called `overmind` makes every default install share one Compose project, one `container_name: ${OVERMIND_NAME:-overmind}`, and one `127.0.0.1:7070:7070`. Install from the Desktop, then from Documents, and the second `docker compose up -d` does not stand an instance beside the first — it adopts the project and recreates the running container onto the new, empty bind mounts, with `docker compose down` in either folder stopping the other. The old `$HOME/overmind` default was safe precisely because exactly one such folder ever existed.
-
-So the location is not the fix; **the identity is**. To land beside the person, an install has to be its own Compose project, which means the installer writes a `.env` beside the compose file — `COMPOSE_PROJECT_NAME` derived from the full path, `OVERMIND_NAME` to match, and a port that is not already taken. Then two folders really are two instances, ADR-0047 stops promising something the code does not keep, and a second install fails loudly on a port rather than quietly on somebody's data.
-
-The same review found, in the abandoned branch, four smaller things worth carrying into the real one:
-- The escape hatch it printed does not work: `OVERMIND_HOME=… curl … | sh` sets the variable in **curl's** environment. It has to be `curl … | OVERMIND_HOME=… sh`, and it was the only way past a hard refusal.
-- A guard that knows only the *previous* default cannot see an install the *new* default made, which is every directory rather than one.
-- Remedy commands interpolate paths unquoted, so they break on `C:\Users\Elia Cinti\…` — exactly the machine that needs them.
-- `mkdir -p "$dir"` in the caller's directory can now fail where `$HOME` never did (`/`, a read-only mount), and it is the one failure in that script without a sentence of its own.
-
-And `README.md`'s by-hand quickstart still creates `~/overmind`, which any guard keyed to that path then treats as poisoned — the docs manufacture the precondition.
-
 ### More than one mind for hire *(a second provider, and who pays for it)*
 *Asked 3 Sep 2026, after the payer gap below.* The owner wants agents on models other than Claude's — added with an API key, and where the provider allows it, with a subscription. The subscription question has a real answer, and it is more encouraging than expected; the engineering question has a harder one.
 

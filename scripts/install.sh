@@ -87,45 +87,31 @@ or open a new terminal, then run this installer again."
         die "This Docker has no 'compose' subcommand. Install the Compose plugin (on Debian/Ubuntu: 'sudo apt install docker-compose-plugin'), then run this installer again."
     fi
 
-    # 3 — the directory. It IS the installation (ADR-0047): the compose file
-    #     lives here and so do ./data and ./agent, so moving this folder moves
-    #     the whole Overmind.
+    # 3 — the directory, and the identity that makes it an instance of its own.
     #
-    #     It lands beside you, in ./overmind, because that is where somebody who
-    #     just ran a command goes looking for what it made. A subfolder rather
-    #     than the bare working directory: a compose file, a data/ and an agent/
-    #     scattered into whatever you happened to be in is not a gift.
-    if [ -n "${OVERMIND_HOME:-}" ]; then
-        dir=$OVERMIND_HOME
-        chosen=yes
-    else
-        dir=$PWD/overmind
-        chosen=no
-    fi
-    previous=$HOME/overmind
+    #     It lands beside whoever ran the command, in ./overmind, because that
+    #     is where somebody goes looking for what a command just made. A
+    #     subfolder rather than the bare working directory: scattering a
+    #     compose file, a data/ and an agent/ into whatever directory you
+    #     happened to be in is not a gift.
+    dir=${OVERMIND_HOME:-"$PWD/overmind"}
+    mkdir -p "$dir" 2>/dev/null || die "Cannot create $dir — this directory is not writable by you.
+    Run it somewhere you own, or name the place yourself:
+
+        curl -fsSL https://overmind.eliacinti.dev/install.sh | OVERMIND_HOME=\$HOME/overmind sh
+
+    (the variable goes before 'sh', not before 'curl': in a pipeline each side
+    is its own process, and curl is not the one that needs it.)"
+    cd "$dir" || die "Cannot enter $dir."
+    #     Absolute from here on: the identity is derived from it, and every
+    #     line printed below names it back to the person.
+    dir=$PWD
     if [ -e "$dir/data/overmind.sqlite" ]; then
         say "There is already an Overmind in $dir — updating it in place."
-    elif [ "$chosen" = no ] && [ "$dir" != "$previous" ] && [ -e "$previous/data/overmind.sqlite" ]; then
-        # The hazard ADR-0047 names, met head-on: a folder IS an instance, so
-        # installing into a new one beside an existing instance does not update
-        # it, it silently replaces it with an empty one and leaves the real
-        # database where nobody is looking.
-        die "You already have an Overmind in $previous, and installing here would
-    make a second, empty one instead of updating that one.
-
-    To update the one you have:
-        cd $previous && docker compose pull && docker compose up -d
-
-    To move it here, with it stopped:
-        cd $previous && docker compose down
-        mv $previous $dir
-        cd $dir && docker compose up -d
-
-    To install a second one here on purpose:
-        OVERMIND_HOME=$dir  … before the install command"
+    else
+        elsewhere
     fi
-    mkdir -p "$dir"
-    cd "$dir"
+    identify
 
     # 4 — the compose file, from this script's own release, checked.
     url="https://github.com/EliaCinti/overmind/releases/download/${TAG}/docker-compose.yml"
@@ -151,7 +137,7 @@ Nothing was installed. Download the release by hand if you want to look."
     # 6 — wait for it to answer, then the URL and the code. From the file the
     #     server wrote, never from the log: on the second run the log still
     #     holds the first run's line.
-    port=$(compose_port)
+    port=$(instance_port)
     i=0
     while [ "$i" -lt 90 ]; do
         if curl -fsS -m 2 -o /dev/null "http://127.0.0.1:${port}/" 2>/dev/null; then
@@ -188,7 +174,9 @@ Nothing was installed. Download the release by hand if you want to look."
     • Give the agent a way to pay — sign in with your Claude subscription from
       the notice above the first screen, or export ANTHROPIC_API_KEY before
       starting. (This installer cannot ask: piped to sh, its input is the pipe.)
-    • Your instance lives in $dir — the compose file, ./data and ./agent.
+    • Your instance lives in $dir — the compose file, ./data, ./agent, and a
+      .env holding this instance's name and port so a second install
+      elsewhere is a second instance rather than a fight over this one.
       Moving that folder moves everything. 'docker compose down -v' cannot
       touch it. The way out is an archive: the Archive button, owner only.
 
@@ -206,6 +194,152 @@ sha256() {
     else
         shasum -a 256 "$1" | cut -d' ' -f1
     fi
+}
+
+# Every Overmind this engine knows of, running or stopped, wherever it lives
+# and whatever its folder is called.
+#
+# Asked of Docker rather than guessed at by scanning paths: the /data bind
+# mount names the install directory exactly, so an instance whose folder was
+# renamed or moved is still found — and a folder merely CALLED `overmind`,
+# with nothing in it, is correctly not one.
+known_instances() {
+    docker ps -a --format '{{.ID}} {{.Image}}' 2>/dev/null \
+        | grep -i overmind | cut -d' ' -f1 \
+        | while read -r c; do
+            src=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)
+            [ -n "$src" ] && printf '%s\n' "${src%/data}"
+        done | sort -u
+}
+
+# Installing beside an Overmind that already exists is safe now — separate
+# project, separate container, separate port — but it is rarely what somebody
+# meant, and finding out later is expensive. So it is said before it happens,
+# with the choice offered rather than assumed.
+#
+# Asked on /dev/tty, not stdin: piped to sh, stdin IS the pipe. Where there is
+# no terminal — CI, a provisioning script — nothing is asked and the safe
+# thing happens, which is the new instance nobody has to undo.
+elsewhere() {
+    others=$(known_instances | grep -v "^${dir}$" || true)
+    [ -n "$others" ] || return 0
+
+    printf '\n  Overmind is already installed on this machine:\n\n'
+    printf '%s\n' "$others" | while read -r o; do printf '      %s\n' "$o"; done
+    printf '\n  Installing here makes a SECOND, separate instance: its own data, its own\n'
+    printf '  container, its own port. Nothing above is touched.\n\n'
+
+    count=$(printf '%s\n' "$others" | wc -l | tr -d ' ')
+    # A terminal on stdout is the honest test. `-r /dev/tty` is true even where
+    # the device cannot be opened -- measured: it asked the question, printed
+    # "Device not configured", and answered itself.
+    if [ "$count" -ne 1 ] || [ ! -t 1 ]; then
+        say "  Installing here. To update one of those instead, run this from its folder."
+        return 0
+    fi
+
+    printf '    [u] update that one instead   [n] new instance here   [q] quit\n\n  > '
+    read -r answer < /dev/tty 2>/dev/null || answer=n
+    printf '\n'
+    case "$answer" in
+        u|U)
+            dir=$(printf '%s\n' "$others" | head -1)
+            cd "$dir" || die "Cannot enter $dir."
+            say "Updating the Overmind in $dir."
+            ;;
+        q|Q) die "Nothing was installed." ;;
+        *) say "Installing a second instance in $dir." ;;
+    esac
+}
+
+# What makes THIS folder an instance rather than a name collision.
+#
+# Compose names a project after its directory, and since 3 Sep 2026 every
+# default install IS a directory called `overmind` — so two of them would be
+# one project: one set of containers, one published port, and an `up` in the
+# second recreating the first onto this folder's empty ./data. The identity
+# therefore comes from the whole path, written where Compose reads it.
+#
+# Written once and never rewritten: re-running here must not rename a project
+# out from under containers that are already running under the old name.
+identify() {
+    [ -f .env ] && return 0
+    if [ -e data/overmind.sqlite ]; then
+        # Older than this file. Compose has been naming its containers after
+        # the directory all along, so keep exactly that name — inventing a new
+        # one here would orphan a container that is running right now.
+        project=$(printf '%s' "${dir##*/}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')
+        [ -n "$project" ] || project=overmind
+        port=$(compose_port)
+    else
+        project=overmind-$(path_slug)
+        port=$(free_port)
+    fi
+    cat > .env <<EOF
+# Written by the installer, and read by every 'docker compose' you run here.
+# It is what makes this folder its own instance: Compose names a project after
+# its directory, and every default install is a directory called 'overmind'.
+# Two of them without this file would be ONE project — one set of containers,
+# one port — and starting the second would recreate the first onto this
+# folder's empty ./data.
+#
+# Moving this folder is still how you move the instance. Delete this file only
+# if you also mean to give the instance a different name.
+COMPOSE_PROJECT_NAME=$project
+OVERMIND_NAME=$project
+OVERMIND_PORT=$port
+EOF
+}
+
+# Eight hex of the folder's full path: stable across runs, different for every
+# folder, and short enough to read in `docker ps`.
+path_slug() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$dir" | sha256sum | cut -c1-8
+    else
+        printf '%s' "$dir" | shasum -a 256 | cut -c1-8
+    fi
+}
+
+# Is somebody already on this port? Two questions, because neither alone is
+# enough: something may answer HTTP without being a container, and a container
+# may hold the port while still starting and answering nothing.
+port_taken() {
+    curl -fsS -m 1 -o /dev/null "http://127.0.0.1:$1/" 2>/dev/null && return 0
+    docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":$1->" && return 0
+    return 1
+}
+
+# 7070 when it is free — that is the address every document names. Otherwise a
+# port belonging to THIS folder, derived from its path rather than from
+# whatever happens to be listening at this second: "the first free one" hands
+# the same number to two installs made while both were stopped, and they
+# collide the day somebody starts both. Measured, on the first test of this.
+free_port() {
+    if ! port_taken 7070; then
+        printf '7070'
+        return 0
+    fi
+    n=$(printf '%s' "$dir" | cksum | cut -d' ' -f1)
+    p=$((7071 + n % 29))
+    i=0
+    while [ "$i" -lt 29 ]; do
+        if ! port_taken "$p"; then
+            printf '%s' "$p"
+            return 0
+        fi
+        p=$((7071 + (p - 7070) % 29))
+        i=$((i + 1))
+    done
+    printf '7070'
+}
+
+# This instance's port: what the identity says, falling back to the compose
+# file for an install that predates .env or a file somebody edited by hand.
+instance_port() {
+    p=$(sed -n 's/^OVERMIND_PORT=\([0-9]\{1,\}\).*/\1/p' .env 2>/dev/null | head -1)
+    [ -n "$p" ] || p=$(compose_port)
+    printf '%s' "$p"
 }
 
 # The published port, read from the compose file rather than assumed: somebody
