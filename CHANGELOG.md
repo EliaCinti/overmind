@@ -4,6 +4,11 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+### Changed
+
+- **The installer lands where you are.** `curl … | sh` now makes `./overmind` beside you instead of `$HOME/overmind`, because that is where somebody who just ran a command goes looking for what it made — reported by the owner, who ran it from his Desktop and found nothing there. A subfolder rather than the bare working directory, so a compose file, a `data/` and an `agent/` are never scattered into whatever directory you happened to be in. `OVERMIND_HOME` still overrides, and an explicit choice is never second-guessed.
+  Because a folder **is** an instance ([ADR-0047](docs/adr/0047-the-folder-is-the-installation.md)), the new default makes a worse mistake reachable: installing into a fresh folder beside an existing Overmind would not update it — it would stand an empty one next to it and leave the real database where nobody is looking. The installer refuses that outright and gives the three ways out: update the one you have, move it here, or set `OVERMIND_HOME` on purpose.
+
 ### Fixed
 
 - **You can choose who pays, from the org chart** ([ADR-0037](docs/adr/0037-who-pays-is-asked.md), amended). Reported from a Mac with `ANTHROPIC_API_KEY` exported: Overmind went straight to the key and never offered the subscription. Both halves of that road were built and neither could be reached — the guided sign-in showed itself only when there was *no* way to pay at all, and the switch only when a key was already beating a login. A key with nothing behind it is neither, which is the commonest developer machine there is, so the key was billed in silence.

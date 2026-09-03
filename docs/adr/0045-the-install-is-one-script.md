@@ -50,9 +50,28 @@ terminal it was meant to replace.
       it, *running but not reachable by you* says to log out and back in — and
       **none of them installs anything**. A prerequisite stated is not the same
       thing as a system changed behind someone's back;
-   3. creates its directory: `$XDG_DATA_HOME/overmind` when that variable is
-      set, `~/.overmind` otherwise, in that order, so an update run finds what
-      the install run wrote;
+   3. creates its directory: **`./overmind`, beside whoever ran the command**,
+      unless `OVERMIND_HOME` names somewhere else.
+
+      *Corrected 3 Sep 2026, twice over.* This ADR described
+      `$XDG_DATA_HOME/overmind` falling back to `~/.overmind`; the script has
+      never done that — ADR-0047 made the folder itself the installation, and
+      the code went to `$HOME/overmind` without this line following it. It is
+      now `./overmind`, because the owner ran the installer from his Desktop
+      and went looking there for what it made. A subfolder rather than the
+      bare working directory: scattering a compose file, a `data/` and an
+      `agent/` into whatever directory somebody happened to be in is not a
+      gift.
+
+      That makes a *new* mistake reachable, and the script refuses it rather
+      than letting it happen: since a folder **is** an instance, installing
+      into a fresh one beside an existing Overmind does not update that
+      Overmind, it stands an empty one next to it and leaves the real database
+      where nobody is looking. So when the directory was defaulted rather than
+      chosen, and an instance exists at the previous default, the installer
+      stops and gives three lines — update the one you have, move it here, or
+      set `OVERMIND_HOME` and mean it. An explicit choice is never second-
+      guessed;
    4. downloads the compose file **from its own release, by tag, and checks it
       against the SHA-256 the script carries**. The script is stamped at release
       time with its release's tag and that asset's digest, so the file and its

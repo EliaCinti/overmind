@@ -90,9 +90,39 @@ or open a new terminal, then run this installer again."
     # 3 — the directory. It IS the installation (ADR-0047): the compose file
     #     lives here and so do ./data and ./agent, so moving this folder moves
     #     the whole Overmind.
-    dir=${OVERMIND_HOME:-"$HOME/overmind"}
+    #
+    #     It lands beside you, in ./overmind, because that is where somebody who
+    #     just ran a command goes looking for what it made. A subfolder rather
+    #     than the bare working directory: a compose file, a data/ and an agent/
+    #     scattered into whatever you happened to be in is not a gift.
+    if [ -n "${OVERMIND_HOME:-}" ]; then
+        dir=$OVERMIND_HOME
+        chosen=yes
+    else
+        dir=$PWD/overmind
+        chosen=no
+    fi
+    previous=$HOME/overmind
     if [ -e "$dir/data/overmind.sqlite" ]; then
         say "There is already an Overmind in $dir — updating it in place."
+    elif [ "$chosen" = no ] && [ "$dir" != "$previous" ] && [ -e "$previous/data/overmind.sqlite" ]; then
+        # The hazard ADR-0047 names, met head-on: a folder IS an instance, so
+        # installing into a new one beside an existing instance does not update
+        # it, it silently replaces it with an empty one and leaves the real
+        # database where nobody is looking.
+        die "You already have an Overmind in $previous, and installing here would
+    make a second, empty one instead of updating that one.
+
+    To update the one you have:
+        cd $previous && docker compose pull && docker compose up -d
+
+    To move it here, with it stopped:
+        cd $previous && docker compose down
+        mv $previous $dir
+        cd $dir && docker compose up -d
+
+    To install a second one here on purpose:
+        OVERMIND_HOME=$dir  … before the install command"
     fi
     mkdir -p "$dir"
     cd "$dir"

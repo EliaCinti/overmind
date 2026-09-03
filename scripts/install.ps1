@@ -68,9 +68,36 @@ it is ready, then run this installer again.
 
     # 3 — the directory IS the installation (ADR-0047): the compose file lives
     #     here and so do .\data and .\agent.
-    $dir = if ($env:OVERMIND_HOME) { $env:OVERMIND_HOME } else { Join-Path $HOME 'overmind' }
+    #
+    #     It lands beside you, in .\overmind, because that is where somebody who
+    #     just ran a command goes looking for what it made — a subfolder rather
+    #     than the bare working directory, which would scatter a compose file,
+    #     a data\ and an agent\ into whatever you happened to be in.
+    $chosen = [bool]$env:OVERMIND_HOME
+    $dir = if ($chosen) { $env:OVERMIND_HOME } else { Join-Path (Get-Location).Path 'overmind' }
+    $previous = Join-Path $HOME 'overmind'
     if (Test-Path (Join-Path $dir 'data\overmind.sqlite')) {
         Write-Host "There is already an Overmind in $dir - updating it in place."
+    } elseif ((-not $chosen) -and ($dir -ne $previous) -and (Test-Path (Join-Path $previous 'data\overmind.sqlite'))) {
+        # The hazard ADR-0047 names, met head-on: a folder IS an instance, so
+        # installing into a new one beside an existing instance does not update
+        # it, it silently replaces it with an empty one and leaves the real
+        # database where nobody is looking.
+        Fail @"
+You already have an Overmind in $previous, and installing here would
+make a second, empty one instead of updating that one.
+
+    To update the one you have:
+        cd $previous ; docker compose pull ; docker compose up -d
+
+    To move it here, with it stopped:
+        cd $previous ; docker compose down
+        Move-Item $previous $dir
+        cd $dir ; docker compose up -d
+
+    To install a second one here on purpose:
+        `$env:OVERMIND_HOME = '$dir'   ... before the install command
+"@
     }
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Set-Location $dir
