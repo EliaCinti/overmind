@@ -13,6 +13,13 @@
 # no native Windows build, on purpose (the image is the Windows path, and it is
 # what CI tests). This script never installs Docker for you.
 $ErrorActionPreference = 'Stop'
+# PowerShell 7.4+ turns a non-zero exit from a NATIVE command into a
+# terminating error by default. Every `docker ...` call below is followed by a
+# check of $LASTEXITCODE precisely so it can print a sentence a person can act
+# on -- "Docker is installed but not running", not a raw error record. Without
+# this, those branches are unreachable on the newer shell and reachable on 5.1,
+# which is the sort of difference nobody notices until somebody is stuck.
+$PSNativeCommandUseErrorActionPreference = $false
 
 # Stamped by the release workflow: a script from release X fetches release X's
 # compose file and checks it against the digest that release published.
@@ -102,15 +109,26 @@ Nothing was installed.
     Write-Host "Overmind is running at http://localhost:$port"
     $codeFile = Join-Path $dir 'data\setup-code'
     if (Test-Path $codeFile) {
-        $code = (Get-Content $codeFile -Raw).Trim()
+        $code = $null
+        try { $code = (Get-Content $codeFile -Raw -ErrorAction Stop).Trim() } catch { }
         Write-Host ""
-        Write-Host "  The first claim costs this code, and it is asked for once:"
-        Write-Host ""
-        Write-Host "      $code"
+        if ($code) {
+            Write-Host "  The first claim costs this code, and it is asked for once:"
+            Write-Host ""
+            Write-Host "      $code"
+        } else {
+            Write-Host "  The first claim costs a code, and this shell cannot read the file:"
+            Write-Host ""
+            Write-Host "      $codeFile"
+        }
         Write-Host ""
     } elseif (Test-Path (Join-Path $dir 'data\overmind.sqlite')) {
         Write-Host ""
         Write-Host "  Already claimed - no setup code to give."
+        Write-Host ""
+    } else {
+        Write-Host ""
+        Write-Host "  No setup code was written. The server log says why: docker compose logs overmind"
         Write-Host ""
     }
 
