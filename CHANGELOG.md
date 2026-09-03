@@ -4,6 +4,18 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-09-03
+
+**One line installs it.** `curl -fsSL https://overmind.eliacinti.dev/install.sh | sh` — and the folder that line runs in is your Overmind: the compose file, `./data` and `./agent` side by side, moved by moving the folder, and safe from `docker compose down -v`, which cannot reach a bind mount. The installer asks whether Docker is *there and answering* rather than whether the binary exists, never installs anything behind your back, checks the compose file against a digest it carries, and prints the setup code in the terminal you are already looking at instead of leaving you to find it in a log.
+
+And the CEO stops saying that work is running when it is not.
+
+### Added
+
+- **An installer, on both roads** ([ADR-0045](docs/adr/0045-the-install-is-one-script.md), M32 slice B). `install.sh` for macOS and Linux, `install.ps1` for Windows: seven steps and no eighth. It refuses a platform it cannot serve with a sentence rather than an error. It asks the **engine** whether it is there — `docker info`, because "Docker Desktop installed but not started" and "not in the `docker` group yet" both pass `command -v docker` and fail later and worse — and gives each of those three a different remedy, without installing anything itself. It takes the compose file from **its own release, by tag, against a SHA-256 stamped into it at release time**, so the file and the digest it is checked against come from one place. The whole body is a function called on the last line, so a truncated download runs nothing at all. It reads the published port out of the compose file rather than assuming 7070. And it ends by saying the three things that come next: that the same command is the update, that the agent still needs a way to pay, and where the data lives.
+  Both scripts ship as release assets with their own checksums, for anyone who would rather read a shell script before piping it into a shell — and an unstamped copy, run out of a checkout, refuses rather than downloading something it cannot verify.
+
+
 ### Changed
 
 - **The folder that holds `docker-compose.yml` is the installation** ([ADR-0047](docs/adr/0047-the-folder-is-the-installation.md)). `./data` and `./agent` are created beside the file on the first start, and everything Overmind keeps lives there in plain sight — the database, every company's brain, the audit chain, attachments, artifacts, the subscription token, and the agent CLI's own sign-in. They are bind mounts rather than Docker named volumes, so **`docker compose down -v` cannot destroy an instance**: that flag removes named volumes, and these are not.
@@ -140,6 +152,7 @@ The first release: a company of AI agents you can actually run, and let someone 
 ### Known limits, stated
 The threat model (`docs/THREAT-MODEL.md`) says what is not defended against: anyone with the machine, a malicious adapter or memory binary you configured, the network. No quorum on meeting requests and declared-but-unpoliced permissions are deliberate; membership is organizational, not adversarial; the plan's remaining percentage is not visible headless; the adapter's brake overshoots (measured 2.6× at a five-cent ceiling).
 
+[0.2.4]: https://github.com/EliaCinti/overmind/releases/tag/v0.2.4
 [0.2.3]: https://github.com/EliaCinti/overmind/releases/tag/v0.2.3
 [0.2.2]: https://github.com/EliaCinti/overmind/releases/tag/v0.2.2
 [0.2.1]: https://github.com/EliaCinti/overmind/releases/tag/v0.2.1
