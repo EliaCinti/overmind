@@ -309,15 +309,44 @@ pub async fn mint_setup_code(
     // door"), that window turns into a boot that will not serve. Write to a
     // neighbour, tighten it, then rename: rename is atomic on every
     // filesystem the data dir can sit on.
-    let tmp = path.with_extension("writing");
-    std::fs::write(&tmp, format!("{code}\n"))?;
+    // Any leftover from a process that died mid-write. Nothing else knows
+    // these names -- `stored_setup_code` does not read them, the claim does
+    // not delete them -- so one left behind would hold a live code after the
+    // claim spent the real one, and travel into an archive of /data.
+    sweep_unfinished(config);
+    // A name of its own per attempt, not a fixed `setup-code.writing`: two
+    // servers minting into one data directory would otherwise delete each
+    // other's temporary file and rename a thing that is no longer there.
+    let tmp = config
+        .data_dir
+        .join(format!("{SETUP_CODE_FILE}.writing.{}", new_id()));
+    if let Err(e) = std::fs::write(&tmp, format!("{code}\n")) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     keep_to_the_server(&tmp);
-    std::fs::rename(&tmp, &path)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     println!(
         "setup code for the first claim: {code}  (also in {}; it is asked for once, then deleted)",
         path.display()
     );
     Ok(())
+}
+
+/// Remove any half-written code left by a process that did not finish.
+fn sweep_unfinished(config: &crate::db::Config) {
+    let prefix = format!("{SETUP_CODE_FILE}.writing.");
+    let Ok(entries) = std::fs::read_dir(&config.data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// `0600`: the code is the whole of the door until somebody claims it.

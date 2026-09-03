@@ -680,17 +680,15 @@ pub(crate) async fn start_existing(
     let Some((task_id, status, assignee)) = task else {
         return Ok(Started::NoSuchTask);
     };
-    let Some(assignee) = assignee else {
-        return Ok(Started::NobodyOnIt);
-    };
-    // Already working, or waiting to be reviewed. Relaunching it would be a
-    // second run of the same thing, and calling it "no such task" -- which is
-    // what the old `status IN (...)` filter did, by not matching it at all --
-    // is the false report this whole change exists to remove. The CEO's board
-    // lists these, so it will ask.
+    // Status before assignee, the same order the digest path uses: an
+    // in-progress task whose assignee row is empty is *running*, and calling
+    // it "nobody is on it" is the false report this milestone removes.
     if matches!(status.as_str(), "in_progress" | "in_review") {
         return Ok(Started::AlreadyRunning);
     }
+    let Some(assignee) = assignee else {
+        return Ok(Started::NobodyOnIt);
+    };
     if status != "todo" {
         sqlx::query("UPDATE tasks SET status = 'todo', updated_at = ? WHERE id = ?")
             .bind(now())

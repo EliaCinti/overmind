@@ -370,10 +370,6 @@ pub async fn post_user_message(
     Ok(conversation_id)
 }
 
-/// Tell the human an agent has hit its cap (ADR-0022).
-///
-/// Structured params, not a finished sentence: the inbox words it in the
-/// company's language (M16 slice D). `title`/`body` stay as the durable record
 /// What became of a start the CEO asked for (ADR-0046). An enum rather than a
 /// string that gets encoded and re-parsed: the earlier draft carried
 /// `"over_budget:5000:5038"` and a parse miss would have shown that marker to
@@ -414,6 +410,10 @@ impl Outcome {
     }
 }
 
+/// Tell the human an agent has hit its cap (ADR-0022).
+///
+/// Structured params, not a finished sentence: the inbox words it in the
+/// company's language (M16 slice D). `title`/`body` stay as the durable record
 /// and the fallback, in English, like every other notification.
 pub(crate) async fn budget_exhausted_notice(
     state: &AppState,
@@ -1331,12 +1331,6 @@ async fn run_agent_turn_inner(
         // compaction notice: this is the last word about work already done, so
         // a write failure must not abort the escalation and the meeting
         // request that follow it.
-        // Through the helper, so it lands on the audit chain like every other
-        // message the server writes -- a raw INSERT left the chain unable to
-        // account for a message in its own conversation. And `let _`, like the
-        // compaction notice: this is the last word about work already done, so
-        // a write failure must not abort the escalation and the meeting
-        // request that follow it.
         let _ = post_system_message(state, company_id, conversation_id, &body).await;
     }
 
@@ -1655,8 +1649,14 @@ pub(crate) fn agent_text(output: &str) -> String {
 
 /// Is the last message in this thread the user's — i.e. unanswered?
 async fn last_word_is_the_users(state: &AppState, conversation_id: &str) -> bool {
+    // `system` rows do not count as anybody's last word. The server writes
+    // them *after* the reply is committed — what became of a start (ADR-0046),
+    // a compaction notice — and a person who types while that is happening
+    // would otherwise be silenced: user, then system, and this returns false,
+    // the loop calls `end_answering`, and their question is never answered.
     let last: Option<(String,)> = sqlx::query_as(
-        "SELECT role FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT role FROM messages WHERE conversation_id = ? AND role <> 'system'
+         ORDER BY created_at DESC LIMIT 1",
     )
     .bind(conversation_id)
     .fetch_optional(&state.pool)
