@@ -336,14 +336,43 @@ pub async fn mint_setup_code(
     Ok(())
 }
 
+/// How long a half-written code has to sit before it counts as abandoned.
+/// A live one exists for microseconds; anything this old belongs to a process
+/// that is not coming back.
+const UNFINISHED_IS_ABANDONED: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Remove any half-written code left by a process that did not finish.
+///
+/// **By age, not by name alone.** Sweeping every `setup-code.writing.*` deleted
+/// the in-flight file of another server minting into the same data directory,
+/// and its rename then failed on something no longer there -- the third race in
+/// this function's short life, and the second caused by fixing the previous
+/// one. A file that is an hour old was not written by anybody still working.
 fn sweep_unfinished(config: &crate::db::Config) {
     let prefix = format!("{SETUP_CODE_FILE}.writing.");
     let Ok(entries) = std::fs::read_dir(&config.data_dir) else {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        // Only a plain file, and only an old one. `symlink_metadata`, not
+        // `metadata`: the data dir is deliberately traversable by the agent
+        // uid, and following a link here would make this a delete primitive
+        // pointed wherever that link goes.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let old_enough = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > UNFINISHED_IS_ABANDONED);
+        if old_enough {
             let _ = std::fs::remove_file(entry.path());
         }
     }
