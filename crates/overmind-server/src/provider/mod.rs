@@ -65,12 +65,29 @@ pub trait Provider: Send + Sync {
     /// must not substitute a zero — see [`ParsedCost`].
     fn cost(&self, output: &str) -> Option<ParsedCost>;
 
-    /// Why the turn failed, in words worth showing a person.
+    /// Why the turn failed, in the adapter's **own, unbounded** words.
     ///
-    /// `None` means the turn did not fail. The words are the adapter's own
+    /// `None` means the turn did not fail. The words are the adapter's
     /// wherever it gave any: "Credit balance is too low" tells somebody what
     /// to do, and "agent exited with code 1" does not.
-    fn failure(&self, output: &str) -> Option<String>;
+    ///
+    /// Implement this and never call it — [`Provider::failure`] is what the
+    /// rest of Overmind uses, and it is the one that bounds the length.
+    fn failure_words(&self, output: &str) -> Option<String>;
+
+    /// Why the turn failed, bounded and fit to store or show.
+    ///
+    /// Provided rather than required, and that is the point: this text is a
+    /// foreign program's, it reaches `agent_task_sessions.last_error` and the
+    /// session drawer, and how long it may be is **Overmind's** policy rather
+    /// than each adapter's. Left to implementors it would be applied by the
+    /// first provider and forgotten by the second — which is exactly what had
+    /// already happened *inside* one implementation, where the budget-ceiling
+    /// branch returned unclamped while every other branch clamped.
+    fn failure(&self, output: &str) -> Option<String> {
+        self.failure_words(output)
+            .map(|s| crate::ceo::clamp_agent_text(&s))
+    }
 
     /// The adapter's own id for this session, so a later turn can resume it.
     ///

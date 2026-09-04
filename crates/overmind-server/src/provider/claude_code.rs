@@ -36,7 +36,7 @@ impl Provider for ClaudeCode {
         parse_cost(output)
     }
 
-    fn failure(&self, output: &str) -> Option<String> {
+    fn failure_words(&self, output: &str) -> Option<String> {
         adapter_failure(output)
     }
 
@@ -67,6 +67,10 @@ pub(crate) fn text_delta_in(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Read one stream-json line for what the agent is doing right now
+/// (ADR-0039). `assistant` events carry either a tool call or words; both are
+/// a narration worth a line. Returned structured, never as an English
+/// sentence — the interface words it in the person's language.
 pub(crate) fn activity_in(line: &str) -> Option<serde_json::Value> {
     let v: Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -114,10 +118,12 @@ pub(crate) fn activity_in(line: &str) -> Option<serde_json::Value> {
 /// a wall of JSON to learn their account was empty. Errors a human can act on
 /// are worth more than exit codes.
 pub(crate) fn adapter_failure(output: &str) -> Option<String> {
-    let envelope: Value = output
-        .lines()
-        .rev()
-        .find_map(|line| serde_json::from_str(line.trim()).ok())?;
+    // Through `last_json_object`, not `from_str` on any line: that accepted a
+    // bare number, a string or `null` as "the envelope", stopped the scan
+    // there, found no `is_error`, and answered None -- so a run whose real
+    // envelope said "Credit balance is too low" was reported as "agent exited
+    // with code 1", which is the one outcome this function exists to prevent.
+    let envelope = last_json_object(output)?;
     if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
         return None;
     }
@@ -155,7 +161,7 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
         })?;
-    Some(crate::ceo::clamp_agent_text(said))
+    Some(said.to_string())
 }
 
 fn last_json_object(output: &str) -> Option<Value> {
@@ -333,5 +339,53 @@ mod failure_tests {
             None
         );
         assert_eq!(adapter_failure(r#"{"is_error":true,"result":"  "}"#), None);
+    }
+}
+
+#[cfg(test)]
+mod what_the_boundary_exposed {
+    //! Two faults that had been in `runner.rs` all along and were invisible
+    //! there, because the code that clamped and the code that did not were
+    //! hundreds of lines apart. Putting one adapter's wire-reading in one file
+    //! put them next to each other.
+
+    use super::super::Provider;
+    use super::ClaudeCode;
+
+    /// The ceiling branch built its sentence from the adapter's `errors[0]`
+    /// and returned it whole, while every other branch clamped. That text goes
+    /// into `agent_task_sessions.last_error` and the drawer, so an adapter
+    /// with a megabyte to say wrote a megabyte.
+    #[test]
+    fn a_ceiling_message_is_as_bounded_as_every_other_failure() {
+        let huge = "x".repeat(50_000);
+        let out = format!(
+            r#"{{"is_error":true,"subtype":"error_max_budget_usd","errors":["{huge}"],"type":"result"}}"#
+        );
+        let said = ClaudeCode.failure(&out).expect("a ceiling is a failure");
+        assert!(
+            said.chars().count() <= crate::ceo::MAX_AGENT_TEXT + 16,
+            "the ceiling message is unbounded: {} chars",
+            said.chars().count()
+        );
+        assert!(said.contains("budget cap"), "it still says what happened");
+    }
+
+    /// The scan took the last line that parsed as *any* JSON — a bare number,
+    /// a string, `null` — as the envelope, found no `is_error` on it, and
+    /// answered None. The run's real reason was one line above, and the person
+    /// got "agent exited with code 1" instead: the exact outcome this parser
+    /// exists to prevent.
+    #[test]
+    fn a_trailing_json_scalar_does_not_hide_why_the_run_failed() {
+        let out = concat!(
+            r#"{"is_error":true,"result":"Credit balance is too low","type":"result"}"#,
+            "\n42\n"
+        );
+        assert_eq!(
+            ClaudeCode.failure(out).as_deref(),
+            Some("Credit balance is too low"),
+            "the adapter's own words survive a trailing scalar"
+        );
     }
 }

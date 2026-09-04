@@ -233,10 +233,6 @@ pub struct StartOutcome {
     pub workspace_path: String,
 }
 
-/// Read one stream-json line for what the agent is doing right now
-/// (ADR-0039). `assistant` events carry either a tool call or words; both are
-/// a narration worth a line. Returned structured, never as an English
-/// sentence — the interface words it in the person's language.
 /// What of the accumulated text is worth showing a person while it streams
 /// (ADR-0039 addendum). Chat agents answer with a JSON plan whose FIRST key
 /// is `reply` — so the readable part is the reply string as it grows, JSON
