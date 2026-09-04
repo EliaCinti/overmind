@@ -1,7 +1,7 @@
 # ADR-0048: A provider is a capability, not a name
 
 - **Date:** 2026-09-04
-- **Status:** proposed
+- **Status:** accepted
 - **Builds on:** [ADR-0030](0030-how-you-pay-is-a-first-class-fact.md) (the economy is detected, never configured), [ADR-0037](0037-who-pays-is-asked.md) (who pays is asked, and can be chosen), [ADR-0023](0023-os-level-sandboxing.md) (every agent run is caged)
 
 ## Context
