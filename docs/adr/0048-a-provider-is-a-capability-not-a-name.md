@@ -15,9 +15,14 @@ The owner wants agents on models other than Claude's — added with an API key, 
 | Claude Code | Pro / Max, via `setup-token` | yes — **both, today** |
 | OpenAI Codex CLI | ChatGPT Plus, Pro, Business, Edu, Enterprise (browser login or `codex login --device-auth`) | yes |
 | Gemini CLI | a personal Google account (free Code Assist licence) or a paid Code Assist subscription; `oauth-personal` is its default | yes |
-| DeepSeek, Mistral, xAI, local models | none | key only, through an OpenAI-shaped endpoint |
+| xAI Grok Build | SuperGrok or X Premium+, signed in with an X account | yes |
+| DeepSeek, Mistral, local models | none | key only, through an OpenAI-shaped endpoint |
 
-One detail worth carrying rather than rediscovering: Codex's ChatGPT sign-in **auto-creates an API key** in the selected org, which can then quietly become the payer. That is the same deception Overmind already names for Anthropic — a key silently overriding a login — so `overrides_login` generalises. But it must be **asked of each CLI**, never assumed: the fact is real, its shape is not shared.
+**xAI was in the "key only" row of the first draft of this table, and the owner corrected it.** Grok Build is xAI's own terminal coding agent — headless mode (`grok exec`), Apache 2.0, v1.0 since 7 August 2026 — and it authenticates with an X account *or* an xAI API key, which puts it squarely in the same shape as the other three. Being wrong about it is instructive: the row was written from the assumption that xAI sells an API and nothing else, and one question from somebody who had actually looked was worth more than the assumption.
+
+It also lands on this ADR's central point by accident. Grok Build's documented budget control is `--max-turns`, a **count of turns**, where Claude Code's is `--max-budget-usd`, an **amount of money** — and whether `grok exec` reports what a turn cost in a machine-readable form is not documented anywhere public. So it may be exactly the case decision 2 is about: a capable provider, with a subscription, that Overmind would have to refuse for hiring until a recorded run proves it can be priced. The answer comes from running it, not from reading about it.
+
+One more detail worth carrying rather than rediscovering: Codex's ChatGPT sign-in **auto-creates an API key** in the selected org, which can then quietly become the payer. That is the same deception Overmind already names for Anthropic — a key silently overriding a login — so `overrides_login` generalises. But it must be **asked of each CLI**, never assumed: the fact is real, its shape is not shared.
 
 **What it costs, measured rather than estimated.** `OVERMIND_AGENT_CMD` looks like an adapter seam and is not one. Counted 4 Sep 2026, in production code only:
 
@@ -79,7 +84,7 @@ No test spawns a real CLI, exactly as today: each provider ships a stub adapter 
 2. Codex CLI, complete — first because its subscription is the one most Overmind owners already pay for, and because its auto-created key exercises the payer logic hardest;
 3. the payer per provider, reusing the org view's control from [ADR-0037](0037-who-pays-is-asked.md): a company may reasonably run Claude on a plan and something else on a key;
 4. entitlement in the catalogue, then a company default — an agent cannot be hired onto a model this instance cannot run, and a company sets one default instead of ten decisions;
-5. Gemini CLI, once the trait has survived two.
+5. Gemini CLI, once the trait has survived two — with Grok Build a candidate for the same slot, decided by whether it can price a turn.
 
 **5. A provider is configured, never guessed.** Which providers exist on this instance is instance-level configuration, like the economy: named in the compose file, probed at boot, and reported by `/api/health`. Overmind does not scan `$PATH` hoping to find a CLI it recognises — a binary that happens to be present is not a decision somebody made.
 
