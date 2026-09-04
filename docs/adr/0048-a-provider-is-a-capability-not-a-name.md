@@ -43,13 +43,14 @@ That is the decision this ADR exists to make. The interface is the easy half.
 
 ## Decision
 
-**1. A provider is a trait, and its first implementation is the one that already exists.** `Provider` has eight members — `NEXT.md` had estimated six before anybody counted, and the survey above is where the other two came from:
+**1. A provider is a trait, and its first implementation is the one that already exists.** `Provider` has nine members — `NEXT.md` had estimated six before anybody counted, and the survey above is where the other two came from:
 
 | Member | What it answers | Where it lives today |
 |---|---|---|
 | `invoke` | how a turn is started, as an argv | `runner.rs:1169` |
 | `stream` | how a text delta and a draft reply are read | `text_delta_in`, `draft_reply` |
 | `cost` | what the turn cost, and in what tokens | `parse_cost` |
+| `bound` | how a run is stopped: an amount of money, or a count of turns | `--max-budget-usd` at `runner.rs:1190` |
 | `failure` | whether the turn failed, and in whose words | `adapter_failure` |
 | `session` | how a session is named, for resuming it | `parse_adapter_session_id` |
 | `economy` | who pays, asked of the CLI | `economy.rs::detect` |
@@ -60,7 +61,15 @@ Claude Code becomes an implementation of this and **nothing else changes**. No n
 
 **2. Capabilities are declared, and Overmind refuses what it cannot govern.** Each provider states what it can do, and the parts of Overmind that depend on a capability check for it rather than assuming it:
 
-- **`cost` is not optional.** An agent cannot be hired onto a provider that cannot report what a turn cost, and the refusal says why. The budget cap is a promise made in real money ([ADR-0030](0030-how-you-pay-is-a-first-class-fact.md)); a provider that cannot price a turn cannot be governed, and a cap that silently stops applying is worse than a cap that was never offered. This is the rule the comment above forced.
+- **A provider must be governable, in one of two ways.** The budget cap is the reason an owner lets agents run while not watching ([ADR-0030](0030-how-you-pay-is-a-first-class-fact.md)), and a cap that silently stops applying is worse than one never offered. So the rule is not "must report cost" but "must be bounded", and there are three cases:
+
+  - **It can price a turn** → a cap in money, exactly as today. Claude Code is here.
+  - **It cannot price a turn but can bound turns** → a cap **in turns**, and the interface says so in those words. Grok Build looks like this case: its documented control is `--max-turns`, a count.
+  - **Neither** → refused at hire time, with the reason. An agent nobody can stop is not a colleague, it is an open tap.
+
+  The second case is only honest if Overmind never pretends it is the first, and that takes more than a label. `governance.rs` computes spend as `COALESCE(SUM(cost_cents), 0)`, so an agent that never writes a cost event sums to **zero** — and "€0.00 spent" after a day of work does not read as *unmeasured*, it reads as *free*. A turn-capped agent therefore carries no money figure at all: its ledger says **not priced**, its cap is shown as *N turns*, and no euro amount is ever estimated from a turn count. A turn is not a unit of money — the same turn costs what its context costs — and converting one into the other would be inventing the number the provider refused to give, which is exactly what [ADR-0030](0030-how-you-pay-is-a-first-class-fact.md) exists to forbid.
+
+  The company total is where this leaks, and it must leak visibly: a company running both kinds cannot show one number. It shows the money its priced agents spent, **and beside it** how many agents are not priced — never a total that quietly omits them.
 - **`sign_in` is optional**, and its absence is a fact the interface states: this provider takes an API key, and that is the only way it pays. Most providers are here.
 - **`economy` may answer *unknown*,** and unknown stays unknown. [ADR-0030](0030-how-you-pay-is-a-first-class-fact.md)'s rule is unchanged and now applies per provider: Overmind does not invent an answer it could not obtain.
 - **`session` is optional.** A provider that cannot resume gets a fresh turn, and a conversation that would have resumed says so rather than silently starting over.
@@ -71,7 +80,8 @@ A capability is not a feature flag. It is a claim the provider makes, which Over
 
 - a turn invoked with a prompt and a model produces the prompt's answer;
 - a text delta arrives before the turn ends (the UI streams, or it is not streaming);
-- a completed turn reports a cost, or the provider declared it cannot and is refused at hire time;
+- a completed turn reports a cost — or, where the provider declared it cannot, a turn cap stops a run at the turn it names, the ledger says *not priced* rather than zero, and no euro figure appears anywhere for that agent;
+- a provider that declares neither is refused at hire time, in words that say what is missing;
 - a failed turn is recognised as failed, and the reason is the provider's own words, not ours;
 - the economy probe answers with one of the four states and never guesses;
 - every model the catalogue offers for this provider can actually be invoked under at least one economy it declares.
@@ -98,10 +108,15 @@ No test spawns a real CLI, exactly as today: each provider ships a stub adapter 
 
 **Let a provider that cannot report cost run anyway, with a warning.** Rejected on the strength of the comment in `runner.rs`. A warning at hire time is read once; a cap that does not apply is discovered at the invoice. Overmind's budget is the reason an owner lets agents run unattended, and a promise that quietly stops holding is worse than one never made.
 
+**Refuse every provider that cannot report cost, full stop.** This was the first draft of decision 2, and the owner asked for the turn cap instead — rightly. Refusing outright would have excluded Grok Build, which has a subscription, a headless mode and a real budget control, on the grounds that its control counts turns rather than euros. That is a narrower rule than the reason behind it: what the owner needs is to be able to *stop* an agent, and a turn cap stops one. The danger was never the unit — it was Overmind showing a number it did not measure, which decision 2 now forbids explicitly. Refusal survives only for the third case, a provider that can be bounded by nothing at all.
+
+**Estimate money from turns, so every agent has one comparable number.** Tempting, and wrong for the reason ADR-0030 already gives about the economy: an estimate presented beside measurements is read as a measurement. A turn's cost varies by the size of its context, by cache hits, by the model — an average would be confidently wrong on exactly the runs an owner cares about, the expensive ones. Better one honest gap in the column than a plausible number nobody can act on.
+
 ## Consequences
 
 - **Adding a provider becomes a bounded task**: one module, one declaration, one suite to pass. The first one costs the abstraction; that is why this is a milestone and not a patch.
-- **Some providers will be refused**, and will say why. That is the point, and it is a change in posture: Overmind currently accepts any `OVERMIND_AGENT_CMD` and hopes.
+- **Some providers will be refused**, and will say why — but only those nothing can bound. A provider that counts turns is welcome and says so in turns. This is still a change in posture: Overmind currently accepts any `OVERMIND_AGENT_CMD` and hopes.
+- **A company can hold two kinds of agent**, and its budget view grows a second figure rather than a wrong first one: money spent by priced agents, and a count of agents that are not priced. Single-provider instances never see it.
 - **`OVERMIND_AGENT_CMD` keeps working** and keeps meaning what it means today — an adapter Overmind cannot interrogate. It becomes a provider whose capabilities are all *unknown*, which is what the code already believes about it.
 - **The threat model grows a row per provider.** Each brings its own credential, its own storage, and its own sign-in; `docs/THREAT-MODEL.md` names the test that holds each, as it does for Claude's.
 - **The economy stops being singular.** `GET /api/health` reports a payer per configured provider, and the org view names them all. Existing single-provider instances read exactly as they do now.
