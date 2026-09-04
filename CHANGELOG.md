@@ -4,6 +4,10 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-04
+
+**You can choose who pays, and every install is its own instance.** Overmind went straight to an API key on any machine with `ANTHROPIC_API_KEY` exported, and offered no way to say "use my subscription instead" — both halves of that road were built and neither could be reached. The choice now lives on the org chart, where the money is read. And the installer lands beside you instead of in `$HOME`, which took giving each folder a real identity: without one, a second install would have adopted the first's containers and recreated them onto an empty `./data`.
+
 ### Changed
 
 - **The installer lands where you are, and each install is its own instance.** `curl … | sh` now makes `./overmind` beside you instead of `$HOME/overmind` — reported by the owner, who ran it from his Desktop and found nothing there. A subfolder rather than the bare working directory, so nothing is scattered into whatever directory you happened to be in; `OVERMIND_HOME` still overrides.
