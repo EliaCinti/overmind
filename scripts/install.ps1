@@ -66,14 +66,40 @@ it is ready, then run this installer again.
         Fail "This Docker has no 'compose' subcommand. Update Docker Desktop, then run this installer again."
     }
 
-    # 3 — the directory IS the installation (ADR-0047): the compose file lives
-    #     here and so do .\data and .\agent.
-    $dir = if ($env:OVERMIND_HOME) { $env:OVERMIND_HOME } else { Join-Path $HOME 'overmind' }
-    if (Test-Path (Join-Path $dir 'data\overmind.sqlite')) {
+    # 3 — the directory, and the identity that makes it an instance of its own.
+    #
+    #     It lands beside whoever ran the command, in .\overmind, because that
+    #     is where somebody goes looking for what a command just made — a
+    #     subfolder rather than the bare working directory, which would scatter
+    #     a compose file, a data\ and an agent\ into whatever you were in.
+    $dir = if ($env:OVERMIND_HOME) { $env:OVERMIND_HOME } else { Join-Path (Get-Location).Path 'overmind' }
+    # Absolute before anything compares it, and before it exists: OVERMIND_HOME
+    # may be relative and every path below is matched against Docker's.
+    if (-not [System.IO.Path]::IsPathRooted($dir)) { $dir = Join-Path (Get-Location).Path $dir }
+    # Resolved, not logical: Docker reports the resolved path, so an unresolved
+    # one never matches and the installer reports your own instance as one that
+    # lives elsewhere.
+    $_p = Split-Path $dir -Parent
+    if (Test-Path $_p) { $dir = Join-Path (Resolve-Path $_p).Path (Split-Path $dir -Leaf) }
+    # Asked before the folder is made, or answering "update that one instead"
+    # leaves an empty .\overmind behind in whatever directory you were in.
+    # What makes a folder an install is the compose file the installer writes
+    # there — never data\overmind.sqlite, because ADR-0047 lets OVERMIND_DATA
+    # put the database anywhere, and then an existing instance looks brand new.
+    if (-not (Test-Path (Join-Path $dir 'docker-compose.yml'))) {
+        $dir = Show-Elsewhere $dir
+    }
+    try {
+        New-Item -ItemType Directory -Force -Path $dir -ErrorAction Stop | Out-Null
+    } catch {
+        Fail "Cannot create $dir - this directory is not writable by you. Run it somewhere you own, or set `$env:OVERMIND_HOME first."
+    }
+    Set-Location $dir
+    $dir = (Get-Location).Path
+    if (Test-Path (Join-Path $dir 'docker-compose.yml')) {
         Write-Host "There is already an Overmind in $dir - updating it in place."
     }
-    New-Item -ItemType Directory -Force -Path $dir | Out-Null
-    Set-Location $dir
+    Write-Identity
 
     # 4 — the compose file, from this script's own release, checked.
     $url = "https://github.com/EliaCinti/overmind/releases/download/$Tag/docker-compose.yml"
@@ -97,7 +123,7 @@ Nothing was installed.
     if ($LASTEXITCODE -ne 0) { Fail "Docker could not start Overmind. The output above says why." }
 
     # 6 — wait, then the URL and the code, read from the file the server wrote.
-    $port = Get-ComposePort
+    $port = Get-InstancePort
     for ($i = 0; $i -lt 90; $i++) {
         try {
             Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 2 | Out-Null
@@ -154,8 +180,175 @@ function Fail([string]$Message) {
     exit 1
 }
 
+# Every Overmind this engine knows of, running or stopped, wherever it lives
+# and whatever its folder is called. Asked of Docker rather than guessed at by
+# scanning paths: the /data bind mount names the install directory exactly, so
+# an instance whose folder was renamed is still found, and a folder merely
+# CALLED overmind with nothing in it is correctly not one.
+function Get-KnownInstances {
+    $found = @()
+    $ids = @(docker ps -a --format '{{.ID}} {{.Image}}' 2>$null |
+             Where-Object { $_ -match 'overmind' } |
+             ForEach-Object { ($_ -split ' ')[0] })
+    foreach ($id in $ids) {
+        # Compose records the directory it was run from: that is the install,
+        # exactly, and it survives OVERMIND_DATA pointing the data elsewhere -
+        # which arithmetic on the /data mount does not.
+        $d = docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' $id 2>$null
+        if (-not $d) {
+            $src = docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' $id 2>$null
+            if ($src -and ((Split-Path $src -Leaf) -eq 'data')) { $d = Split-Path $src -Parent }
+        }
+        if ($d -and (Test-Path (Join-Path $d 'docker-compose.yml'))) { $found += $d }
+    }
+    return ($found | Sort-Object -Unique)
+}
+
+# Installing beside an Overmind that already exists is safe — separate
+# project, container and port — but it is rarely what somebody meant, and
+# finding out later is expensive. Said before it happens, with the choice
+# offered rather than assumed. Where there is no console to ask on, the safe
+# thing happens: the new instance nobody has to undo.
+function Show-Elsewhere([string]$dir) {
+    $others = @(Get-KnownInstances | Where-Object { $_ -ne $dir })
+    if ($others.Count -eq 0) { return $dir }
+
+    Write-Host ""
+    Write-Host "  Overmind is already installed on this machine:"
+    Write-Host ""
+    foreach ($o in $others) { Write-Host "      $o" }
+    Write-Host ""
+    Write-Host "  Installing here makes a SECOND, separate instance: its own data, its own"
+    Write-Host "  container, its own port. Nothing above is touched."
+    Write-Host ""
+
+    if (($others.Count -ne 1) -or [Console]::IsOutputRedirected) {
+        # Not "run this from its folder": the installer makes .\overmind
+        # beside you, so from the instance folder that is a third instance
+        # nested inside the one you meant to update.
+        Write-Host "  Installing here. To update one of those instead: cd <that folder> ; docker compose up -d --pull always"
+        return $dir
+    }
+    $answer = Read-Host "    [u] update that one instead   [n] new instance here   [q] quit"
+    switch -Regex ($answer) {
+        '^[uU]' {
+            Write-Host "Updating the Overmind in $($others[0])."
+            return $others[0]
+        }
+        '^[qQ]' { Fail "Nothing was installed." }
+        default {
+            Write-Host "Installing a second instance in $dir."
+            return $dir
+        }
+    }
+}
+
+# What makes THIS folder an instance rather than a name collision.
+#
+# Compose names a project after its directory, and every default install is a
+# directory called 'overmind' - so two of them would be one project: one set
+# of containers, one published port, and an 'up' in the second recreating the
+# first onto this folder's empty .\data. The identity comes from the whole
+# path instead, written where Compose reads it.
+#
+# Written once and never rewritten: re-running here must not rename a project
+# out from under containers already running under the old name.
+function Write-Identity {
+    # The keys, not the file. ADR-0047 tells people to put OVERMIND_DATA in
+    # this very file, so a .env that exists is not a .env that names an
+    # instance - and returning on one that only relocates the data left the
+    # install with no project name, which is the collision this prevents.
+    if ((Test-Path '.env') -and
+        (Select-String -Path '.env' -Pattern '^COMPOSE_PROJECT_NAME=' -Quiet) -and
+        (Select-String -Path '.env' -Pattern '^OVERMIND_NAME=' -Quiet) -and
+        (Select-String -Path '.env' -Pattern '^OVERMIND_PORT=' -Quiet)) { return }
+    if (Test-Path 'docker-compose.yml') {
+        # Older than this file. Compose has been naming its containers after
+        # the directory all along, so keep exactly that - inventing a new name
+        # here would orphan a container that is running right now.
+        # Compose's own normalisation: lowercase, drop what is outside
+        # [a-z0-9_-], THEN trim leading _ and -. Missing that last step pins a
+        # name Compose never used, orphaning the container running right now.
+        $project = ((Split-Path $dir -Leaf).ToLower() -replace '[^a-z0-9_-]', '').TrimStart('_', '-')
+        if (-not $project) { $project = 'overmind' }
+        $port = Get-ComposePort
+    } else {
+        $project = "overmind-$(Get-PathSlug)"
+        $port = Get-FreePort
+    }
+    # Appended, never written over: anything already here is somebody's
+    # setting - OVERMIND_DATA above all - and only missing keys are added.
+    # Written with explicit LF so the two installers produce the same bytes;
+    # a CRLF would leave a carriage return inside the project name.
+    $lines = @()
+    if (-not (Test-Path '.env')) {
+        $lines += @(
+            "# Written by the installer, and read by every 'docker compose' you run here.",
+            "# It is what makes this folder its own instance: Compose names a project after",
+            "# its directory, and every default install is a directory called 'overmind'.",
+            "# Two of them without these names would be ONE project - one set of containers,",
+            "# one port - and starting the second would recreate the first onto this",
+            "# folder's empty .\data.",
+            "#",
+            "# Moving this folder is still how you move the instance. Change these only if",
+            "# you also mean to give the instance a different name or address."
+        )
+    }
+    $have = if (Test-Path '.env') { Get-Content '.env' } else { @() }
+    if (-not ($have | Where-Object { $_ -match '^COMPOSE_PROJECT_NAME=' })) { $lines += "COMPOSE_PROJECT_NAME=$project" }
+    # A project name somebody chose by hand is the name of this instance, so
+    # the container follows it rather than carrying an invented second one.
+    $chosenName = ($have | Where-Object { $_ -match '^COMPOSE_PROJECT_NAME=(.*)' } | Select-Object -First 1)
+    if ($chosenName -and ($chosenName -match '^COMPOSE_PROJECT_NAME=(.+)')) { $project = $Matches[1] }
+    if (-not ($have | Where-Object { $_ -match '^OVERMIND_NAME=' }))        { $lines += "OVERMIND_NAME=$project" }
+    if (-not ($have | Where-Object { $_ -match '^OVERMIND_PORT=' }))        { $lines += "OVERMIND_PORT=$port" }
+    if ($lines.Count -gt 0) {
+        $text = ($lines -join "`n") + "`n"
+        [System.IO.File]::AppendAllText((Join-Path (Get-Location).Path '.env'), $text)
+    }
+}
+
+# Eight hex of the folder's full path: stable across runs, different for every
+# folder, short enough to read in 'docker ps'.
+function Get-PathSlug {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($dir))
+    return (($bytes | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 8)
+}
+
+# This folder's port.
+#
+# Nothing is probed, and that is the point. "Is anything listening right now"
+# says free for every instance that is merely stopped, and says free again for
+# a foreign service answering an error. The right question is who else EXISTS,
+# and Docker has already answered it. Deterministic, so the same folder is
+# always the same address and two folders differ without anyone running.
+function Get-FreePort {
+    $others = @(Get-KnownInstances | Where-Object { $_ -ne $dir })
+    if ($others.Count -eq 0) { return 7070 }
+    $n = 0
+    foreach ($b in [System.Text.Encoding]::UTF8.GetBytes($dir)) { $n = ($n * 31 + $b) % 100000 }
+    return (7071 + ($n % 29))
+}
+
+# This instance's port: what the identity says, falling back to the compose
+# file for an install that predates .env or a file edited by hand.
+function Get-InstancePort {
+    if (Test-Path '.env') {
+        $line = Select-String -Path '.env' -Pattern '^OVERMIND_PORT=(\d+)' | Select-Object -First 1
+        if ($line) { return [int]$line.Matches[0].Groups[1].Value }
+    }
+    return Get-ComposePort
+}
+
 # The published port, read from the compose file rather than assumed.
 function Get-ComposePort {
+    # Either the default inside ${OVERMIND_PORT:-NNNN} or a literal port: the
+    # compose file grew the variable and the literal pattern stopped matching,
+    # so this silently answered 7070 for everyone - including somebody who had
+    # edited the default to something else.
+    $m = Select-String -Path 'docker-compose.yml' -Pattern '127\.0\.0\.1:\$\{OVERMIND_PORT:-(\d+)\}:7070' | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
     $m = Select-String -Path 'docker-compose.yml' -Pattern '127\.0\.0\.1:(\d+):7070' | Select-Object -First 1
     if ($m) { return $m.Matches[0].Groups[1].Value }
     return '7070'

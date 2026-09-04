@@ -31,6 +31,14 @@
 # container name, and `docker compose down` in one would stop the other.
 # Compose takes the project from the directory, so two folders are two
 # instances -- which is what "the folder is the installation" has to mean.
+#
+# That reasoning holds only while the folders have DIFFERENT names, and since
+# 3 Sep 2026 the installer makes a folder called `overmind` beside whoever ran
+# it -- so every default install would share one project. The identity is
+# written into a `.env` beside this file instead: COMPOSE_PROJECT_NAME,
+# OVERMIND_NAME and OVERMIND_PORT, derived from the folder's full path. Absent
+# that file the defaults below are the old single-instance behaviour, which is
+# right for anyone who put this file somewhere by hand.
 
 services:
   overmind:
@@ -58,7 +66,7 @@ services:
       # owner account before you share the address (ADR-0032, ADR-0033). For a
       # public hostname, terminate TLS in a reverse proxy that preserves Host
       # and set OVERMIND_COOKIE_SECURE=on. Never "0.0.0.0:7070:7070".
-      - "127.0.0.1:7070:7070"
+      - "127.0.0.1:${OVERMIND_PORT:-7070}:7070"
     volumes:
       # THE FOLDER THIS FILE IS IN *IS* THE INSTALLATION (ADR-0047). Docker
       # creates it on the first start; everything Overmind keeps lives here,
