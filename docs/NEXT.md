@@ -70,6 +70,7 @@ The order is backwards for a reason that no longer holds. The probe reads the ma
 Small, and it touches the cage's command construction, so it wants its own change rather than a corner of another one.
 
 ### More than one mind for hire *(a second provider, and who pays for it)*
+**Designed in [ADR-0048](adr/0048-a-provider-is-a-capability-not-a-name.md), 4 Sep 2026.** The survey there supersedes the estimate below in two places: the seam is nine members rather than six, and the hard part is not the interface — it is that a provider which cannot report what a turn cost makes the budget cap silently stop applying, because `runner.rs` treats a missing cost as ordinary.
 *Asked 3 Sep 2026, after the payer gap below.* The owner wants agents on models other than Claude's — added with an API key, and where the provider allows it, with a subscription. The subscription question has a real answer, and it is more encouraging than expected; the engineering question has a harder one.
 
 **Who actually allows a subscription, checked 3 Sep 2026.** All three major agent CLIs do, which means Overmind's existing shape — drive a CLI, ask it who pays — is the right shape for all three rather than a Claude-only trick:
