@@ -251,7 +251,7 @@ pub async fn record_turn_cost(
     agent_id: &str,
     output: &str,
 ) {
-    let Some(cost) = crate::runner::parse_cost(output) else {
+    let Some(cost) = crate::provider::current().cost(output) else {
         return;
     };
     let now = chrono::Utc::now().to_rfc3339();
