@@ -36,6 +36,34 @@ pub struct ParsedCost {
     pub cost_cents: i64,
 }
 
+/// How a run is stopped before it costs more than it may.
+///
+/// One variant today because one provider ships today. ADR-0048's second case
+/// — a provider that cannot price a turn but can count them — attaches here as
+/// `Turns(u32)` when the provider that needs it arrives, rather than being
+/// built now against nothing: an unexercised variant is a guess about a wire
+/// format nobody has run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bound {
+    /// Stop when this many cents have been spent.
+    Money { cents: i64 },
+}
+
+/// Everything about one turn that changes the command, and nothing else.
+///
+/// A struct rather than four positional arguments because the list grows: each
+/// provider added is a chance to pass `caged` where `mcp` was meant, and the
+/// compiler cannot see the mistake when both are the same shape.
+pub struct TurnSpec<'a> {
+    /// Whether the run is inside the OS cage (ADR-0023). Some adapters take a
+    /// flag that is only safe when something else is enforcing the boundary.
+    pub caged: bool,
+    /// The MCP servers this run may reach, and only those.
+    pub mcp_config: Option<&'a std::path::Path>,
+    /// What stops it, if anything does.
+    pub bound: Option<Bound>,
+}
+
 /// One CLI Overmind knows how to drive.
 ///
 /// Every method reads what the adapter emitted and answers `None` when this
@@ -45,6 +73,18 @@ pub struct ParsedCost {
 pub trait Provider: Send + Sync {
     /// The name this provider is configured and reported under.
     fn id(&self) -> &'static str;
+
+    /// The shell command that runs one turn.
+    ///
+    /// Returned as a string because the cage runs it through a shell
+    /// (ADR-0023), which is also why anything interpolated from a path must be
+    /// quoted by the implementation — the caller cannot know which parts of
+    /// the string are yours.
+    ///
+    /// Not consulted at all when `OVERMIND_AGENT_CMD` is set: that names a
+    /// command Overmind was told to run and did not compose, the same reason
+    /// `economy.rs` refuses to interrogate a custom adapter.
+    fn invoke(&self, spec: &TurnSpec<'_>) -> String;
 
     /// The text this line adds to the answer being streamed, if it adds any.
     ///

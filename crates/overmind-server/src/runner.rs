@@ -1072,88 +1072,30 @@ pub(crate) fn trait_model(traits_json: &str) -> String {
         .unwrap_or_else(|| crate::model::default_model().id.to_string())
 }
 
-/// The adapter invocation (ADR-0021). Configurable — tests use a stub — and the
-/// default drives the Claude Code CLI headless, on the model the agent is
-/// actually characterized for. Until M14 slice 3 this string existed in two
-/// copies and named no model at all, so `AgentTraits.model` was decorative.
-/// Single-quote a path for the shell the agent command runs through.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 pub(crate) fn agent_command(
     state: &AppState,
     caged: bool,
     mcp_config: Option<&Path>,
     ceiling_cents: Option<i64>,
 ) -> String {
+    // Told, not composed: a configured command is run exactly as written, and
+    // no provider is consulted about it. Same reason `economy.rs` will not
+    // interrogate a custom adapter — we did not write it and it signed no
+    // contract with us.
     if let Some(configured) = state.config.agent_cmd.clone() {
         return configured;
     }
-    // `stream-json` rather than `json`, and the reason is not the streaming.
-    //
-    // A stream run emits a `rate_limit_event` carrying the subscription's
-    // current window, when it resets, and whether we are still allowed inside
-    // it (ADR-0030). A `-p json` run does not, and the status line that would
-    // otherwise carry it is never invoked headless — measured, not assumed. So
-    // this is how the plan's state **rides along with work already being done**
-    // instead of costing a call of its own, the same bargain ADR-0026 made for
-    // memory watermarks.
-    //
-    // The final `result` event is the identical envelope `json` produced, so
-    // cost parsing and failure reporting read exactly what they always did.
-    // `--verbose` is not optional here: the CLI refuses `stream-json` under
-    // `--print` without it.
-    let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
-                   --output-format stream-json --verbose --include-partial-messages"
-        .to_string();
-    // The cap, handed to the adapter itself (ADR-0030). Since M6 the gate has
-    // been *around* the run: check, reserve, spawn, record. What it could not do
-    // is stop a run already under way, so an agent could overrun by the whole
-    // difference between the flat estimate and one turn's true cost — M18 said
-    // exactly that and left it open.
-    //
-    // This narrows it rather than closing it, and the difference matters:
-    // measured, a $0.05 ceiling recorded $0.080729, because the flag stops
-    // *after* exceeding rather than pre-authorising. So the gate stays the
-    // primary control and this is the second layer, which is also why it is
-    // passed in every economy: under a subscription the cap is not money, but a
-    // looping agent burns quota just the same and the brake is the same brake.
-    //
     // Only when there is something to promise: an uncapped agent gets no
-    // ceiling, and a zero one would refuse the run at the first token — the
-    // gate has already decided whether it may start.
-    if let Some(cents) = ceiling_cents.filter(|c| *c > 0) {
-        cmd.push_str(&format!(
-            " --max-budget-usd {}",
-            crate::governance::dollars(cents)
-        ));
-    }
-    // `--strict-mcp-config` matters as much as the config itself: without it the
-    // CLI merges whatever MCP servers the machine's own configuration happens to
-    // hold, and a caged agent would quietly inherit tools nobody granted it.
-    if let Some(p) = mcp_config {
-        cmd.push_str(&format!(
-            " --mcp-config {} --strict-mcp-config",
-            shell_quote(&p.to_string_lossy())
-        ));
-    }
-    // Headless has nobody to ask. The CLI's permission system assumes a person
-    // at a terminal, so in `-p` mode every Edit, Write and Bash is denied and
-    // the agent can only read — which is how the smoke run found that no `code`
-    // task had ever produced a diff against the real adapter. Stubs are shell
-    // scripts and write freely, so every test was green over it.
-    //
-    // The flag is safe *here and only here*: ADR-0023 moved enforcement to the
-    // OS, and a caged agent can write to its run directory and nowhere else,
-    // with no credentials to push anything. Asking a permission question nobody
-    // can answer is not a second boundary, it is a deadlock. Uncaged, we do not
-    // pass it: the CLI's own prompt is then the only thing left, and a
-    // read-only agent beats an unconstrained one.
-    if caged {
-        cmd.push_str(" --dangerously-skip-permissions");
-    }
-    cmd
+    // ceiling, and a zero one would refuse the run at its first token — the
+    // gate has already decided whether it may start at all.
+    let bound = ceiling_cents
+        .filter(|c| *c > 0)
+        .map(|cents| crate::provider::Bound::Money { cents });
+    crate::provider::current().invoke(&crate::provider::TurnSpec {
+        caged,
+        mcp_config,
+        bound,
+    })
 }
 
 /// Resume a session that is marked queued/running in the DB but has no live
@@ -2275,7 +2217,13 @@ mod ceiling_tests {
     use super::agent_command;
     use crate::db::AppState;
     use crate::governance::{BudgetCheck, dollars};
-    use crate::provider::claude_code::adapter_failure;
+    // Through the trait, not at `failure_words` behind it: `Provider::failure`
+    // is what a run calls, and it is where the clamp lives — a test that
+    // reached under the boundary would stay green through a broken dispatch.
+    use crate::provider::{Provider, claude_code::ClaudeCode};
+    fn adapter_failure(output: &str) -> Option<String> {
+        ClaudeCode.failure(output)
+    }
 
     async fn default_state() -> AppState {
         crate::db::init_with("sqlite::memory:", crate::Config::default())

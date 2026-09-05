@@ -13,7 +13,7 @@
 
 use serde_json::{Value, json};
 
-use super::{ParsedCost, Provider};
+use super::{Bound, ParsedCost, Provider, TurnSpec};
 
 /// The provider itself holds nothing: every answer is a pure function of the
 /// bytes the CLI produced.
@@ -22,6 +22,10 @@ pub struct ClaudeCode;
 impl Provider for ClaudeCode {
     fn id(&self) -> &'static str {
         "claude-code"
+    }
+
+    fn invoke(&self, spec: &TurnSpec<'_>) -> String {
+        build_command(spec)
     }
 
     fn text_delta(&self, line: &str) -> Option<String> {
@@ -43,6 +47,89 @@ impl Provider for ClaudeCode {
     fn session_id(&self, output: &str) -> Option<String> {
         parse_adapter_session_id(output)
     }
+}
+
+/// The adapter invocation (ADR-0021): the Claude Code CLI, headless, on the
+/// model the agent is characterized for.
+fn build_command(spec: &TurnSpec<'_>) -> String {
+    // `stream-json` rather than `json`, and the reason is not the streaming.
+    //
+    // A stream run emits a `rate_limit_event` carrying the subscription's
+    // current window, when it resets, and whether we are still allowed inside
+    // it (ADR-0030). A `-p json` run does not, and the status line that would
+    // otherwise carry it is never invoked headless — measured, not assumed. So
+    // this is how the plan's state **rides along with work already being done**
+    // instead of costing a call of its own, the same bargain ADR-0026 made for
+    // memory watermarks.
+    //
+    // The final `result` event is the identical envelope `json` produced, so
+    // cost parsing and failure reporting read exactly what they always did.
+    // `--verbose` is not optional here: the CLI refuses `stream-json` under
+    // `--print` without it.
+    let mut cmd = "claude -p \"$OVERMIND_TASK_PROMPT\" --model \"$OVERMIND_AGENT_MODEL\" \
+                   --output-format stream-json --verbose --include-partial-messages"
+        .to_string();
+    // The cap, handed to the adapter itself (ADR-0030). Since M6 the gate has
+    // been *around* the run: check, reserve, spawn, record. What it could not do
+    // is stop a run already under way, so an agent could overrun by the whole
+    // difference between the flat estimate and one turn's true cost — M18 said
+    // exactly that and left it open.
+    //
+    // This narrows it rather than closing it, and the difference matters:
+    // measured, a $0.05 ceiling recorded $0.080729, because the flag stops
+    // *after* exceeding rather than pre-authorising. So the gate stays the
+    // primary control and this is the second layer, which is also why it is
+    // passed in every economy: under a subscription the cap is not money, but a
+    // looping agent burns quota just the same and the brake is the same brake.
+    //
+    // Only when there is something to promise: an uncapped agent gets no
+    // ceiling, and a zero one would refuse the run at the first token — the
+    // gate has already decided whether it may start.
+    // A `match` where an `if let` would do, on purpose: when ADR-0048's second
+    // case arrives and `Bound` grows `Turns`, the compiler stops here and makes
+    // somebody decide what this CLI does with a count. An `if let` would have
+    // silently ignored it and shipped an unbounded run.
+    match spec.bound {
+        // `cents` is filtered by the caller too, and checked again here: this
+        // is where the comment above promises it, `Bound::Money` accepts any
+        // i64, and `governance::dollars(-5)` formats as "0.-5" — a flag the
+        // CLI would reject, from a number nobody meant.
+        Some(Bound::Money { cents }) if cents > 0 => cmd.push_str(&format!(
+            " --max-budget-usd {}",
+            crate::governance::dollars(cents)
+        )),
+        Some(Bound::Money { .. }) | None => {}
+    }
+    // `--strict-mcp-config` matters as much as the config itself: without it the
+    // CLI merges whatever MCP servers the machine's own configuration happens to
+    // hold, and a caged agent would quietly inherit tools nobody granted it.
+    if let Some(p) = spec.mcp_config {
+        cmd.push_str(&format!(
+            " --mcp-config {} --strict-mcp-config",
+            shell_quote(&p.to_string_lossy())
+        ));
+    }
+    // Headless has nobody to ask. The CLI's permission system assumes a person
+    // at a terminal, so in `-p` mode every Edit, Write and Bash is denied and
+    // the agent can only read — which is how the smoke run found that no `code`
+    // task had ever produced a diff against the real adapter. Stubs are shell
+    // scripts and write freely, so every test was green over it.
+    //
+    // The flag is safe *here and only here*: ADR-0023 moved enforcement to the
+    // OS, and a caged agent can write to its run directory and nowhere else,
+    // with no credentials to push anything. Asking a permission question nobody
+    // can answer is not a second boundary, it is a deadlock. Uncaged, we do not
+    // pass it: the CLI's own prompt is then the only thing left, and a
+    // read-only agent beats an unconstrained one.
+    if spec.caged {
+        cmd.push_str(" --dangerously-skip-permissions");
+    }
+    cmd
+}
+
+/// Single-quote a path for the shell the agent command runs through.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// The text delta inside a partial-message event, if this line is one.
@@ -123,7 +210,7 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
     // there, found no `is_error`, and answered None -- so a run whose real
     // envelope said "Credit balance is too low" was reported as "agent exited
     // with code 1", which is the one outcome this function exists to prevent.
-    let envelope = last_json_object(output)?;
+    let envelope = crate::ceo::last_json_object(output)?;
     if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
         return None;
     }
@@ -140,9 +227,27 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
             .and_then(|e| e.first())
             .and_then(Value::as_str)
             .unwrap_or("the run reached its budget ceiling");
-        return Some(format!(
-            "stopped at this agent's budget cap — {said}. Raise the cap to let it continue."
-        ));
+        // Composed so the remedy outlives a talkative adapter.
+        //
+        // `Provider::failure` clamps whatever it is given, so interpolating a
+        // 50,000-character `errors[0]` and clamping afterwards cut the tail --
+        // leaving a person told they were stopped and NOT told what to do,
+        // which is the whole reason this branch exists instead of falling
+        // through. So the adapter's half is cut to what is left after ours,
+        // and the sentence arrives whole.
+        const HEAD: &str = "stopped at this agent's budget cap — ";
+        const TAIL: &str = ". Raise the cap to let it continue.";
+        let room =
+            crate::ceo::MAX_AGENT_TEXT.saturating_sub(HEAD.chars().count() + TAIL.chars().count());
+        let said: String = if said.chars().count() > room {
+            said.chars()
+                .take(room.saturating_sub(1))
+                .chain(['…'])
+                .collect()
+        } else {
+            said.to_string()
+        };
+        return Some(format!("{HEAD}{said}{TAIL}"));
     }
     // Otherwise whatever the adapter said, preferring its prose and falling
     // back to its error list — `Credit balance is too low` arrived in the first
@@ -164,22 +269,9 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
     Some(said.to_string())
 }
 
-fn last_json_object(output: &str) -> Option<Value> {
-    for line in output.lines().rev() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            return Some(v);
-        }
-    }
-    None
-}
-
 /// The adapter's own session id (e.g. Claude Code's), used for `--resume`.
 fn parse_adapter_session_id(output: &str) -> Option<String> {
-    last_json_object(output)?
+    crate::ceo::last_json_object(output)?
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -188,7 +280,7 @@ fn parse_adapter_session_id(output: &str) -> Option<String> {
 /// Find the last line of output that is a JSON object carrying
 /// `total_cost_usd`, and extract cost + usage from it.
 pub(crate) fn parse_cost(output: &str) -> Option<ParsedCost> {
-    let v = last_json_object(output)?;
+    let v = crate::ceo::last_json_object(output)?;
     let usd = v.get("total_cost_usd").and_then(Value::as_f64)?;
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));
     let tok = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
@@ -369,6 +461,16 @@ mod what_the_boundary_exposed {
             said.chars().count()
         );
         assert!(said.contains("budget cap"), "it still says what happened");
+        // And the half that is worth reading. Clamping the whole sentence put
+        // the adapter's words FIRST and the remedy last, so a talkative
+        // adapter pushed "raise the cap" past the cut -- leaving a person told
+        // they were stopped and not told what to do, which is the entire
+        // reason this branch exists rather than falling through.
+        assert!(
+            said.contains("Raise the cap"),
+            "the remedy survived the clamp: {}",
+            &said[said.len().saturating_sub(80)..]
+        );
     }
 
     /// The scan took the last line that parsed as *any* JSON — a bare number,
