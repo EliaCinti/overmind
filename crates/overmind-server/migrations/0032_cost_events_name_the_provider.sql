@@ -1,0 +1,12 @@
+-- `cost_events.provider` says which adapter produced the spend, and until now
+-- every row was written with the literal "anthropic" — the vendor, not the CLI.
+--
+-- ADR-0048 makes a provider a *program Overmind drives*: Claude Code, Codex
+-- CLI, Gemini CLI. The vendor is the wrong unit for that. Google ships two
+-- different agents; a vendor name cannot tell them apart, and the per-provider
+-- spend the ADR promises would file both under "google".
+--
+-- Rewritten here rather than left to diverge, while exactly one value exists
+-- to be wrong about. After this the column holds `Provider::id()` and nothing
+-- else, so a row's provider and a configured provider are the same string.
+UPDATE cost_events SET provider = 'claude-code' WHERE provider = 'anthropic';

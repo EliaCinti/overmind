@@ -210,6 +210,25 @@ pub(crate) fn activity_in(line: &str) -> Option<serde_json::Value> {
     None
 }
 
+/// The last JSON object in the output that carries `field`.
+///
+/// Not simply the last object: `run_process` appends stderr to stdout before
+/// anything parses this, so a diagnostic the CLI wrote to stderr is the last
+/// object in the buffer while the result envelope sits above it. Asking for
+/// the field being read makes each reader find its own envelope and ignore
+/// everything that is not one — a warning on stderr used to cost the failure
+/// message, the ledger row and the resumable session id, all three silently.
+fn last_object_with(output: &str, field: &str) -> Option<Value> {
+    output.lines().rev().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            return None;
+        }
+        let v: Value = serde_json::from_str(line).ok()?;
+        v.get(field).is_some().then_some(v)
+    })
+}
+
 /// What the adapter said went wrong, when it said anything.
 ///
 /// "agent exited with code 1" is true and useless. The Claude Code CLI puts the
@@ -223,7 +242,7 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
     // there, found no `is_error`, and answered None -- so a run whose real
     // envelope said "Credit balance is too low" was reported as "agent exited
     // with code 1", which is the one outcome this function exists to prevent.
-    let envelope = crate::ceo::last_json_object(output)?;
+    let envelope = last_object_with(output, "is_error")?;
     if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
         return None;
     }
@@ -284,7 +303,7 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
 
 /// The adapter's own session id (e.g. Claude Code's), used for `--resume`.
 fn parse_adapter_session_id(output: &str) -> Option<String> {
-    crate::ceo::last_json_object(output)?
+    last_object_with(output, "session_id")?
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -293,7 +312,7 @@ fn parse_adapter_session_id(output: &str) -> Option<String> {
 /// Find the last line of output that is a JSON object carrying
 /// `total_cost_usd`, and extract cost + usage from it.
 pub(crate) fn parse_cost(output: &str) -> Option<ParsedCost> {
-    let v = crate::ceo::last_json_object(output)?;
+    let v = last_object_with(output, "total_cost_usd")?;
     let usd = v.get("total_cost_usd").and_then(Value::as_f64)?;
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));
     let tok = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
@@ -483,6 +502,36 @@ mod what_the_boundary_exposed {
             said.contains("Raise the cap"),
             "the remedy survived the clamp: {}",
             &said[said.len().saturating_sub(80)..]
+        );
+    }
+
+    /// `run_process` appends stderr to stdout before anything parses it, so a
+    /// diagnostic object written to stderr becomes the LAST json object in the
+    /// buffer — and "the last object" was how all three readers found the
+    /// envelope. The result envelope is not merely last; it is the one
+    /// carrying the field being asked about.
+    #[test]
+    fn a_diagnostic_on_stderr_does_not_shadow_the_result_envelope() {
+        let out = concat!(
+            r#"{"is_error":true,"result":"Credit balance is too low","total_cost_usd":0.5,"session_id":"abc","type":"result"}"#,
+            "\n--- stderr ---\n",
+            r#"{"type":"warning","message":"deprecated flag"}"#,
+            "\n"
+        );
+        assert_eq!(
+            ClaudeCode.failure(out).as_deref(),
+            Some("Credit balance is too low"),
+            "the failure survives a stderr diagnostic"
+        );
+        assert_eq!(
+            ClaudeCode.cost(out).map(|c| c.cost_cents),
+            Some(50),
+            "so does the cost — a silently skipped ledger write is spend the cap never sees"
+        );
+        assert_eq!(
+            ClaudeCode.session_id(out).as_deref(),
+            Some("abc"),
+            "and the session id, without which a conversation cannot resume"
         );
     }
 

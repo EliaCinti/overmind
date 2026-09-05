@@ -1991,7 +1991,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .bind(&agent_id)
             .bind(&ctx.task_id)
             .bind(&ctx.session_id)
-            .bind("anthropic")
+            .bind(crate::provider::current().id())
             .bind(&cost.model)
             .bind(cost.input_tokens)
             .bind(cost.cached_input_tokens)
