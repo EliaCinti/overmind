@@ -987,7 +987,7 @@ async fn run_agent_turn_inner(
     // `agent_text` degrades to the raw stream itself. Bookkeeping is never a
     // reply: say what happened instead, with the window when it was reported.
     let reply = if looks_like_adapter_stream(&reply) {
-        match crate::economy::plan_window_in(&output) {
+        match crate::provider::current().plan_window(&output) {
             Some(w) => format!(
                 "The agent could not produce a reply: the subscription's {} window is exhausted. It resets at {}.",
                 w.window.replace('_', "-"),
@@ -1477,7 +1477,7 @@ pub(crate) async fn run_adapter(
     // *after* the money is settled, because a plan that has run out does not
     // make the turn we just paid for un-happen.
     let Ok(output) = &outcome else { return outcome };
-    let Some(window) = crate::economy::plan_window_in(output) else {
+    let Some(window) = crate::provider::current().plan_window(output) else {
         return outcome;
     };
     state.set_plan_window(window.clone());

@@ -14,6 +14,7 @@
 use serde_json::{Value, json};
 
 use super::{Bound, ParsedCost, Provider, TurnSpec};
+use crate::economy::{Economy, PlanHealth, PlanWindow, UnknownKind};
 
 /// The provider itself holds nothing: every answer is a pure function of the
 /// bytes the CLI produced.
@@ -42,6 +43,18 @@ impl Provider for ClaudeCode {
 
     fn failure_words(&self, output: &str) -> Option<String> {
         adapter_failure(output)
+    }
+
+    fn economy_probe(&self) -> (&'static str, &'static [&'static str]) {
+        ("claude", &["auth", "status", "--json"])
+    }
+
+    fn read_economy(&self, status: &Value) -> Economy {
+        read(status)
+    }
+
+    fn plan_window(&self, output: &str) -> Option<PlanWindow> {
+        plan_window_in(output)
     }
 
     fn session_id(&self, output: &str) -> Option<String> {
@@ -490,4 +503,76 @@ mod what_the_boundary_exposed {
             "the adapter's own words survive a trailing scalar"
         );
     }
+}
+
+/// Read the economy out of `claude auth status --json`.
+///
+/// Split from the probe so the rule can be tested against the payloads that
+/// were actually observed, rather than against shapes we imagined.
+pub(crate) fn read(status: &Value) -> Economy {
+    if status.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+        return Economy::Unknown {
+            kind: UnknownKind::NotSignedIn,
+            reason: "the agent CLI is not signed in".into(),
+        };
+    }
+    // Presence, not truthiness: the field is absent when no key is in play, and
+    // its value names *where* the key came from rather than what it is.
+    if status.get("apiKeySource").is_some_and(|v| !v.is_null()) {
+        // Here `authMethod` earns its keep — not for telling a key from a plan,
+        // which it cannot do, but for telling whether there is a login *behind*
+        // the key. With a key alone the CLI answers `api_key`; with a key over a
+        // login it answers `claude.ai`, naming the thing it is overriding.
+        let overrides_login = status.get("authMethod").and_then(Value::as_str) == Some("claude.ai");
+        return Economy::Key { overrides_login };
+    }
+    if let Some(plan) = status.get("subscriptionType").and_then(Value::as_str) {
+        return Economy::Subscription {
+            plan: Some(plan.to_string()),
+        };
+    }
+    // A long-lived token minted by `claude setup-token` (M23). The CLI's
+    // answer names no plan -- measured: {"loggedIn":true,"authMethod":
+    // "oauth_token","apiProvider":"firstParty"} and nothing else -- but
+    // setup-token itself requires a subscription, so the economy is the
+    // plan's, with its name unknown rather than invented.
+    if status.get("authMethod").and_then(Value::as_str) == Some("oauth_token") {
+        return Economy::Subscription { plan: None };
+    }
+    // Signed in, no key, no plan named. A shape we have not seen; saying so
+    // beats picking the branch that happens to be cheaper to implement.
+    Economy::Unknown {
+        kind: UnknownKind::Unreadable,
+        reason: "signed in, but the CLI named neither an API key nor a plan".into(),
+    }
+}
+
+/// The last plan report in an adapter's output, if it made one.
+///
+/// The adapter emits a `rate_limit_event` on a stream run, which is why the
+/// default command asks for `stream-json`: the plan's state then **rides along
+/// with work already being done** rather than costing a call of its own — the
+/// same bargain ADR-0026 made for memory watermarks.
+///
+/// The last one wins: a long run may report more than once, and the newest is
+/// the one still true.
+pub(crate) fn plan_window_in(output: &str) -> Option<PlanWindow> {
+    output
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("rate_limit_event"))
+        .find_map(|v| read_plan_window(v.get("rate_limit_info")?))
+}
+
+/// One `rate_limit_info` object, as measured on 2026-08-17.
+pub(crate) fn read_plan_window(info: &Value) -> Option<PlanWindow> {
+    Some(PlanWindow {
+        window: info
+            .get("rateLimitType")
+            .and_then(Value::as_str)?
+            .to_string(),
+        resets_at: info.get("resetsAt").and_then(Value::as_i64)?,
+        health: PlanHealth::read(info.get("status").and_then(Value::as_str)?)?,
+    })
 }

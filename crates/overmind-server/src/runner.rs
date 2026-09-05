@@ -1692,7 +1692,7 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             // What the run learned about the plan on its way past (ADR-0030).
             // Read from success and failure alike: a run that was *refused* for
             // running out is exactly the one whose report matters most.
-            if let Some(window) = crate::economy::plan_window_in(&output) {
+            if let Some(window) = crate::provider::current().plan_window(&output) {
                 ctx.state.set_plan_window(window);
             }
             let exit_code = out.status.code().unwrap_or(-1);
