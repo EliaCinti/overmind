@@ -28,6 +28,11 @@ Overmind and Wadachi are **separate projects with a privileged integration** (th
 
 The coupling is MCP plus process management; neither repo imports or vendors the other's code. Development, releases and websites stay separate.
 
+Stated in the vocabulary the field settled on in 2026 ([ADR-0049](adr/0049-the-harness-and-the-loop.md)): **Overmind is the harness** — the scaffolding outside the model that gives an agent a body, a cage, tools, a wallet and a memory — and the brain is the harness's *memory*, not a second harness. Two prohibitions make that structural contract functional. Both are **testable**, and the milestones that add them carry the tests:
+
+- **The memory provider never executes anything, and never decides when something starts.** No runner, no cage, no scheduler behind the MCP boundary. Point Overmind at any conforming server; none of them gets to start work.
+- **Overmind keeps no long-term knowledge of its own.** What outlives a session belongs to the provider — which is why removing the provider costs memory and nothing else.
+
 ## Pillars (in priority order)
 
 1. **Accountability** — immutable audit log, atomic task checkout, atomic budget enforcement. If we can't prove what an agent did and what it cost, the feature doesn't ship.

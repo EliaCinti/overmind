@@ -254,6 +254,28 @@
     </div>
   </section>
 
+  <section id="harness">
+    <h2>The word for what Overmind is: a <em>harness</em>.</h2>
+    <p class="lede">A stack has formed under AI agents — <strong>prompt → context → harness → loop</strong>. Prompt engineering was wording one request well; context engineering was curating what the model sees. Both hit the same wall: the window fills, quality degrades, and summarising to make room buys that room by discarding precision. A <strong>harness</strong> is the scaffolding outside the model — fresh context each step, durable state on disk, work resumed where it stopped. Overmind is one, and this is what that means in the code you would be running.</p>
+    <div class="pillars">
+      <div class="pillar">
+        <span class="k">The harness</span>
+        <h3>Everything the model is not</h3>
+        <p>The model is the part you rent. Overmind is the part around it: a <strong>body</strong> (an isolated git worktree per run), a <strong>cage</strong> (OS-level sandboxing, one confinement per run), <strong>tools</strong> over MCP, a <strong>wallet</strong> enforced at checkout, a <strong>memory</strong> the whole org shares, and an <strong>audit chain</strong> that records all of it.</p>
+      </div>
+      <div class="pillar">
+        <span class="k">The loop</span>
+        <h3>Stops on time, money, and volume</h3>
+        <p>A loop is what makes a harness autonomous: a goal a machine can check, iteration until it is met, caps that stop it when it is not. Overmind's already stops a run three ways and wakes an agent when a person or a meeting says so. <strong>What it does not yet have</strong> — a verdict the agent did not write, a cap on attempts, a subscriber on the event chain — is written down as M35 and M36 rather than implied.</p>
+      </div>
+      <div class="pillar">
+        <span class="k">The boundary</span>
+        <h3>The memory never acts</h3>
+        <p>Overmind's brain is a separate project, swappable for any MCP server that conforms. Two rules keep it that way: <strong>the memory provider never executes anything and never decides when something starts</strong>, and <strong>Overmind keeps no long-term knowledge of its own</strong>. Remove the brain and you lose memory — nothing else.</p>
+      </div>
+    </div>
+  </section>
+
   <section id="proof">
     <h2>Provenance you can verify</h2>
     <p class="lede">Everyone runs agents. Overmind can prove what every agent did — history is tamper-evident, not just logged.</p>
