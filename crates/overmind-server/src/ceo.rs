@@ -987,7 +987,7 @@ async fn run_agent_turn_inner(
     // `agent_text` degrades to the raw stream itself. Bookkeeping is never a
     // reply: say what happened instead, with the window when it was reported.
     let reply = if looks_like_adapter_stream(&reply) {
-        match crate::economy::plan_window_in(&output) {
+        match crate::provider::current().plan_window(&output) {
             Some(w) => format!(
                 "The agent could not produce a reply: the subscription's {} window is exhausted. It resets at {}.",
                 w.window.replace('_', "-"),
@@ -1477,7 +1477,7 @@ pub(crate) async fn run_adapter(
     // *after* the money is settled, because a plan that has run out does not
     // make the turn we just paid for un-happen.
     let Ok(output) = &outcome else { return outcome };
-    let Some(window) = crate::economy::plan_window_in(output) else {
+    let Some(window) = crate::provider::current().plan_window(output) else {
         return outcome;
     };
     state.set_plan_window(window.clone());
@@ -1526,13 +1526,17 @@ async fn spawn_adapter(
             "cannot hand the tools config to the agent: {e}"
         )));
     }
+    // One confinement for the whole run, read twice: how much rope the adapter
+    // gets and what actually confines it must be the same answer, and asking
+    // twice let them differ (ADR-0023).
+    let held = crate::sandbox::confinement(&state.config, &cage);
     let agent_cmd = crate::runner::agent_command(
         state,
-        crate::sandbox::caged(&state.config, &cage),
+        held.is_real(),
         mcp.as_ref().map(|m| m.path.as_path()),
         ceiling_cents,
     );
-    let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);
+    let mut cmd = crate::sandbox::command(&state.config, &held, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }

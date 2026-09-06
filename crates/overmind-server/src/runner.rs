@@ -1521,9 +1521,13 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             Err(_) => None,
         }
     };
+    // One confinement for the whole run, read twice: how much rope the adapter
+    // gets and what actually confines it must be the same answer, and asking
+    // twice let them differ (ADR-0023).
+    let held = crate::sandbox::confinement(&ctx.state.config, &cage);
     let agent_cmd = agent_command(
         &ctx.state,
-        crate::sandbox::caged(&ctx.state.config, &cage),
+        held.is_real(),
         mcp.as_ref().map(|m| m.path.as_path()),
         ceiling,
     );
@@ -1637,7 +1641,7 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     // Caged: the agent may write its own run directory and nothing else
     // (ADR-0023). `~/.ssh`, the browser profile and Overmind's own database
     // are unreachable from in there.
-    let mut cmd = crate::sandbox::command(&ctx.state.config, &cage, &agent_cmd);
+    let mut cmd = crate::sandbox::command(&ctx.state.config, &held, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }
@@ -1692,7 +1696,7 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             // What the run learned about the plan on its way past (ADR-0030).
             // Read from success and failure alike: a run that was *refused* for
             // running out is exactly the one whose report matters most.
-            if let Some(window) = crate::economy::plan_window_in(&output) {
+            if let Some(window) = crate::provider::current().plan_window(&output) {
                 ctx.state.set_plan_window(window);
             }
             let exit_code = out.status.code().unwrap_or(-1);
@@ -1991,7 +1995,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .bind(&agent_id)
             .bind(&ctx.task_id)
             .bind(&ctx.session_id)
-            .bind("anthropic")
+            .bind(crate::provider::current().id())
             .bind(&cost.model)
             .bind(cost.input_tokens)
             .bind(cost.cached_input_tokens)

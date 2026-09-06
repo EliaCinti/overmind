@@ -129,6 +129,31 @@ pub trait Provider: Send + Sync {
             .map(|s| crate::ceo::clamp_agent_text(&s))
     }
 
+    /// The command that asks this CLI who pays: the binary, then its
+    /// arguments (ADR-0030).
+    ///
+    /// Given rather than run, because *how* it is run is Overmind's: as the
+    /// agent and not as the server — in the image the server is root and the
+    /// credentials live in the agent's home, so a probe run as the server
+    /// answers confidently about the wrong home directory — with a timeout,
+    /// and with a failure that becomes *unknown* rather than a guess.
+    fn economy_probe(&self) -> (&'static str, &'static [&'static str]);
+
+    /// What that command's answer means.
+    ///
+    /// Split from running it so the rule can be tested against payloads that
+    /// were **observed**, rather than against shapes we imagined — which is
+    /// how the difference between a key, a key over a login, a named plan and
+    /// a `setup-token` was learned in the first place.
+    fn read_economy(&self, status: &Value) -> crate::economy::Economy;
+
+    /// Where the subscription stands, read from a run's own output.
+    ///
+    /// A plan's state rides along with work already being done rather than
+    /// costing a call of its own. `None` from a provider that says nothing
+    /// about it, which is most of them.
+    fn plan_window(&self, output: &str) -> Option<crate::economy::PlanWindow>;
+
     /// The adapter's own id for this session, so a later turn can resume it.
     ///
     /// `None` where the adapter names no session, which is a provider that

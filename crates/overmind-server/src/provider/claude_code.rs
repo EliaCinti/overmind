@@ -14,6 +14,7 @@
 use serde_json::{Value, json};
 
 use super::{Bound, ParsedCost, Provider, TurnSpec};
+use crate::economy::{Economy, PlanHealth, PlanWindow, UnknownKind};
 
 /// The provider itself holds nothing: every answer is a pure function of the
 /// bytes the CLI produced.
@@ -42,6 +43,18 @@ impl Provider for ClaudeCode {
 
     fn failure_words(&self, output: &str) -> Option<String> {
         adapter_failure(output)
+    }
+
+    fn economy_probe(&self) -> (&'static str, &'static [&'static str]) {
+        ("claude", &["auth", "status", "--json"])
+    }
+
+    fn read_economy(&self, status: &Value) -> Economy {
+        read(status)
+    }
+
+    fn plan_window(&self, output: &str) -> Option<PlanWindow> {
+        plan_window_in(output)
     }
 
     fn session_id(&self, output: &str) -> Option<String> {
@@ -197,6 +210,25 @@ pub(crate) fn activity_in(line: &str) -> Option<serde_json::Value> {
     None
 }
 
+/// The last JSON object in the output that carries `field`.
+///
+/// Not simply the last object: `run_process` appends stderr to stdout before
+/// anything parses this, so a diagnostic the CLI wrote to stderr is the last
+/// object in the buffer while the result envelope sits above it. Asking for
+/// the field being read makes each reader find its own envelope and ignore
+/// everything that is not one — a warning on stderr used to cost the failure
+/// message, the ledger row and the resumable session id, all three silently.
+fn last_object_with(output: &str, field: &str) -> Option<Value> {
+    output.lines().rev().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            return None;
+        }
+        let v: Value = serde_json::from_str(line).ok()?;
+        v.get(field).is_some().then_some(v)
+    })
+}
+
 /// What the adapter said went wrong, when it said anything.
 ///
 /// "agent exited with code 1" is true and useless. The Claude Code CLI puts the
@@ -210,7 +242,7 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
     // there, found no `is_error`, and answered None -- so a run whose real
     // envelope said "Credit balance is too low" was reported as "agent exited
     // with code 1", which is the one outcome this function exists to prevent.
-    let envelope = crate::ceo::last_json_object(output)?;
+    let envelope = last_object_with(output, "is_error")?;
     if envelope.get("is_error").and_then(Value::as_bool) != Some(true) {
         return None;
     }
@@ -271,7 +303,7 @@ pub(crate) fn adapter_failure(output: &str) -> Option<String> {
 
 /// The adapter's own session id (e.g. Claude Code's), used for `--resume`.
 fn parse_adapter_session_id(output: &str) -> Option<String> {
-    crate::ceo::last_json_object(output)?
+    last_object_with(output, "session_id")?
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -280,7 +312,7 @@ fn parse_adapter_session_id(output: &str) -> Option<String> {
 /// Find the last line of output that is a JSON object carrying
 /// `total_cost_usd`, and extract cost + usage from it.
 pub(crate) fn parse_cost(output: &str) -> Option<ParsedCost> {
-    let v = crate::ceo::last_json_object(output)?;
+    let v = last_object_with(output, "total_cost_usd")?;
     let usd = v.get("total_cost_usd").and_then(Value::as_f64)?;
     let usage = v.get("usage").cloned().unwrap_or_else(|| json!({}));
     let tok = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
@@ -473,6 +505,36 @@ mod what_the_boundary_exposed {
         );
     }
 
+    /// `run_process` appends stderr to stdout before anything parses it, so a
+    /// diagnostic object written to stderr becomes the LAST json object in the
+    /// buffer — and "the last object" was how all three readers found the
+    /// envelope. The result envelope is not merely last; it is the one
+    /// carrying the field being asked about.
+    #[test]
+    fn a_diagnostic_on_stderr_does_not_shadow_the_result_envelope() {
+        let out = concat!(
+            r#"{"is_error":true,"result":"Credit balance is too low","total_cost_usd":0.5,"session_id":"abc","type":"result"}"#,
+            "\n--- stderr ---\n",
+            r#"{"type":"warning","message":"deprecated flag"}"#,
+            "\n"
+        );
+        assert_eq!(
+            ClaudeCode.failure(out).as_deref(),
+            Some("Credit balance is too low"),
+            "the failure survives a stderr diagnostic"
+        );
+        assert_eq!(
+            ClaudeCode.cost(out).map(|c| c.cost_cents),
+            Some(50),
+            "so does the cost — a silently skipped ledger write is spend the cap never sees"
+        );
+        assert_eq!(
+            ClaudeCode.session_id(out).as_deref(),
+            Some("abc"),
+            "and the session id, without which a conversation cannot resume"
+        );
+    }
+
     /// The scan took the last line that parsed as *any* JSON — a bare number,
     /// a string, `null` — as the envelope, found no `is_error` on it, and
     /// answered None. The run's real reason was one line above, and the person
@@ -490,4 +552,76 @@ mod what_the_boundary_exposed {
             "the adapter's own words survive a trailing scalar"
         );
     }
+}
+
+/// Read the economy out of `claude auth status --json`.
+///
+/// Split from the probe so the rule can be tested against the payloads that
+/// were actually observed, rather than against shapes we imagined.
+pub(crate) fn read(status: &Value) -> Economy {
+    if status.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+        return Economy::Unknown {
+            kind: UnknownKind::NotSignedIn,
+            reason: "the agent CLI is not signed in".into(),
+        };
+    }
+    // Presence, not truthiness: the field is absent when no key is in play, and
+    // its value names *where* the key came from rather than what it is.
+    if status.get("apiKeySource").is_some_and(|v| !v.is_null()) {
+        // Here `authMethod` earns its keep — not for telling a key from a plan,
+        // which it cannot do, but for telling whether there is a login *behind*
+        // the key. With a key alone the CLI answers `api_key`; with a key over a
+        // login it answers `claude.ai`, naming the thing it is overriding.
+        let overrides_login = status.get("authMethod").and_then(Value::as_str) == Some("claude.ai");
+        return Economy::Key { overrides_login };
+    }
+    if let Some(plan) = status.get("subscriptionType").and_then(Value::as_str) {
+        return Economy::Subscription {
+            plan: Some(plan.to_string()),
+        };
+    }
+    // A long-lived token minted by `claude setup-token` (M23). The CLI's
+    // answer names no plan -- measured: {"loggedIn":true,"authMethod":
+    // "oauth_token","apiProvider":"firstParty"} and nothing else -- but
+    // setup-token itself requires a subscription, so the economy is the
+    // plan's, with its name unknown rather than invented.
+    if status.get("authMethod").and_then(Value::as_str) == Some("oauth_token") {
+        return Economy::Subscription { plan: None };
+    }
+    // Signed in, no key, no plan named. A shape we have not seen; saying so
+    // beats picking the branch that happens to be cheaper to implement.
+    Economy::Unknown {
+        kind: UnknownKind::Unreadable,
+        reason: "signed in, but the CLI named neither an API key nor a plan".into(),
+    }
+}
+
+/// The last plan report in an adapter's output, if it made one.
+///
+/// The adapter emits a `rate_limit_event` on a stream run, which is why the
+/// default command asks for `stream-json`: the plan's state then **rides along
+/// with work already being done** rather than costing a call of its own — the
+/// same bargain ADR-0026 made for memory watermarks.
+///
+/// The last one wins: a long run may report more than once, and the newest is
+/// the one still true.
+pub(crate) fn plan_window_in(output: &str) -> Option<PlanWindow> {
+    output
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("rate_limit_event"))
+        .find_map(|v| read_plan_window(v.get("rate_limit_info")?))
+}
+
+/// One `rate_limit_info` object, as measured on 2026-08-17.
+pub(crate) fn read_plan_window(info: &Value) -> Option<PlanWindow> {
+    Some(PlanWindow {
+        window: info
+            .get("rateLimitType")
+            .and_then(Value::as_str)?
+            .to_string(),
+        resets_at: info.get("resetsAt").and_then(Value::as_i64)?,
+        health: PlanHealth::read(info.get("status").and_then(Value::as_str)?)?,
+    })
 }

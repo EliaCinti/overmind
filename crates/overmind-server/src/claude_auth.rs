@@ -53,6 +53,9 @@ pub enum FlowState {
 }
 
 pub struct Flow {
+    /// Which flow this is. A worker started for generation N must not touch
+    /// generation N+1 — see [`GENERATION`].
+    generation: u64,
     pub state: FlowState,
     /// The authorization URL once seen — kept so a rejected code can
     /// re-offer the same page and paste box instead of a dead spinner.
@@ -87,6 +90,26 @@ pub struct Flow {
 /// The one flow, if any. On `AppState` it would drag `Arc<Mutex<..>>` through
 /// every constructor; a module-level slot keeps the blast radius here.
 static FLOW: Mutex<Option<Flow>> = Mutex::new(None);
+
+/// Which flow is in the slot, counted rather than compared by address.
+///
+/// Every background worker here — the reader thread, the clock probe — takes
+/// the global lock and then reaches for `slot.as_mut()`, which hands it
+/// **whatever flow is there now**, not the one it was started for. A retry
+/// replaces the flow while the old reader is blocked on that very lock, so the
+/// old thread would wake holding somebody else's flow: it took the new child
+/// and called `wait()` on a live process, still holding the mutex, and every
+/// later `status`, `submit_code` and `start` blocked behind it — forever, on
+/// tokio workers, because the handlers call these synchronously.
+///
+/// A generation is the cheapest thing that makes "is this still mine?"
+/// answerable. Checked at every point where a worker reaches into the slot.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// True while the flow in the slot is still the one `mine` was minted for.
+fn still_mine(f: &Flow, mine: u64) -> bool {
+    f.generation == mine
+}
 
 /// Strip ANSI escape sequences well enough to scrape a URL and show a tail.
 fn strip_ansi(raw: &str) -> String {
@@ -226,8 +249,41 @@ fn scrub_secrets(text: &str) -> String {
                 i += 1;
             }
             let run: String = chars[start..i].iter().collect();
-            if run.len() > 20 && run.contains("sk-ant") {
+            // How far a credential runs from here, following it across the
+            // whitespace a TUI redraw inserts. `strip_ansi` turns a carriage
+            // return mid-token into a newline, so the marker can land in a run
+            // far shorter than a secret while the body sits in the next one --
+            // and demanding length of THIS run alone printed the prefix, then
+            // printed the secret as a run with no marker in it.
+            // Bounded: a credential torn by a redraw is one or two pieces, not
+            // fifty. Without a cap, one `sk-ant` followed by a run of base64-ish
+            // lines would swallow all of them — and this text exists so somebody
+            // can read what went wrong, so a scrubber that eats the diagnostic
+            // has traded one failure for another.
+            const MAX_PIECES: usize = 4;
+            let mut end = i;
+            for _ in 0..MAX_PIECES {
+                let mut j = end;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                let body = j;
+                while j < chars.len() && is_tok(chars[j]) {
+                    j += 1;
+                }
+                // A body has no spaces and is long; prose after a prefix is
+                // neither, which is what keeps "set sk-ant-… as the key" whole.
+                if j - body > 20 {
+                    end = j;
+                } else {
+                    break;
+                }
+            }
+            // Long enough to hold a secret, or trailed by something that is.
+            // `sk-ant-` alone is seven characters and a sentence, not a token.
+            if run.contains("sk-ant") && (run.len() > 10 || end > i) {
                 out.push_str("sk-ant-…[redacted]");
+                i = end;
             } else {
                 out.push_str(&run);
             }
@@ -448,7 +504,11 @@ pub fn start(state: &AppState) -> Result<(), String> {
     let token_file = token_path(&state.config);
 
     eprintln!("claude sign-in: `claude setup-token` spawned on a pty");
+    // Minted before the flow is installed and captured by every worker this
+    // start spawns, so each can tell its own flow from a later one.
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     *slot = Some(Flow {
+        generation,
         state: FlowState::Starting,
         url: None,
         output: String::new(),
@@ -477,6 +537,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
             }
             if let Ok(mut slot) = FLOW.lock()
                 && let Some(f) = slot.as_mut()
+                && still_mine(f, generation)
             {
                 f.skew = Some(s);
             }
@@ -497,6 +558,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
                     let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
                     if let Ok(mut slot) = FLOW.lock()
                         && let Some(f) = slot.as_mut()
+                        && still_mine(f, generation)
                     {
                         f.raw.push_str(&chunk);
                         f.output.push_str(&strip_ansi(&chunk));
@@ -519,16 +581,17 @@ pub fn start(state: &AppState) -> Result<(), String> {
                                     eprintln!(
                                         "claude sign-in: the CLI refused the code and is re-prompting on the same URL"
                                     );
-                                    f.state = FlowState::CodeRejected(scrub_secrets(&tail(
-                                        &f.output, 200,
-                                    )));
+                                    f.state = FlowState::CodeRejected(tail(
+                                        &scrub_secrets(&f.output),
+                                        200,
+                                    ));
                                 }
                                 ExchangeVerdict::Restart => {
                                     // The CLI's own retry: give it the Enter it
                                     // asked for, and scrape only what it prints
                                     // from here on — the old link is dead.
                                     let why =
-                                        scrub_secrets(&tail(&f.output[f.exchange_from..], 200));
+                                        tail(&scrub_secrets(&f.output[f.exchange_from..]), 200);
                                     eprintln!(
                                         "claude sign-in: OAuth error from the CLI — pressing Enter for a fresh URL ({})",
                                         why.replace('\n', " · ")
@@ -548,8 +611,14 @@ pub fn start(state: &AppState) -> Result<(), String> {
             }
         }
         // The pty closed: the CLI is done, one way or the other.
+        //
+        // Only if the slot still holds OUR flow. Without the check this reaped
+        // whatever was there — including a live child a retry had just
+        // installed — by calling `wait()` on it while holding the global lock,
+        // which hung every later call to this module.
         if let Ok(mut slot) = FLOW.lock()
             && let Some(f) = slot.as_mut()
+            && still_mine(f, generation)
         {
             let ok = f
                 .child
@@ -583,7 +652,7 @@ pub fn start(state: &AppState) -> Result<(), String> {
                     None => {
                         let why = format!(
                             "the CLI finished but no token appeared in its output; its last words:\n{}",
-                            scrub_secrets(&tail(&f.output, 400))
+                            tail(&scrub_secrets(&f.output), 400)
                         );
                         eprintln!("claude sign-in: {}", why.replace('\n', " · "));
                         FlowState::Failed(why)
@@ -676,7 +745,7 @@ pub async fn status(state: &AppState) -> serde_json::Value {
                     // Scrubbed: the live tail streams the CLI's words to the
                     // interface, and on the success path those words include
                     // the token.
-                    scrub_secrets(&tail(&f.output, 400)),
+                    tail(&scrub_secrets(&f.output), 400),
                     f.url.clone(),
                     f.rejected_note.clone(),
                     f.skew,
@@ -986,5 +1055,52 @@ mod tests {
         let mut cli = spawn_tethered(std::process::id(), "sh", &["-c", "exit 7"]);
         let status = exits_within(&mut cli, 8).expect("a finished cli exits");
         assert_eq!(status.code(), Some(7));
+    }
+}
+
+#[cfg(test)]
+mod what_the_scrubber_was_missing {
+    //! Two ways a live credential reached the log in the branch written to
+    //! keep it out. Both turn on the same assumption: that `sk-ant` and the
+    //! token's body arrive in one unbroken run of token characters.
+
+    use super::{scrub_secrets, tail};
+
+    const TOKEN: &str = "sk-ant-oat01-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    /// Every site read `scrub_secrets(&tail(output, N))`, so the scrubber only
+    /// ever saw the last N characters. A transcript long enough to push the
+    /// `sk-ant-` prefix out of that window — while leaving the body inside —
+    /// gave the scrubber a run with no marker in it, which it printed as-is.
+    #[test]
+    fn a_prefix_cut_off_by_the_tail_still_hides_the_body() {
+        let transcript = format!("{}\n{TOKEN}\n", "noise line\n".repeat(50));
+        let shown = scrub_secrets(&transcript);
+        let shown = tail(&shown, 200);
+        assert!(
+            !shown.contains("AAAAAAAAAAAAAAAAAAAA"),
+            "the token body survived: {shown}"
+        );
+    }
+
+    /// `strip_ansi` turns a carriage return into a newline, and a TUI redraw
+    /// puts one mid-token. That leaves a short run carrying the marker and a
+    /// long run carrying the secret, neither of which the scrubber recognised
+    /// — and rejoining the two lines gives the credential back.
+    #[test]
+    fn a_token_split_by_a_redraw_is_still_a_token() {
+        let split = "sk-ant-oat01-AAAA\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let shown = scrub_secrets(split);
+        assert!(
+            !shown.contains("AAAAAAAAAAAAAAAAAAAA"),
+            "the split halves rejoin into the credential: {shown}"
+        );
+    }
+
+    /// And nothing else gets eaten: a diagnostic is why anybody reads this.
+    #[test]
+    fn ordinary_output_is_left_alone() {
+        let said = "error: connection refused after 3 attempts (code 7)";
+        assert_eq!(scrub_secrets(said), said);
     }
 }

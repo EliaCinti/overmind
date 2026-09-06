@@ -263,7 +263,7 @@ pub async fn record_turn_cost(
     .bind(uuid::Uuid::now_v7().to_string())
     .bind(company_id)
     .bind(agent_id)
-    .bind("anthropic")
+    .bind(crate::provider::current().id())
     .bind(&cost.model)
     .bind(cost.input_tokens)
     .bind(cost.cached_input_tokens)

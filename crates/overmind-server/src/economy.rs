@@ -98,48 +98,6 @@ impl Economy {
     }
 }
 
-/// Read the economy out of `claude auth status --json`.
-///
-/// Split from the probe so the rule can be tested against the payloads that
-/// were actually observed, rather than against shapes we imagined.
-pub fn read(status: &Value) -> Economy {
-    if status.get("loggedIn").and_then(Value::as_bool) != Some(true) {
-        return Economy::Unknown {
-            kind: UnknownKind::NotSignedIn,
-            reason: "the agent CLI is not signed in".into(),
-        };
-    }
-    // Presence, not truthiness: the field is absent when no key is in play, and
-    // its value names *where* the key came from rather than what it is.
-    if status.get("apiKeySource").is_some_and(|v| !v.is_null()) {
-        // Here `authMethod` earns its keep — not for telling a key from a plan,
-        // which it cannot do, but for telling whether there is a login *behind*
-        // the key. With a key alone the CLI answers `api_key`; with a key over a
-        // login it answers `claude.ai`, naming the thing it is overriding.
-        let overrides_login = status.get("authMethod").and_then(Value::as_str) == Some("claude.ai");
-        return Economy::Key { overrides_login };
-    }
-    if let Some(plan) = status.get("subscriptionType").and_then(Value::as_str) {
-        return Economy::Subscription {
-            plan: Some(plan.to_string()),
-        };
-    }
-    // A long-lived token minted by `claude setup-token` (M23). The CLI's
-    // answer names no plan -- measured: {"loggedIn":true,"authMethod":
-    // "oauth_token","apiProvider":"firstParty"} and nothing else -- but
-    // setup-token itself requires a subscription, so the economy is the
-    // plan's, with its name unknown rather than invented.
-    if status.get("authMethod").and_then(Value::as_str) == Some("oauth_token") {
-        return Economy::Subscription { plan: None };
-    }
-    // Signed in, no key, no plan named. A shape we have not seen; saying so
-    // beats picking the branch that happens to be cheaper to implement.
-    Economy::Unknown {
-        kind: UnknownKind::Unreadable,
-        reason: "signed in, but the CLI named neither an API key nor a plan".into(),
-    }
-}
-
 // ---------- who pays, when both could (ADR-0037) ----------
 
 /// Where the person's choice to let the plan pay is kept.
@@ -212,8 +170,14 @@ pub async fn detect(config: &Config) -> Economy {
         };
     }
 
-    let mut cmd = crate::sandbox::as_agent(config, "claude");
-    cmd.args(["auth", "status", "--json"])
+    // The command is the provider's; running it is ours (ADR-0048). As the
+    // agent and not as the server: in the image the server is root and the
+    // credentials live in the agent's home, so a probe run as the server
+    // answers confidently about the wrong home directory.
+    let provider = crate::provider::current();
+    let (bin, args) = provider.economy_probe();
+    let mut cmd = crate::sandbox::as_agent(config, bin);
+    cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -239,7 +203,7 @@ pub async fn detect(config: &Config) -> Economy {
         }
     };
     match serde_json::from_slice::<Value>(&out.stdout) {
-        Ok(status) => read(&status),
+        Ok(status) => provider.read_economy(&status),
         Err(e) => Economy::Unknown {
             kind: UnknownKind::Unreadable,
             reason: format!("the agent CLI's answer was not JSON: {e}"),
@@ -275,7 +239,9 @@ pub enum PlanHealth {
 }
 
 impl PlanHealth {
-    fn read(status: &str) -> Option<Self> {
+    /// Crate-visible since ADR-0048: the vocabulary is Overmind's, but the
+    /// provider is what reads an adapter's word into it.
+    pub(crate) fn read(status: &str) -> Option<Self> {
         match status {
             "allowed" => Some(PlanHealth::Allowed),
             "allowed_warning" => Some(PlanHealth::Warning),
@@ -285,36 +251,6 @@ impl PlanHealth {
             _ => None,
         }
     }
-}
-
-/// The last plan report in an adapter's output, if it made one.
-///
-/// The adapter emits a `rate_limit_event` on a stream run, which is why the
-/// default command asks for `stream-json`: the plan's state then **rides along
-/// with work already being done** rather than costing a call of its own — the
-/// same bargain ADR-0026 made for memory watermarks.
-///
-/// The last one wins: a long run may report more than once, and the newest is
-/// the one still true.
-pub fn plan_window_in(output: &str) -> Option<PlanWindow> {
-    output
-        .lines()
-        .rev()
-        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
-        .filter(|v| v.get("type").and_then(Value::as_str) == Some("rate_limit_event"))
-        .find_map(|v| read_plan_window(v.get("rate_limit_info")?))
-}
-
-/// One `rate_limit_info` object, as measured on 2026-08-17.
-pub fn read_plan_window(info: &Value) -> Option<PlanWindow> {
-    Some(PlanWindow {
-        window: info
-            .get("rateLimitType")
-            .and_then(Value::as_str)?
-            .to_string(),
-        resets_at: info.get("resetsAt").and_then(Value::as_i64)?,
-        health: PlanHealth::read(info.get("status").and_then(Value::as_str)?)?,
-    })
 }
 
 /// What we know about each of a plan's windows, keyed by its name.
@@ -402,7 +338,11 @@ pub fn as_json(economy: &Economy) -> Value {
 
 #[cfg(test)]
 mod tests {
+    // The rule these exercise moved to the provider (ADR-0048) — what a
+    // payload MEANS is one CLI's knowledge — while the vocabulary it answers
+    // in stays here. The tests follow the function rather than the file.
     use super::*;
+    use crate::provider::claude_code::read;
     use serde_json::json;
 
     /// The state on a developer's machine: both credentials present. The key is
@@ -557,7 +497,11 @@ mod tests {
 
 #[cfg(test)]
 mod plan_tests {
+    // The rule these exercise moved to the provider (ADR-0048) — what a
+    // payload MEANS is one CLI's knowledge — while the vocabulary it answers
+    // in stays here. The tests follow the function rather than the file.
     use super::*;
+    use crate::provider::claude_code::plan_window_in;
 
     /// The event exactly as measured on 2026-08-17, from a headless
     /// `--output-format stream-json --verbose` run on a subscription.
@@ -652,7 +596,11 @@ mod plan_tests {
 
 #[cfg(test)]
 mod override_tests {
+    // The rule these exercise moved to the provider (ADR-0048) — what a
+    // payload MEANS is one CLI's knowledge — while the vocabulary it answers
+    // in stays here. The tests follow the function rather than the file.
     use super::*;
+    use crate::provider::claude_code::read;
     use serde_json::json;
 
     /// The one state this slice exists for: signed in with a plan, billed to a
@@ -732,7 +680,11 @@ mod override_tests {
 
 #[cfg(test)]
 mod exhaustion_tests {
+    // The rule these exercise moved to the provider (ADR-0048) — what a
+    // payload MEANS is one CLI's knowledge — while the vocabulary it answers
+    // in stays here. The tests follow the function rather than the file.
     use super::*;
+    use crate::provider::claude_code::plan_window_in;
 
     /// Exhaustion is a status, not a sentence. This is the whole reason the
     /// pause path could be wired at all: M18 left it open "once we can
