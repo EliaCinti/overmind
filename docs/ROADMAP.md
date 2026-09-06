@@ -500,7 +500,7 @@ The substrate is built and has been waiting since M3. `scheduler.rs` says so its
 
 - **A cap on attempts.** Today `turn_cap` bounds a meeting and nothing bounds work: `step` and `plan` together appear twice in all of `runner.rs`. A task is one session with a timeout, not a loop with a count.
 - **No-progress detection.** A loop that stops advancing is stopped for that reason and says so. Six `budget.blocked` in two hours is that signature, and the wallet should not be the thing that notices.
-- **The chain gains its first subscriber.** Forty event kinds are published and nothing reads them reactively; the only sources that can wake an agent are a person clicking (`api.rs`, `source = "manual"`) and a meeting deciding (`meeting.rs`). A trigger is an event kind, a predicate, and a wakeup — and the audit log is already the perfect bus for it.
+- **The chain gains its first subscriber.** Forty-one event kinds are published and nothing reads them reactively; the only sources that can wake an agent are a person clicking (`api.rs`, `source = "manual"`) and a meeting deciding (`meeting.rs`). A trigger is an event kind, a predicate, and a wakeup — and the audit log is already the perfect bus for it.
 - **Every autonomous start names its cause.** The wakeup records the event that fired it, so the chain answers *why this ran* and not only *that it ran*. A start with no recorded cause is exactly what [ADR-0046](adr/0046-a-start-the-ceo-cannot-see.md) refuses.
 - **Accept:** the owner arms one trigger, walks away, and the event it names starts the right agent on the right task without a click — the audit chain shows the causing event, the run is checked by M35's sensors, and an agent looping without progress is stopped by the count rather than by the budget.
 

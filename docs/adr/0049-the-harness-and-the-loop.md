@@ -20,7 +20,7 @@ The stack, as the field now describes it: **prompt → context → harness → l
 | Memory | `MemoryProvider` over MCP; Wadachi as first-party ([ADR-0004](0004-wadachi-first-party-managed-brain.md)) |
 | Permissions | typed traits, `perm`, `act_within_budget` |
 | Model abstraction | the `Provider` trait ([ADR-0048](0048-a-provider-is-a-capability-not-a-name.md)) |
-| Observability | the hash-chained audit log, forty event kinds ([ADR-0006](0006-audit-log-and-task-lifecycle.md)) |
+| Observability | the hash-chained audit log, forty-one event kinds ([ADR-0006](0006-audit-log-and-task-lifecycle.md)) |
 
 **The loop is half built, and the built half is the hard half.** `scheduler.rs` is a heartbeat that recovers orphaned sessions, drains `agent_wakeup_requests`, and lets the CEO write back. Its own opening comment already says what it is for:
 
@@ -38,7 +38,7 @@ What is missing is narrower than it first looks, and worth stating precisely rat
 - A knowledge run that delivers a file saying *"I could not do this"* passes.
 - A **code** run is not checked at all. `cargo test`, `npm test`, `run_tests`, `verify`, `lint` — searched across `runner.rs` and `domain.rs` on 2026-09-06: **zero occurrences**. Nothing compiles the branch, nothing runs a test.
 - There is **no cap on attempts and no no-progress detection**. `turn_cap` exists, but only for meetings. `step` and `plan` together appear twice in all of `runner.rs`: a task is one session with a timeout, not a loop with a progress check.
-- **Forty event kinds are published and nothing subscribes.** The only sources that can wake an agent are `api.rs:2418` (`source = "manual"` — a person clicking) and `meeting.rs:1115` (`source = "meeting"`). The append-only chain is a perfect event bus that nobody reads reactively.
+- **Forty-one event kinds are published and nothing subscribes.** The only sources that can wake an agent are `api.rs:2418` (`source = "manual"` — a person clicking) and `meeting.rs:1115` (`source = "meeting"`). The append-only chain is a perfect event bus that nobody reads reactively.
 
 **This is Pillar 1, not a new feature.** `VISION.md` says: *"If we can't prove what an agent did and what it cost, the feature doesn't ship."* The cost is proven — `governance.rs` is rigorous about it. The *doing* is not. For a code run, "done" is currently a sentence the agent wrote about itself, and the ledger records the price of that sentence.
 
@@ -51,7 +51,7 @@ One honest correction belongs in this record, because the first draft of this ar
 **2. Two prohibitions keep the two projects separable.** Neither is new policy; both make the existing contract ([ADR-0004](0004-wadachi-first-party-managed-brain.md)) functional rather than merely structural:
 
 - **The memory provider never executes anything and never decides when something starts.** No runner, no cage, no scheduler behind the MCP boundary. Overmind may be pointed at any conforming server; none of them gets to start work.
-- **Overmind keeps no long-term knowledge of its own.** What outlives a session belongs to the provider, and Overmind degrades to full functionality without one.
+- **Overmind keeps no long-term knowledge of its own.** What outlives a session belongs to the provider, and Overmind degrades gracefully to full functionality — minus memory — without one.
 
 **3. A run is checked, not believed — M35.** Generalise `runner.rs:1885` from one case into a stated contract: a run's own account of itself is evidence, never a verdict. A **code** run is verified by something deterministic the repository already owns (its test command, its build, its linter); a run that fails verification is `failed` and its task `blocked`, worded from the check's own output. The existing exclusion stands where it was reasoned: a diff that deliberately changed nothing is a legitimate answer, and *"nothing changed"* is not the same claim as *"the tests pass"*.
 
