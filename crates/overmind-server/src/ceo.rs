@@ -1526,13 +1526,17 @@ async fn spawn_adapter(
             "cannot hand the tools config to the agent: {e}"
         )));
     }
+    // One confinement for the whole run, read twice: how much rope the adapter
+    // gets and what actually confines it must be the same answer, and asking
+    // twice let them differ (ADR-0023).
+    let held = crate::sandbox::confinement(&state.config, &cage);
     let agent_cmd = crate::runner::agent_command(
         state,
-        crate::sandbox::caged(&state.config, &cage),
+        held.is_real(),
         mcp.as_ref().map(|m| m.path.as_path()),
         ceiling_cents,
     );
-    let mut cmd = crate::sandbox::command(&state.config, &cage, &agent_cmd);
+    let mut cmd = crate::sandbox::command(&state.config, &held, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }

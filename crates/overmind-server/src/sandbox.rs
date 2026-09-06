@@ -414,6 +414,16 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
 /// drift apart would eventually give an uncaged agent the caged agent's
 /// freedom, which is the one combination that must never happen — so there is
 /// one predicate, and both callers ask it.
+///
+/// **Prefer holding one [`Confinement`] and reading `is_real()` twice.** The
+/// predicate was never the risk; *asking it twice* was. This and [`command`]
+/// each used to build their own ruleset against a filesystem that can change
+/// between the two calls, and `build_landlock` degrades to `None` with a log
+/// line when it fails — so the first call could answer yes, which is what
+/// grants `--dangerously-skip-permissions`, while the second quietly produced
+/// no Landlock at all. An uncaged run holding the caged agent's freedom: the
+/// one combination named above as never allowed, reachable on a Linux host
+/// outside the image where Landlock is all `is_real` has to go on.
 pub fn caged(config: &Config, cage: &Cage<'_>) -> bool {
     confinement(config, cage).is_real()
 }
@@ -479,8 +489,7 @@ impl CommandEnv for std::process::Command {
     }
 }
 
-pub fn command(config: &Config, cage: &Cage<'_>, script: &str) -> Command {
-    let held = confinement(config, cage);
+pub fn command(config: &Config, held: &Confinement, script: &str) -> Command {
     let mut cmd = match &held.profile {
         Some(text) => {
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
@@ -607,10 +616,32 @@ fn chown_tree(path: &Path, user: AgentUser) -> std::io::Result<()> {
     // agent's, and on a retry it already holds whatever the previous attempt
     // put there — following a symlink out of it would point this chown at
     // anything the server can reach.
-    std::os::unix::fs::lchown(path, Some(user.uid), Some(user.gid))?;
-    if path.symlink_metadata()?.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            chown_tree(&entry?.path(), user)?;
+    // Iterative, with a depth limit, because the tree is the agent's.
+    //
+    // Recursion here descended once per directory level inside
+    // `spawn_blocking`'s 2 MiB stack, over a directory the PREVIOUS run wrote.
+    // An agent that made a deep enough nest would overflow the stack on the
+    // next hand-over and abort the process -- a way to kill the server from
+    // inside the cage, which is exactly what the cage exists to prevent.
+    //
+    // The cap is generous by any honest measure: a worktree is somebody's
+    // repository, and a repository a hundred levels deep is not a repository.
+    // A tree that reaches it is refused rather than half-done, because a
+    // partial chown leaves files the agent cannot read in a directory it owns.
+    const MAX_DEPTH: usize = 100;
+    let mut work = vec![(path.to_path_buf(), 0usize)];
+    while let Some((p, depth)) = work.pop() {
+        std::os::unix::fs::lchown(&p, Some(user.uid), Some(user.gid))?;
+        if p.symlink_metadata()?.is_dir() {
+            if depth >= MAX_DEPTH {
+                return Err(std::io::Error::other(format!(
+                    "refusing to hand over a tree more than {MAX_DEPTH} directories deep at {}",
+                    p.display()
+                )));
+            }
+            for entry in std::fs::read_dir(&p)? {
+                work.push((entry?.path(), depth + 1));
+            }
         }
     }
     Ok(())
@@ -986,13 +1017,10 @@ mod tests {
             sandbox: false,
             ..Config::default()
         };
-        let cmd = command(
-            &cfg,
-            &Cage {
-                run_dir: Path::new("/tmp/x"),
-            },
-            "echo hi",
-        );
+        let cage = Cage {
+            run_dir: Path::new("/tmp/x"),
+        };
+        let cmd = command(&cfg, &confinement(&cfg, &cage), "echo hi");
         assert_eq!(cmd.as_std().get_program(), "sh");
     }
 
@@ -1026,7 +1054,7 @@ mod tests {
         assert!(key_is_removed(&as_agent_std(&cfg, "claude")));
         let run = cfg.data_dir.join("run");
         assert!(key_is_removed(
-            command(&cfg, &Cage { run_dir: &run }, "true").as_std()
+            command(&cfg, &confinement(&cfg, &Cage { run_dir: &run }), "true").as_std()
         ));
     }
 
@@ -1041,5 +1069,50 @@ mod tests {
         crate::economy::prefer_plan(&cfg, true).expect("choose");
         crate::economy::prefer_plan(&cfg, false).expect("and change your mind");
         assert!(!key_is_removed(as_agent(&cfg, "claude").as_std()));
+    }
+    /// A run directory belongs to the agent, and on a retry it already holds
+    /// whatever the previous attempt put there. The hand-over used to recurse
+    /// once per level inside `spawn_blocking`'s 2 MiB stack, so a deep enough
+    /// nest overflowed and aborted the whole process — an agent ending the
+    /// server from inside the cage.
+    ///
+    /// What this proves is the **refusal**, not the crash: reproducing the
+    /// overflow would abort the test process along with everything else, so
+    /// the depth here is far below what a 2 MiB stack actually gives out. The
+    /// guarantee is that a tree past the cap stops with a sentence, and that an
+    /// ordinary one still goes through — the second half matters as much,
+    /// since a cap that refused real repositories would be its own outage.
+    ///
+    /// Chowned to the current user, which every uid may do to its own files,
+    /// so this exercises the walk rather than the permission.
+    #[test]
+    fn a_tree_too_deep_to_hand_over_is_refused_rather_than_overflowing() {
+        let root = std::env::temp_dir().join(format!("om-deep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut p = root.clone();
+        for i in 0..150 {
+            p = p.join(format!("d{i}"));
+        }
+        std::fs::create_dir_all(&p).expect("build a deep tree");
+
+        let me = AgentUser {
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let err = chown_tree(&root, me).expect_err("a tree this deep is refused");
+        assert!(
+            err.to_string().contains("deep"),
+            "the refusal says what was wrong: {err}"
+        );
+
+        // And an ordinary tree still goes through.
+        let shallow = std::env::temp_dir().join(format!("om-shallow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&shallow);
+        std::fs::create_dir_all(shallow.join("a/b/c")).expect("build a shallow tree");
+        std::fs::write(shallow.join("a/b/c/f"), b"x").expect("a file in it");
+        chown_tree(&shallow, me).expect("an ordinary run directory is handed over");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&shallow);
     }
 }
