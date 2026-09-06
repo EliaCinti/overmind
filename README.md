@@ -65,6 +65,61 @@ Everyone runs agents. Overmind can **prove what every agent — and every person
 
 <br/>
 
+## What Overmind is: a harness
+
+A stack has formed under AI agents, and it renames itself about once a year:
+
+**prompt → context → harness → loop**
+
+**Prompt engineering** was wording one request well. **Context engineering** was curating what the model sees before each call. Both meet the same wall: the context window fills, quality falls off a cliff, and the usual remedy — summarising the conversation to make room — buys that room by throwing precision away.
+
+A **harness** is the scaffolding *outside* the model that answers that wall: it re-initialises the agent step by step, so every step opens with a fresh context, reads the durable state the previous one left behind, and resumes exactly where the work stopped. Nothing gets summarised, because nothing had to fit.
+
+> **Agent = Model + Harness.** The model is the part you rent. The harness is the part you build — and it is the part that decides whether an agent is *reliable* or merely *clever*.
+
+**Overmind is that harness.** Every feature below is one of its organs, not an item on a list:
+
+| The agent needs | Overmind gives it | Which means |
+| --- | --- | --- |
+| a **body** | an isolated git worktree and branch for code runs; a scratch directory of its own for documents | two agents cannot overwrite each other's work |
+| a **cage** | OS-level sandboxing, one confinement per run | it reaches what the task needs and nothing else |
+| **hands** | tools over MCP | it can read a repo, browse, call your services |
+| a **wallet** | budgets reserved at checkout, in one transaction | it cannot spend money the company does not have |
+| a **memory** | a `MemoryProvider` over MCP — Wadachi by default | it starts knowing what the org already learned |
+| a **record** | an append-only, hash-chained audit log | what it did can be proven, not just believed |
+
+**Harnesses nest, and this one sits a level up.** A coding CLI like Claude Code is already a harness around the model — its own tools, its own context management. Overmind does not replace it: it is the **organizational** harness around *that*, handing it a body, a cage, a wallet, a memory the whole company shares, and the decision of when it starts at all.
+
+**That level is the new part.** Harnesses are usually built for one agent in one session. Overmind's is built for a company: many agents, one ledger, one audit chain, budgets enforced server-side rather than suggested in a prompt, and a memory that outlives every one of them. The unit of work is not a conversation — it is an organization with a history.
+
+Two prohibitions keep the memory swappable, and both are written down as claims for tests to hold — the tests themselves arrive with the milestones below: **the memory provider never executes anything and never decides when something starts**, and **Overmind keeps no long-term knowledge of its own.** Unplug the brain and you lose memory — nothing else.
+
+<br/>
+
+## And a loop that can stop
+
+If the harness is what runs an agent, the **loop** is what makes it autonomous: a goal a *machine* can check, iteration until it is met, and caps that stop it when it is not. The caps are not the boring half — a loop without them is the most expensive mistake in this whole field.
+
+**What stops a run today — both real, both enforced by the server:**
+
+- **Time.** A session that overruns its timeout has its process killed, and the task says so.
+- **Money.** The turn is reserved against the agent's budget *before* it runs and reconciled after; over the cap, the run does not start and the refusal names the ceiling and the spend.
+
+**And one real check on the work itself.** A *document* run that reports success while delivering nothing is not believed: it is marked failed and its task blocked, in the words the provider itself used. Code runs are exempt on purpose — their deliverable is the diff, and a diff that deliberately changed nothing is a legitimate answer.
+
+**What does not stop it yet — stated plainly, because a roadmap that only lists strengths is advertising:**
+
+- **No run is checked for correctness.** One class of run is checked for *presence*. Nothing compiles the branch; nothing runs your tests.
+- **Nothing caps attempts.** A task is one session with a timeout, not a loop that notices it has stopped making progress.
+- **A run can quietly hand back less than it made.** Deliverables are collected up to a cap; past it the list is simply truncated, the run still reports success, and nothing in the task, the drawer or the chain says a file was dropped.
+- **Nothing listens.** Forty-one kinds of event are written to the audit chain and nothing subscribes to them: no event can start work, only a person clicking or a meeting reaching a decision — after which the CEO, once woken, does chain further starts on its own plan.
+
+That is [**M35** and **M36**](docs/ROADMAP.md) — *a run is checked, not believed*, then *the floor starts itself, and stops itself* — and the order between them is deliberate. Triggers on top of a self-report would produce unverified claims made autonomously, unsupervised and at cost; the only brake standing today is the wallet, and a spending cap limits what a wrong answer costs, not whether it is wrong. Sensors first, then triggers.
+
+One question is open and worth naming rather than discovering late: a **code** task can be graded by a machine — its tests either pass or they do not — while a **document** task has no `cargo test`. What a deterministic check means for knowledge work is genuinely unresolved, and [ADR-0049](docs/adr/0049-the-harness-and-the-loop.md) says so instead of pretending otherwise.
+
+<br/>
+
 ## Features
 
 <table>
