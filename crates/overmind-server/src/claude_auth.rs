@@ -255,8 +255,14 @@ fn scrub_secrets(text: &str) -> String {
             // far shorter than a secret while the body sits in the next one --
             // and demanding length of THIS run alone printed the prefix, then
             // printed the secret as a run with no marker in it.
+            // Bounded: a credential torn by a redraw is one or two pieces, not
+            // fifty. Without a cap, one `sk-ant` followed by a run of base64-ish
+            // lines would swallow all of them — and this text exists so somebody
+            // can read what went wrong, so a scrubber that eats the diagnostic
+            // has traded one failure for another.
+            const MAX_PIECES: usize = 4;
             let mut end = i;
-            loop {
+            for _ in 0..MAX_PIECES {
                 let mut j = end;
                 while j < chars.len() && chars[j].is_whitespace() {
                     j += 1;
