@@ -31,6 +31,24 @@
    worktree + branch each         per-org instance (ADR-0004)
 ```
 
+## The harness and the loop
+
+The vocabulary the field settled on in 2026 — **prompt → context → harness → loop** — names what the diagram above already is. A **harness** is the scaffolding outside the model that re-initialises an agent step by step: fresh context each step, durable state read back from disk, work resumed where it stopped. **Overmind is that harness**, and the components below are its parts rather than a list of unrelated features ([ADR-0049](adr/0049-the-harness-and-the-loop.md)):
+
+| Harness concern | Component |
+|---|---|
+| Isolation | the cage — `sandbox.rs`, `landlock.rs`, one `Confinement` per run |
+| Execution environment | agent runners — a git worktree and a branch per session |
+| Tools | the MCP layer, client side |
+| Memory | the `MemoryProvider` contract (below) — optional, never vendored |
+| Permissions | typed agent traits, server-enforced |
+| Model abstraction | the `Provider` trait |
+| Observability | the append-only, hash-chained audit log |
+
+The **loop** is the part that makes a harness autonomous: a goal a machine can check, iteration until it is met, and caps that stop it when it is not. It lives in the scheduler, and it is **half built** — it already stops a run on **time** (session timeout), on **money** (atomic budget reservation) and on **volume** (a cap on files handed back), and it can wake an agent when a person asks or a meeting decides. What it does not yet have is a verdict it did not write itself, a cap on attempts, and a subscriber on the event stream. Those are M35 and M36, in that order and for the reason the ADR gives.
+
+Two prohibitions hold the boundary with the memory provider, and both are testable: **the provider never executes anything and never decides when something starts**, and **Overmind keeps no long-term knowledge of its own**.
+
 ## Components
 
 ### overmind-server (Rust)

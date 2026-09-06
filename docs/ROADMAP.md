@@ -479,6 +479,31 @@ Then counted the cost, in production code only: **70 places in `runner.rs`** rea
 - **Then Codex**, which is where the trait stops being a promise: if adding a provider is really one file, that is when it shows.
 - **Accept:** an owner adds a second provider from the interface, signs into it with a subscription where the provider allows one, hires an agent onto one of its models, and that agent does a real task — while another keeps working on Claude, and the org view says truthfully who is paying for each.
 
+## M35 — A run is checked, not believed `todo`
+Opened 6 Sep 2026 in [ADR-0049](adr/0049-the-harness-and-the-loop.md), which names Overmind as a **harness** and finds what its loop is missing. This milestone is not a new feature: it is Pillar 1 finished. *"If we can't prove what an agent did and what it cost, the feature doesn't ship"* — and today the cost is proven while the doing is not. For a code run, `completed` is a sentence the agent wrote about itself, and the ledger records the price of that sentence.
+
+**The mechanism already exists and needs generalising, not inventing.** `runner.rs:1885` is the right shape: a **knowledge** run reporting `completed` with `delivered == 0` is flipped to `failed` and its task to `blocked`, worded by the provider rather than by us — measured in the container on 2026-08-15. Its comment already reasons about scope, and that reasoning stands: code runs are excluded because "their deliverable is the diff, and one that deliberately changed nothing is a legitimate answer."
+
+**What is uncovered, stated exactly.** No run is checked for *correctness*; one class is checked for *presence*. A knowledge run that delivers a file saying "I could not do this" passes. A code run is not checked at all — `cargo test`, `npm test`, `run_tests`, `verify` and `lint` appear **zero times** in `runner.rs` and `domain.rs` (searched 6 Sep 2026). Nothing compiles the branch; nothing runs a test.
+
+- **The contract.** A run's own account of itself is evidence, never a verdict. Where a deterministic check exists, it decides; a run that fails it is `failed`, its task `blocked`, and the reason is the check's own output, not a sentence we compose.
+- **Where the check comes from.** The repository already owns it — its test command, its build, its linter. Discovering it is the design question; inventing a new configuration surface for it is the thing to avoid ([UX.md](UX.md): a choice, not a text field).
+- **The honest failure.** When the check itself cannot run, the run does not silently pass. What it does instead is this milestone's to decide and to say out loud.
+- **`Knowledge` has no `cargo test`, and this milestone owns the question.** The loop pattern works on code because a machine can grade it. What a deterministic check means for a knowledge task is genuinely open; `empty_handed` is the floor for that case, not the answer.
+- **The board learns a new distinction.** "The agent gave up" and "the check said no" are different facts and currently render the same. That is an event kind, a task state, and a line in the UI.
+- **Accept:** an agent finishes a code task, the branch fails the repository's own tests, and the task is `blocked` with the failing output as its reason — while a task whose tests pass is untouched, and a code run that deliberately changed nothing still succeeds.
+
+## M36 — The floor starts itself, and stops itself `todo`
+Opened 6 Sep 2026 in [ADR-0049](adr/0049-the-harness-and-the-loop.md). **Lands after M35, and the order is part of the decision:** triggers on top of self-reported completion produce unverified claims made autonomously, unsupervised and at cost. The only brake standing today is the wallet, and a spending cap is not a correctness criterion — it limits what a wrong answer costs, not whether it is wrong.
+
+The substrate is built and has been waiting since M3. `scheduler.rs` says so itself: *"Paperclip's full cron-style routines are deferred; this is the substrate they will sit on."* It already stops a run on **time**, on **money** and on **volume**, and `act_within_budget` already decides who may pick up work unattended.
+
+- **A cap on attempts.** Today `turn_cap` bounds a meeting and nothing bounds work: `step` and `plan` together appear twice in all of `runner.rs`. A task is one session with a timeout, not a loop with a count.
+- **No-progress detection.** A loop that stops advancing is stopped for that reason and says so. Six `budget.blocked` in two hours is that signature, and the wallet should not be the thing that notices.
+- **The chain gains its first subscriber.** Forty event kinds are published and nothing reads them reactively; the only sources that can wake an agent are a person clicking (`api.rs`, `source = "manual"`) and a meeting deciding (`meeting.rs`). A trigger is an event kind, a predicate, and a wakeup — and the audit log is already the perfect bus for it.
+- **Every autonomous start names its cause.** The wakeup records the event that fired it, so the chain answers *why this ran* and not only *that it ran*. A start with no recorded cause is exactly what [ADR-0046](adr/0046-a-start-the-ceo-cannot-see.md) refuses.
+- **Accept:** the owner arms one trigger, walks away, and the event it names starts the right agent on the right task without a click — the audit chain shows the causing event, the run is checked by M35's sensors, and an agent looping without progress is stopped by the count rather than by the budget.
+
 ## What comes next
 The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
 
