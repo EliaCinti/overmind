@@ -181,6 +181,8 @@ M33 reaches you and the two friends on your tailnet. Reaching *more* people — 
 
 ## Small debts from the first live walk (23 Aug 2026)
 
+- **A run can hand back less than it made, and say nothing.** `files::collect_files` stops at `MAX_ARTIFACTS` (200) with a bare `return out` (`files.rs:206`), so a run producing more simply loses the rest: the session still reports `completed`, the drawer shows the first 200, and neither the task, the artifact list nor the audit chain records that anything was dropped. Found on 6 Sep 2026 by a review of the README's claim that the cap "stops" a run — it does not stop anything, it truncates. Either the cap refuses the run the way the budget ceiling does, or it records the count it discarded; silently is the one option that is wrong. Sits naturally with **M35**, whose whole subject is a run not being believed about its own output.
+
 Found while the owner drove the Casa San Vito company; each is small, none is urgent, all are real:
 
 - **Characterization is barely editable after hire.** Tools got their endpoint and chips (ADR-0036); `multimodal` did not — a modeler hired without it cannot be handed a sketch until someone edits the database. The right shape is one `POST /agents/{id}/traits` taking a validated `TraitsPatch` (revision `patch`, same rules as hire), and the org chart's edit row growing the few fields that matter: multimodal, autonomy, model.

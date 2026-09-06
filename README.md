@@ -81,7 +81,7 @@ A **harness** is the scaffolding *outside* the model that answers that wall: it 
 
 | The agent needs | Overmind gives it | Which means |
 | --- | --- | --- |
-| a **body** | an isolated git worktree and branch per run | two agents cannot overwrite each other's work |
+| a **body** | an isolated git worktree and branch for code runs; a scratch directory of its own for documents | two agents cannot overwrite each other's work |
 | a **cage** | OS-level sandboxing, one confinement per run | it reaches what the task needs and nothing else |
 | **hands** | tools over MCP | it can read a repo, browse, call your services |
 | a **wallet** | budgets reserved at checkout, in one transaction | it cannot spend money the company does not have |
@@ -92,7 +92,7 @@ A **harness** is the scaffolding *outside* the model that answers that wall: it 
 
 **That level is the new part.** Harnesses are usually built for one agent in one session. Overmind's is built for a company: many agents, one ledger, one audit chain, budgets enforced server-side rather than suggested in a prompt, and a memory that outlives every one of them. The unit of work is not a conversation — it is an organization with a history.
 
-Two prohibitions keep the memory swappable, and both are written down as claims to be held by tests: **the memory provider never executes anything and never decides when something starts**, and **Overmind keeps no long-term knowledge of its own.** Unplug the brain and you lose memory — nothing else.
+Two prohibitions keep the memory swappable, and both are written down as claims for tests to hold — the tests themselves arrive with the milestones below: **the memory provider never executes anything and never decides when something starts**, and **Overmind keeps no long-term knowledge of its own.** Unplug the brain and you lose memory — nothing else.
 
 <br/>
 
@@ -100,11 +100,10 @@ Two prohibitions keep the memory swappable, and both are written down as claims 
 
 If the harness is what runs an agent, the **loop** is what makes it autonomous: a goal a *machine* can check, iteration until it is met, and caps that stop it when it is not. The caps are not the boring half — a loop without them is the most expensive mistake in this whole field.
 
-**What stops a run today — all three real, all three enforced by the server:**
+**What stops a run today — both real, both enforced by the server:**
 
 - **Time.** A session that overruns its timeout has its process killed, and the task says so.
 - **Money.** The turn is reserved against the agent's budget *before* it runs and reconciled after; over the cap, the run does not start and the refusal names the ceiling and the spend.
-- **Volume.** A run can only hand back so many files.
 
 **And one real check on the work itself.** A *document* run that reports success while delivering nothing is not believed: it is marked failed and its task blocked, in the words the provider itself used. Code runs are exempt on purpose — their deliverable is the diff, and a diff that deliberately changed nothing is a legitimate answer.
 
@@ -112,7 +111,8 @@ If the harness is what runs an agent, the **loop** is what makes it autonomous: 
 
 - **No run is checked for correctness.** One class of run is checked for *presence*. Nothing compiles the branch; nothing runs your tests.
 - **Nothing caps attempts.** A task is one session with a timeout, not a loop that notices it has stopped making progress.
-- **Nothing listens.** Forty-one kinds of event are written to the audit chain and nothing subscribes to them: only a person clicking, or a meeting reaching a decision, can wake an agent.
+- **A run can quietly hand back less than it made.** Deliverables are collected up to a cap; past it the list is simply truncated, the run still reports success, and nothing in the task, the drawer or the chain says a file was dropped.
+- **Nothing listens.** Forty-one kinds of event are written to the audit chain and nothing subscribes to them: no event can start work, only a person clicking or a meeting reaching a decision — after which the CEO, once woken, does chain further starts on its own plan.
 
 That is [**M35** and **M36**](docs/ROADMAP.md) — *a run is checked, not believed*, then *the floor starts itself, and stops itself* — and the order between them is deliberate. Triggers on top of a self-report would produce unverified claims made autonomously, unsupervised and at cost; the only brake standing today is the wallet, and a spending cap limits what a wrong answer costs, not whether it is wrong. Sensors first, then triggers.
 
