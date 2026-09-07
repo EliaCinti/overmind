@@ -158,15 +158,7 @@ async fn build_env(
 }
 
 async fn hire(env: &Env, name: &str, archetype: &str) -> String {
-    let (status, agent) = send(
-        &env.app,
-        "POST",
-        &format!("/api/companies/{}/agents", env.company_id),
-        Some(json!({ "name": name, "archetype": archetype })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "hire: {agent}");
-    agent["id"].as_str().expect("agent id").to_string()
+    hire_with_traits(env, name, archetype, json!({})).await
 }
 
 async fn make_todo_task(env: &Env, title: &str) -> String {
@@ -473,5 +465,162 @@ async fn wakeup_enforces_agent_autonomy() {
             .unwrap_or("")
             .contains("requires a human"),
         "outcome: {outcome2:?}"
+    );
+}
+
+async fn hire_with_traits(env: &Env, name: &str, archetype: &str, traits: Value) -> String {
+    let (status, agent) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/agents", env.company_id),
+        Some(json!({ "name": name, "archetype": archetype, "traits": traits })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "hire: {agent}");
+    agent["id"].as_str().expect("agent id").to_string()
+}
+
+/// A sketch on a task: the multimodal gate reads the mime, not the bytes.
+async fn attach_sketch(env: &Env, task_id: &str) {
+    let (status, body) = common::upload(
+        &env.app,
+        &format!("/api/tasks/{task_id}/attachments"),
+        "sketch.jpeg",
+        "image/jpeg",
+        b"not really a jpeg",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "upload: {body}");
+}
+
+async fn wakeup_row(env: &Env, wakeup_id: &str) -> (String, Option<String>) {
+    sqlx::query_as("SELECT status, outcome FROM agent_wakeup_requests WHERE id = ?")
+        .bind(wakeup_id)
+        .fetch_one(&env.state.pool)
+        .await
+        .expect("wakeup row")
+}
+
+/// A refusal the runner can name a remedy for (the multimodal gate, ADR-0021)
+/// fell through `wakeup_outcome` as an error: the beat aborted before the
+/// wakeup was marked done, the row stayed queued, and the next heartbeat
+/// re-refused the same task — seventeen times, thirty seconds apart, in
+/// TravelAgency's log — while every wakeup behind it, and the digests, waited.
+/// A refusal is this agent's problem, not the heartbeat's.
+#[tokio::test]
+async fn a_remediable_refusal_is_the_wakeups_outcome_not_the_heartbeats_failure() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    // The oldest todo task carries a sketch; neither researcher was ever
+    // characterized to look at one.
+    let task_id = make_todo_knowledge_task(&env, "Look at the sketch").await;
+    attach_sketch(&env, &task_id).await;
+    let first = hire_with_traits(
+        &env,
+        "Nearsighted",
+        "researcher",
+        json!({ "multimodal": false }),
+    )
+    .await;
+    let behind =
+        hire_with_traits(&env, "Behind", "researcher", json!({ "multimodal": false })).await;
+    let (s, w1) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{first}/wakeup"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "wakeup: {w1}");
+    let (s, w2) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{behind}/wakeup"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "wakeup: {w2}");
+
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("a refusal is the wakeup's outcome, not the heartbeat's failure");
+
+    // The refusal is recorded as the outcome, and the row is closed...
+    let (status, outcome) = wakeup_row(&env, w1["id"].as_str().expect("wakeup id")).await;
+    assert_eq!(status, "done", "the first wakeup must not stay queued");
+    assert!(
+        outcome
+            .as_deref()
+            .unwrap_or("")
+            .contains("not characterized for visual work"),
+        "outcome names the refusal: {outcome:?}"
+    );
+    // ...the task is left exactly where it was...
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    // ...and the wakeup behind it was processed in the same beat instead of
+    // waiting behind an error.
+    let (status, outcome) = wakeup_row(&env, w2["id"].as_str().expect("wakeup id")).await;
+    assert_eq!(status, "done", "the second wakeup was starved: {outcome:?}");
+    // The remedy the refusal named travels as data, never as a sentence to parse.
+    let (payload,): (String,) = sqlx::query_as(
+        "SELECT payload FROM audit_events WHERE kind = 'agent.wakeup_processed'
+         ORDER BY created_at LIMIT 1",
+    )
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("audit row");
+    let payload: Value = serde_json::from_str(&payload).expect("payload json");
+    assert_eq!(
+        payload["remedies"][0]["kind"],
+        json!("grant_multimodal"),
+        "{payload}"
+    );
+    assert_eq!(
+        payload["remedies"][0]["agent_id"],
+        json!(first),
+        "{payload}"
+    );
+}
+
+/// Recording the refusal is not enough: the oldest todo task is the one the
+/// picker always reaches first, so an agent that cannot take it would come
+/// back to it on every wakeup and never get to the work behind it -- and,
+/// with the beat no longer failing, nothing would say so. A wakeup takes the
+/// work the agent can take.
+#[tokio::test]
+async fn a_task_an_agent_cannot_take_does_not_stand_in_front_of_one_it_can() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let sketch = make_todo_knowledge_task(&env, "Look at the sketch").await;
+    attach_sketch(&env, &sketch).await;
+    let plain = make_todo_knowledge_task(&env, "Write the brief").await;
+    let agent = hire_with_traits(
+        &env,
+        "Nearsighted",
+        "researcher",
+        json!({ "multimodal": false }),
+    )
+    .await;
+    let (s, w) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/wakeup"),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "wakeup: {w}");
+
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("beat");
+
+    // The sketch was refused and left alone; the brief, behind it, was taken.
+    wait_for_task_status(&env, &plain, "in_review").await;
+    assert_eq!(task_status(&env, &sketch).await, "todo");
+    let (status, outcome) = wakeup_row(&env, w["id"].as_str().expect("wakeup id")).await;
+    assert_eq!(status, "done");
+    let outcome = outcome.unwrap_or_default();
+    assert!(
+        outcome.contains("not characterized for visual work")
+            && outcome.contains(&format!("started task {plain}")),
+        "the outcome says what was declined before what was started: {outcome}"
     );
 }

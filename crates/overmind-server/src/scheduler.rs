@@ -164,7 +164,11 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
             .bind(&request_id)
             .execute(&state.pool)
             .await?;
-        let (company_id, outcome) = wakeup_outcome(state, &agent_id).await?;
+        let WakeupOutcome {
+            company_id,
+            summary: outcome,
+            remedies,
+        } = wakeup_outcome(state, &agent_id).await?;
         sqlx::query(
             "UPDATE agent_wakeup_requests SET status = 'done', outcome = ?, finished_at = ? WHERE id = ?",
         )
@@ -179,7 +183,15 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
             company_id.as_deref(),
             None,
             event_kind::WAKEUP_PROCESSED,
-            &json!({ "request_id": request_id, "agent_id": agent_id, "outcome": outcome }),
+            &json!({
+                "request_id": request_id,
+                "agent_id": agent_id,
+                "outcome": outcome,
+                // The remedies a refused start named, as data: the contract on
+                // `RunnerError::Remediable` is that nobody string-matches the
+                // sentence, and the audit row is where a consumer would look.
+                "remedies": remedies,
+            }),
         )
         .await?;
         tx.commit().await?;
@@ -190,20 +202,39 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
     Ok(())
 }
 
-async fn wakeup_outcome(
-    state: &AppState,
-    agent_id: &str,
-) -> Result<(Option<String>, String), RunnerError> {
+/// What a wakeup came to: the words for the audit row and the wakeup's own
+/// `outcome` column, and -- when a start was refused with a remedy in hand --
+/// the remedies themselves, as data.
+struct WakeupOutcome {
+    company_id: Option<String>,
+    summary: String,
+    remedies: Vec<Value>,
+}
+
+impl WakeupOutcome {
+    fn new(company_id: Option<String>, summary: impl Into<String>) -> Self {
+        WakeupOutcome {
+            company_id,
+            summary: summary.into(),
+            remedies: Vec::new(),
+        }
+    }
+}
+
+async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcome, RunnerError> {
     let agent: Option<(String, String, String)> =
         sqlx::query_as("SELECT company_id, status, traits FROM agents WHERE id = ?")
             .bind(agent_id)
             .fetch_optional(&state.pool)
             .await?;
     let Some((company_id, status, traits)) = agent else {
-        return Ok((None, "agent not found".to_string()));
+        return Ok(WakeupOutcome::new(None, "agent not found"));
     };
     if status != "active" {
-        return Ok((Some(company_id), format!("agent is {status}")));
+        return Ok(WakeupOutcome::new(
+            Some(company_id),
+            format!("agent is {status}"),
+        ));
     }
 
     // An interrupted session is the scheduler's job (recover_orphans), and a
@@ -215,9 +246,9 @@ async fn wakeup_outcome(
     .fetch_optional(&state.pool)
     .await?;
     if in_flight.is_some() {
-        return Ok((
+        return Ok(WakeupOutcome::new(
             Some(company_id),
-            "agent has a session in flight".to_string(),
+            "agent has a session in flight",
         ));
     }
 
@@ -232,7 +263,7 @@ async fn wakeup_outcome(
         })
         .unwrap_or_default();
     if autonomy != "act_within_budget" {
-        return Ok((
+        return Ok(WakeupOutcome::new(
             Some(company_id),
             format!("autonomy '{autonomy}' requires a human to start tasks"),
         ));
@@ -261,45 +292,110 @@ async fn wakeup_outcome(
         .map(|k| k.as_str())
         .collect();
     if kinds.is_empty() {
-        return Ok((
+        return Ok(WakeupOutcome::new(
             Some(company_id),
-            "agent is not characterized for any kind of task".to_string(),
+            "agent is not characterized for any kind of task",
         ));
     }
     let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    // Oldest first, and bounded: a wakeup is "take the work you can", and a
+    // beat is not the place to try a whole backlog.
     let sql = format!(
         "SELECT id FROM tasks WHERE company_id = ? AND status = 'todo'
-           AND execution_kind IN ({placeholders}) ORDER BY created_at LIMIT 1"
+           AND execution_kind IN ({placeholders}) ORDER BY created_at LIMIT 20"
     );
     let mut query = sqlx::query_as::<_, (String,)>(&sql).bind(&company_id);
     for k in &kinds {
         query = query.bind(*k);
     }
-    let next: Option<(String,)> = query.fetch_optional(&state.pool).await?;
-    let Some((task_id,)) = next else {
-        return Ok((Some(company_id), "no todo tasks it can take".to_string()));
-    };
-    match runner::start_task(state, &task_id, agent_id, false).await {
-        Ok(runner::StartResult::Started(outcome)) => Ok((
+    let candidates: Vec<(String,)> = query.fetch_all(&state.pool).await?;
+    if candidates.is_empty() {
+        return Ok(WakeupOutcome::new(
             Some(company_id),
-            format!("started task {task_id} (session {})", outcome.session_id),
-        )),
-        Ok(runner::StartResult::ApprovalRequired { approval_id }) => Ok((
-            Some(company_id),
-            format!("task {task_id} needs approval ({approval_id})"),
-        )),
-        Err(RunnerError::Conflict) => Ok((
-            Some(company_id),
-            format!("task {task_id} was taken by someone else"),
-        )),
-        Err(RunnerError::OverBudget { .. }) => Ok((
-            Some(company_id),
-            format!("task {task_id} blocked: over budget"),
-        )),
-        Err(RunnerError::Invalid(msg)) => Ok((Some(company_id), format!("cannot start: {msg}"))),
-        // A refusal is this agent's problem, not the heartbeat's: record it as
-        // the wakeup's outcome instead of failing the beat for everyone.
-        Err(RunnerError::Blocked(msg)) => Ok((Some(company_id), format!("blocked: {msg}"))),
-        Err(e) => Err(e),
+            "no todo tasks it can take",
+        ));
     }
+
+    // A refusal is this agent's problem, not the heartbeat's -- and not the
+    // next task's either: it is recorded, and the wakeup moves on to the task
+    // behind it. Stopping at the first refusal used to fail the beat for
+    // everyone (the refusal fell through as an error, the row stayed queued,
+    // and the next beat refused the same task again, thirty seconds on); and
+    // merely recording it would have left the oldest task this agent cannot
+    // take standing in front of every one it can.
+    let mut refused: Vec<String> = Vec::new();
+    let mut remedies: Vec<Value> = Vec::new();
+    let summary = |refused: &[String], last: String| {
+        if refused.is_empty() {
+            last
+        } else {
+            format!("refused: {}; {last}", refused.join("; "))
+        }
+    };
+    for (task_id,) in candidates {
+        match runner::start_task(state, &task_id, agent_id, false).await {
+            Ok(runner::StartResult::Started(outcome)) => {
+                let last = format!("started task {task_id} (session {})", outcome.session_id);
+                return Ok(WakeupOutcome {
+                    company_id: Some(company_id),
+                    summary: summary(&refused, last),
+                    remedies,
+                });
+            }
+            Ok(runner::StartResult::ApprovalRequired { approval_id }) => {
+                let last = format!("task {task_id} needs approval ({approval_id})");
+                return Ok(WakeupOutcome {
+                    company_id: Some(company_id),
+                    summary: summary(&refused, last),
+                    remedies,
+                });
+            }
+            // Taken by someone else since the SELECT: not this agent's work
+            // any more, and the next candidate may well be.
+            Err(RunnerError::Conflict) => {
+                refused.push(format!("task {task_id} was taken by someone else"));
+            }
+            // The wallet is the agent's, not the task's: no other task would
+            // fare better.
+            Err(RunnerError::OverBudget { .. }) => {
+                let last = format!("task {task_id} blocked: over budget");
+                return Ok(WakeupOutcome {
+                    company_id: Some(company_id),
+                    summary: summary(&refused, last),
+                    remedies,
+                });
+            }
+            Err(RunnerError::Invalid(msg)) => {
+                let last = format!("cannot start {task_id}: {msg}");
+                return Ok(WakeupOutcome {
+                    company_id: Some(company_id),
+                    summary: summary(&refused, last),
+                    remedies,
+                });
+            }
+            Err(RunnerError::Blocked(msg)) => {
+                refused.push(format!("task {task_id} blocked: {msg}"));
+            }
+            // A refusal that names its own remedy (the multimodal gate,
+            // ADR-0021): applying the remedy is the owner's call, not the
+            // heartbeat's. The remedy rides along as data.
+            Err(RunnerError::Remediable { message, remedy }) => {
+                refused.push(format!("task {task_id} refused: {message}"));
+                remedies.push(remedy);
+            }
+            // Named, not wildcarded: the next variant added to RunnerError
+            // has to be decided here, or it falls through as an error and
+            // the beat stalls again. NotFound heals on the next beat, Git
+            // cannot happen before a spawn, Db is the beat's own problem.
+            Err(e @ (RunnerError::NotFound(_) | RunnerError::Git(_) | RunnerError::Db(_))) => {
+                return Err(e);
+            }
+        }
+    }
+    let all = format!("refused: {}", refused.join("; "));
+    Ok(WakeupOutcome {
+        company_id: Some(company_id),
+        summary: all,
+        remedies,
+    })
 }
