@@ -494,6 +494,8 @@ Opened 6 Sep 2026 in [ADR-0049](adr/0049-the-harness-and-the-loop.md), which nam
 - **Accept:** an agent finishes a code task, the branch fails the repository's own tests, and the task is `blocked` with the failing output as its reason — while a task whose tests pass is untouched, and a code run that deliberately changed nothing still succeeds.
 
 ## M36 — The floor starts itself, and stops itself `todo`
+
+> **Proposed 7 Sep 2026, not yet accepted:** [ADR-0050](adr/0050-a-loop-that-converges-and-a-stop-that-is-not-a-crash.md) reads what the field converged on in 2026 against TravelAgency's numbers and proposes splitting this milestone — **M36a, the brakes** (a cap on attempts, three progress detectors, a stop that winds down with a handoff, `budget.low`) *before* M35, since a brake makes an unverified loop shorter, never longer; **M36b, the triggers**, after it, as decided here.
 Opened 6 Sep 2026 in [ADR-0049](adr/0049-the-harness-and-the-loop.md). **Lands after M35, and the order is part of the decision:** triggers on top of self-reported completion produce unverified claims made autonomously, unsupervised and at cost. The only brake standing today is the wallet, and a spending cap is not a correctness criterion — it limits what a wrong answer costs, not whether it is wrong.
 
 The substrate is built and has been waiting since M3. `scheduler.rs` says so itself: *"Paperclip's full cron-style routines are deferred; this is the substrate they will sit on."* It already stops a run on **time**, on **money** and on **volume**, and `act_within_budget` already decides who may pick up work unattended.
