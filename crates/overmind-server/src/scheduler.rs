@@ -299,103 +299,104 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
     }
     let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     // Oldest first, and bounded: a wakeup is "take the work you can", and a
-    // beat is not the place to try a whole backlog.
+    // beat is not the place to try a whole backlog. One more than the window
+    // is fetched so the outcome can say when the window was the limit.
+    const WINDOW: usize = 20;
     let sql = format!(
         "SELECT id FROM tasks WHERE company_id = ? AND status = 'todo'
-           AND execution_kind IN ({placeholders}) ORDER BY created_at LIMIT 20"
+           AND execution_kind IN ({placeholders}) ORDER BY created_at LIMIT {}",
+        WINDOW + 1
     );
     let mut query = sqlx::query_as::<_, (String,)>(&sql).bind(&company_id);
     for k in &kinds {
         query = query.bind(*k);
     }
-    let candidates: Vec<(String,)> = query.fetch_all(&state.pool).await?;
+    let mut candidates: Vec<(String,)> = query.fetch_all(&state.pool).await?;
     if candidates.is_empty() {
         return Ok(WakeupOutcome::new(
             Some(company_id),
             "no todo tasks it can take",
         ));
     }
+    let more_behind = candidates.len() > WINDOW;
+    candidates.truncate(WINDOW);
 
     // A refusal is this agent's problem, not the heartbeat's -- and not the
     // next task's either: it is recorded, and the wakeup moves on to the task
-    // behind it. Stopping at the first refusal used to fail the beat for
-    // everyone (the refusal fell through as an error, the row stayed queued,
-    // and the next beat refused the same task again, thirty seconds on); and
-    // merely recording it would have left the oldest task this agent cannot
-    // take standing in front of every one it can.
+    // behind it (ADR-0009, addendum of 7 Sep 2026). Stopping at the first
+    // refusal used to fail the beat for everyone (the refusal fell through as
+    // an error, the row stayed queued, and the next beat refused the same
+    // task again, thirty seconds on); and merely recording it would have left
+    // the oldest task this agent cannot take standing in front of every one
+    // it can. What is the *agent's* condition, not the task's -- its wallet,
+    // its status, its characterization -- ends the wakeup at once: no other
+    // task would fare better.
     let mut refused: Vec<String> = Vec::new();
     let mut remedies: Vec<Value> = Vec::new();
-    let summary = |refused: &[String], last: String| {
-        if refused.is_empty() {
-            last
-        } else {
-            format!("refused: {}; {last}", refused.join("; "))
+    let last: Option<String> = 'tasks: {
+        for (task_id,) in candidates {
+            match runner::start_task(state, &task_id, agent_id, false).await {
+                Ok(runner::StartResult::Started(outcome)) => {
+                    break 'tasks Some(format!(
+                        "started task {task_id} (session {})",
+                        outcome.session_id
+                    ));
+                }
+                Ok(runner::StartResult::ApprovalRequired { approval_id }) => {
+                    break 'tasks Some(format!("task {task_id} needs approval ({approval_id})"));
+                }
+                // The agent's condition: over its budget, paused, or not
+                // characterized for this kind of work at all.
+                Err(RunnerError::OverBudget { .. }) => {
+                    break 'tasks Some(format!("task {task_id} blocked: over budget"));
+                }
+                Err(RunnerError::Blocked(msg)) => {
+                    break 'tasks Some(format!("blocked: {msg}"));
+                }
+                // The task's condition: taken by someone else since the
+                // SELECT, malformed for a start (a code task with no home
+                // repository), or refused with a remedy in hand (the
+                // multimodal gate, ADR-0021 -- applying the remedy is the
+                // owner's call, not the heartbeat's). The next candidate may
+                // well be fine.
+                Err(RunnerError::Conflict) => {
+                    refused.push(format!("task {task_id} was taken by someone else"));
+                }
+                Err(RunnerError::Invalid(msg)) => {
+                    refused.push(format!("task {task_id} cannot start: {msg}"));
+                }
+                Err(RunnerError::Remediable { message, remedy }) => {
+                    refused.push(format!("task {task_id} refused: {message}"));
+                    // A remedy is about the agent, so five sketches name the
+                    // same one: keep each once.
+                    if !remedies.contains(&remedy) {
+                        remedies.push(remedy);
+                    }
+                }
+                // Named, not wildcarded: the next variant added to
+                // RunnerError has to be decided here, or it falls through as
+                // an error and the beat stalls again. NotFound heals on the
+                // next beat, Git cannot happen before a spawn, Db is the
+                // beat's own problem.
+                Err(e @ (RunnerError::NotFound(_) | RunnerError::Git(_) | RunnerError::Db(_))) => {
+                    return Err(e);
+                }
+            }
         }
+        None
     };
-    for (task_id,) in candidates {
-        match runner::start_task(state, &task_id, agent_id, false).await {
-            Ok(runner::StartResult::Started(outcome)) => {
-                let last = format!("started task {task_id} (session {})", outcome.session_id);
-                return Ok(WakeupOutcome {
-                    company_id: Some(company_id),
-                    summary: summary(&refused, last),
-                    remedies,
-                });
-            }
-            Ok(runner::StartResult::ApprovalRequired { approval_id }) => {
-                let last = format!("task {task_id} needs approval ({approval_id})");
-                return Ok(WakeupOutcome {
-                    company_id: Some(company_id),
-                    summary: summary(&refused, last),
-                    remedies,
-                });
-            }
-            // Taken by someone else since the SELECT: not this agent's work
-            // any more, and the next candidate may well be.
-            Err(RunnerError::Conflict) => {
-                refused.push(format!("task {task_id} was taken by someone else"));
-            }
-            // The wallet is the agent's, not the task's: no other task would
-            // fare better.
-            Err(RunnerError::OverBudget { .. }) => {
-                let last = format!("task {task_id} blocked: over budget");
-                return Ok(WakeupOutcome {
-                    company_id: Some(company_id),
-                    summary: summary(&refused, last),
-                    remedies,
-                });
-            }
-            Err(RunnerError::Invalid(msg)) => {
-                let last = format!("cannot start {task_id}: {msg}");
-                return Ok(WakeupOutcome {
-                    company_id: Some(company_id),
-                    summary: summary(&refused, last),
-                    remedies,
-                });
-            }
-            Err(RunnerError::Blocked(msg)) => {
-                refused.push(format!("task {task_id} blocked: {msg}"));
-            }
-            // A refusal that names its own remedy (the multimodal gate,
-            // ADR-0021): applying the remedy is the owner's call, not the
-            // heartbeat's. The remedy rides along as data.
-            Err(RunnerError::Remediable { message, remedy }) => {
-                refused.push(format!("task {task_id} refused: {message}"));
-                remedies.push(remedy);
-            }
-            // Named, not wildcarded: the next variant added to RunnerError
-            // has to be decided here, or it falls through as an error and
-            // the beat stalls again. NotFound heals on the next beat, Git
-            // cannot happen before a spawn, Db is the beat's own problem.
-            Err(e @ (RunnerError::NotFound(_) | RunnerError::Git(_) | RunnerError::Db(_))) => {
-                return Err(e);
-            }
-        }
+    let exhausted = last.is_none();
+    let mut summary = match last {
+        Some(last) if refused.is_empty() => last,
+        Some(last) => format!("refused: {}; {last}", refused.join("; ")),
+        None => format!("refused: {}", refused.join("; ")),
+    };
+    if exhausted && more_behind {
+        summary.push_str(&format!(" (and more behind these {WINDOW}, not tried)"));
     }
-    let all = format!("refused: {}", refused.join("; "));
     Ok(WakeupOutcome {
         company_id: Some(company_id),
-        summary: all,
+        summary,
         remedies,
     })
 }

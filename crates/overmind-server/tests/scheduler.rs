@@ -563,8 +563,9 @@ async fn a_remediable_refusal_is_the_wakeups_outcome_not_the_heartbeats_failure(
     // The remedy the refusal named travels as data, never as a sentence to parse.
     let (payload,): (String,) = sqlx::query_as(
         "SELECT payload FROM audit_events WHERE kind = 'agent.wakeup_processed'
-         ORDER BY created_at LIMIT 1",
+         AND json_extract(payload, '$.request_id') = ?",
     )
+    .bind(w1["id"].as_str().expect("wakeup id"))
     .fetch_one(&env.state.pool)
     .await
     .expect("audit row");
