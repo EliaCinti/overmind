@@ -53,35 +53,7 @@ async fn upload(
     content_type: &str,
     bytes: &[u8],
 ) -> (StatusCode, Value) {
-    const BOUNDARY: &str = "----overmindtestboundary";
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    let request = Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
-        .body(Body::from(body))
-        .expect("build upload");
-    let response = app.clone().oneshot(request).await.expect("router responds");
-    let status = response.status();
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    (status, value)
+    common::upload(app, uri, filename, content_type, bytes).await
 }
 
 /// Fetch raw bytes with their content type — what a download actually is.
