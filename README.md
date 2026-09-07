@@ -412,11 +412,13 @@ Agents can hold **MCP tools** beyond Overmind's own — the first was Blender, d
 
 The tool's *process* is spawned where the CLI runs; what it talks to must be up: for Blender, the application open with the BlenderMCP addon serving on its port, and `uv` installed (`brew install uv`) with its cache allowed through the cage (`OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv:$HOME/.local/share/uv"`).
 
+**In the image, that sentence becomes a boundary.** The CLI runs inside the container, so a tool that drives an application on *your desktop* belongs to a native install, not to the image — Blender is the case. The published image carries no `uv`, and the BlenderMCP addon binds its socket to loopback, where a connection from a container never arrives; opening that socket wider would publish arbitrary Python execution inside Blender to the network. Tools that are *themselves* processes — a filesystem, a database, a headless browser — travel into the image with none of this. The reasoning in full, and what it would take to change it, is in [`docs/TOOLS.md`](docs/TOOLS.md#blender-needs-the-native-install-not-the-image).
+
 **The complete manual — every step, the security model, worked examples, troubleshooting — is [`docs/TOOLS.md`](docs/TOOLS.md)**. Ready-made registries to copy from [`docs/examples/`](docs/examples/):
 
 | Registry | Gives an agent | Needs on the machine |
 |---|---|---|
-| [`agent-tools.blender.json`](docs/examples/agent-tools.blender.json) | Your open Blender scene, via BlenderMCP (exclusive: one hand at a time) | Blender + the addon serving, `uv` |
+| [`agent-tools.blender.json`](docs/examples/agent-tools.blender.json) | Your open Blender scene, via BlenderMCP (exclusive: one hand at a time) | Blender + the addon serving, `uv` — and a **native install**, not the image ([why](docs/TOOLS.md#blender-needs-the-native-install-not-the-image)) |
 | [`agent-tools.filesystem.json`](docs/examples/agent-tools.filesystem.json) | Read/write under one directory you name | Node; the directory allowed through the cage |
 | [`agent-tools.browser.json`](docs/examples/agent-tools.browser.json) | A real browser: navigate, read, screenshot (Playwright MCP) | Node |
 

@@ -159,6 +159,40 @@ takes viewport screenshots, and hands back a written report. Iterate — the
 first pass will be a draft; corrections by chat are the workflow, not a
 failure of it.
 
+### Blender needs the native install, not the image
+
+The worked example above runs `cargo run` on purpose. **Blender is the one tool
+in this manual the published image cannot drive**, and the reason is worth
+stating exactly, because it is not a limitation of Docker — it is what Blender
+is. A tool's process is spawned *where the CLI runs*; in the image that is
+inside the container, and Blender is an application on your desktop, on the
+other side of that boundary.
+
+Three things stand between them, and only two have easy answers:
+
+1. **The interpreter.** The published image carries `python3` and `node`, but
+   no `uv`, `uvx` or `pip` — `uvx blender-mcp` cannot start. Solvable: build the
+   image from this tree ([`docker-compose.build.yml`](../docker-compose.build.yml))
+   and add it the way Wadachi is added, in a virtualenv of its own.
+2. **The address.** `blender-mcp` reads `BLENDER_HOST` and `BLENDER_PORT` from
+   its environment, so `host.docker.internal` aims it at the host. Solvable with
+   configuration alone: Overmind copies each `mcpServers` entry through
+   verbatim, so an `"env"` map in the registry reaches the CLI untouched.
+3. **The socket.** This is the one without a good answer. The BlenderMCP addon
+   binds its server to `localhost` — loopback, where a connection from a
+   container never arrives. To answer, it would have to listen on an address the
+   container can reach, and that socket **runs arbitrary Python inside Blender**:
+   opening it to `0.0.0.0` publishes remote code execution to everything on the
+   network. A relay bound to the bridge address narrows the exposure, but it is
+   machinery you then own.
+
+So the boundary, plainly: **a tool that is itself a process travels into the
+image** — a filesystem server, a database, a headless browser, anything the
+container can run and reach. **A tool that drives an application on your desktop
+belongs to a native install.** The image and the native build are the same code;
+what differs is which side of the container wall the application sits on. If you
+want Blender, run Overmind natively.
+
 ### Other tools people attach
 
 - **A filesystem** — `@modelcontextprotocol/server-filesystem` with the
@@ -182,6 +216,7 @@ failure of it.
 | Grant refused: *"unknown tool `x`"* | The name is not in `mcpServers` | Match the key exactly; restart if you just added it. |
 | Grant refused naming another agent | The tool is in `exclusive` | Take it out of that agent's hand first (Org → Edit), then grant. |
 | The agent reports the tool "could not connect" | The tool's target is not up (Blender closed, addon not serving, DB down) | Start the target, re-run the task. Overmind cannot start GUI applications for you. |
+| A desktop tool never connects, and Overmind runs in Docker | The application is on the host, the CLI is in the container | Expected, not a fault: see [Blender needs the native install](#blender-needs-the-native-install-not-the-image). Run natively for tools that drive a desktop app. |
 | `uvx`/`npx` "not found" or dies instantly in a run | The launcher is not installed, or its cache is denied by the cage | Install it (`brew install uv` / Node), and allow its cache: `OVERMIND_SANDBOX_ALLOW`. |
 | Tool works in a task but not in chat | You are on a pre-M28 build | Update: since ADR-0036 conversational turns carry the granted servers too. |
 | Registry edited but nothing changed | The file is read at startup | Restart Overmind. |
