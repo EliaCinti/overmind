@@ -11,6 +11,11 @@ pub enum TaskStatus {
     InProgress,
     InReview,
     Blocked,
+    /// The loop stopped it, and says why (ADR-0050): the same failure, or
+    /// the same refusal, reached its cap. Distinct from `Blocked` — "the
+    /// check said no" — and never picked by the scheduler; a person puts it
+    /// back in `Todo`.
+    Stalled,
     Done,
     Cancelled,
 }
@@ -23,6 +28,7 @@ impl TaskStatus {
             TaskStatus::InProgress => "in_progress",
             TaskStatus::InReview => "in_review",
             TaskStatus::Blocked => "blocked",
+            TaskStatus::Stalled => "stalled",
             TaskStatus::Done => "done",
             TaskStatus::Cancelled => "cancelled",
         }
@@ -35,6 +41,7 @@ impl TaskStatus {
             "in_progress" => Some(TaskStatus::InProgress),
             "in_review" => Some(TaskStatus::InReview),
             "blocked" => Some(TaskStatus::Blocked),
+            "stalled" => Some(TaskStatus::Stalled),
             "done" => Some(TaskStatus::Done),
             "cancelled" => Some(TaskStatus::Cancelled),
             _ => None,
@@ -68,6 +75,13 @@ impl TaskStatus {
                 | (Blocked, Todo)
                 | (Blocked, InProgress)
                 | (Blocked, Cancelled)
+                // The loop's stop (ADR-0050) is the loop's to make: the
+                // runner writes `stalled` itself when a failure reaches the
+                // cap, and nobody transitions *into* it by hand — a person
+                // who wants a task stopped has `blocked`. Only a person moves
+                // it on: back to the queue, or out of it.
+                | (Stalled, Todo)
+                | (Stalled, Cancelled)
         )
     }
 }
@@ -314,6 +328,8 @@ pub mod event_kind {
     pub const SESSION_FINISHED: &str = "session.finished";
     pub const SESSION_RESUMED: &str = "session.resumed";
     pub const TASK_RELEASED: &str = "task.released";
+    /// The loop stopped a task (ADR-0050): cause, count, reason, sessions.
+    pub const TASK_STALLED: &str = "task.stalled";
     pub const ARTIFACT_CREATED: &str = "artifact.created";
     pub const CONVERSATION_CREATED: &str = "conversation.created";
     pub const MESSAGE_POSTED: &str = "message.posted";
@@ -380,6 +396,8 @@ mod tests {
             // "in corso" and a Start button that only exists on "da fare".
             (InProgress, Todo),
             (InReview, Todo),
+            (Stalled, Todo),
+            (Stalled, Cancelled),
         ];
         for (from, to) in valid {
             assert!(
@@ -399,6 +417,14 @@ mod tests {
             (Done, Backlog),
             (Cancelled, Todo),
             (InReview, InReview),
+            // A stalled task is not resumed in place: it goes back to the
+            // queue, where the start and its gate live.
+            (Stalled, InProgress),
+            (Stalled, Done),
+            (Backlog, Stalled),
+            // Nobody stalls a task by hand: that is the loop's word.
+            (Todo, Stalled),
+            (InProgress, Stalled),
         ];
         for (from, to) in invalid {
             assert!(

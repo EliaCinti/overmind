@@ -625,3 +625,126 @@ async fn a_task_an_agent_cannot_take_does_not_stand_in_front_of_one_it_can() {
         "the outcome says what was declined before what was started: {outcome}"
     );
 }
+
+// --- M36a, slice 1: the attempts cap (ADR-0050 §1, §10) -------------------
+
+const SLOW_STUB: &str = "#!/bin/sh\nsleep 30\n";
+const FAILING_STUB: &str = "#!/bin/sh\necho 'it broke' >&2\nexit 1\n";
+
+/// One attempt: start the task, wait for its session to end, return it.
+async fn attempt(env: &Env, task_id: &str, agent_id: &str) -> Value {
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start: {started}");
+    let session_id = started["session_id"].as_str().expect("session id");
+    wait_for_session(&env.app, session_id).await
+}
+
+async fn stalled_payloads(env: &Env, task_id: &str) -> Vec<Value> {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT payload FROM audit_events WHERE kind = 'task.stalled' AND task_id = ? ORDER BY seq",
+    )
+    .bind(task_id)
+    .fetch_all(&env.state.pool)
+    .await
+    .expect("audit")
+    .into_iter()
+    .map(|(p,)| serde_json::from_str(&p).expect("payload"))
+    .collect()
+}
+
+#[tokio::test]
+async fn a_task_that_times_out_three_times_stalls_instead_of_looping() {
+    let env = build_env(SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Never finishes").await;
+
+    // The first two time-outs release the task, as they always have: a
+    // time-out can be bad luck.
+    for _ in 0..2 {
+        attempt(&env, &task_id, &agent_id).await;
+        assert_eq!(task_status(&env, &task_id).await, "todo");
+    }
+    // The third is no longer luck: the task stops, and says why, instead of
+    // going back to the front of the queue for the next wakeup.
+    attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(task_status(&env, &task_id).await, "stalled");
+    let stalled = stalled_payloads(&env, &task_id).await;
+    assert_eq!(stalled.len(), 1, "{stalled:?}");
+    assert_eq!(stalled[0]["cause"], "timed_out");
+    assert_eq!(stalled[0]["attempts"], 3);
+    assert_eq!(stalled[0]["sessions"].as_array().map(Vec::len), Some(3));
+    assert!(
+        stalled[0]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("timed out")),
+        "{stalled:?}"
+    );
+    // The board reads the same packet: the reason travels with the task.
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        None,
+    )
+    .await;
+    let task = tasks["tasks"]
+        .as_array()
+        .and_then(|ts| ts.iter().find(|t| t["id"] == task_id.as_str()))
+        .expect("task");
+    assert_eq!(task["stall"]["cause"], "timed_out", "{task}");
+    assert_eq!(task["stall"]["attempts"], 3, "{task}");
+    // Stalling is not releasing: the agent that failed stays on the task, so
+    // nothing reports it as unowned (ADR-0046).
+    assert_eq!(task["assignee_agent_id"], agent_id.as_str(), "{task}");
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+#[tokio::test]
+async fn a_different_cause_does_not_add_to_the_count() {
+    let env = build_env(SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Mixed", "builder").await;
+    let task_id = make_todo_task(&env, "Fails two ways").await;
+
+    for _ in 0..2 {
+        attempt(&env, &task_id, &agent_id).await;
+    }
+    // A third failure, but of another kind: it goes where that kind always
+    // went, and the two time-outs before it do not make it the third strike.
+    std::fs::write(env.root.join("stub-agent.sh"), FAILING_STUB).expect("swap stub");
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "failed");
+    assert_eq!(task_status(&env, &task_id).await, "blocked");
+    assert!(stalled_payloads(&env, &task_id).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_person_restarting_a_stalled_task_resets_its_count() {
+    let env = build_env(SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Again", "builder").await;
+    let task_id = make_todo_task(&env, "Worth another look").await;
+    for _ in 0..3 {
+        attempt(&env, &task_id, &agent_id).await;
+    }
+    assert_eq!(task_status(&env, &task_id).await, "stalled");
+
+    // The person has looked, and puts it back: it starts from zero, not from
+    // one strike away from stalling again.
+    let (status, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    assert_eq!(stalled_payloads(&env, &task_id).await.len(), 1);
+}

@@ -398,6 +398,10 @@ pub struct Config {
     pub heartbeat_ms: u64,
     /// Kill sessions running longer than this (`OVERMIND_SESSION_TIMEOUT_SECS`).
     pub session_timeout_secs: u64,
+    /// Failures of one task with the same cause before the loop stops it as
+    /// `stalled` (ADR-0050 §1, §10: fixed, re-derived from the ledger;
+    /// `OVERMIND_ATTEMPTS_CAP`). Never below 1.
+    pub attempts_cap: u32,
     /// Cents reserved against an agent's budget at task start, before the real
     /// cost is known (`OVERMIND_START_ESTIMATE_CENTS`).
     pub start_estimate_cents: i64,
@@ -565,6 +569,7 @@ impl Default for Config {
             backup_dir: None,
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
+            attempts_cap: 3,
             start_estimate_cents: 50,
             memory_cmd: None,
             chat_compact_chars: 60_000,
@@ -609,6 +614,11 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(defaults.session_timeout_secs),
+            attempts_cap: std::env::var("OVERMIND_ATTEMPTS_CAP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &u32| *n >= 1)
+                .unwrap_or(defaults.attempts_cap),
             start_estimate_cents: std::env::var("OVERMIND_START_ESTIMATE_CENTS")
                 .ok()
                 .and_then(|s| s.parse().ok())

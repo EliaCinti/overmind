@@ -6,7 +6,7 @@ export type Autonomy = "propose_only" | "act_with_approval" | "act_within_budget
 export type ReviewStrictness = "lenient" | "standard" | "strict";
 
 export type TaskStatus =
-  "backlog" | "todo" | "in_progress" | "in_review" | "blocked" | "done" | "cancelled";
+  "backlog" | "todo" | "in_progress" | "in_review" | "blocked" | "stalled" | "done" | "cancelled";
 
 export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
@@ -306,6 +306,17 @@ export interface Task {
   assignee_agent_id: string | null;
   execution_kind: ExecutionKind;
   updated_at: string;
+  /** Why the loop stopped it (ADR-0050), present only while `stalled`. */
+  stall?: TaskStall | null;
+}
+
+/** The `task.stalled` packet: the same failure reached the attempts cap. */
+export interface TaskStall {
+  cause: "timed_out" | "infra" | "agent_failure" | "empty_handed";
+  attempts: number;
+  cap: number;
+  reason: string;
+  sessions: string[];
 }
 
 /** A knowledge run's deliverable (ADR-0017): a document, table, or research note. */
