@@ -506,7 +506,7 @@ pub fn command(config: &Config, held: &Confinement, script: &str) -> Command {
         drop_to(&mut cmd, config, user);
     }
     #[cfg(target_os = "linux")]
-    if let Some(rules) = held.landlock {
+    if let Some(rules) = held.landlock.clone() {
         // The child restricts *itself*, which is what Landlock is: no helper
         // process, no wrapper binary, nothing to install. `pre_exec` runs after
         // the uid change and before `exec`, which is exactly right — the
