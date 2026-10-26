@@ -1979,10 +1979,10 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         // next wakeup takes the one behind it. The assignee stays — the task
         // is stopped, not unowned (ADR-0046: no report of "nobody on it").
         sqlx::query("UPDATE tasks SET status = 'stalled', updated_at = ? WHERE id = ?")
-        .bind(now())
-        .bind(&ctx.task_id)
-        .execute(&mut *tx)
-        .await?;
+            .bind(now())
+            .bind(&ctx.task_id)
+            .execute(&mut *tx)
+            .await?;
         audit::append(
             &mut tx,
             Some(&ctx.company_id),
