@@ -82,3 +82,51 @@ pub async fn claimed(app: axum::Router, data_dir: &std::path::Path) -> axum::Rou
         }
     }))
 }
+
+/// Upload one file as a multipart part named `file`, the way the browser does,
+/// and hand back the status **with** the body: a fixture that swallows a 400
+/// makes the test fail later, on an assertion that points somewhere else.
+// Every suite compiles this module on its own, and only the ones that
+// upload something call this: to the others it is dead code.
+#[allow(dead_code)]
+pub async fn upload(
+    app: &axum::Router,
+    uri: &str,
+    filename: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> (StatusCode, serde_json::Value) {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    const BOUNDARY: &str = "----overmindtestboundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(axum::body::Body::from(body))
+        .expect("build upload");
+    let response = app.clone().oneshot(request).await.expect("router responds");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+    )
+}

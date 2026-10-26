@@ -9,7 +9,7 @@
 mod common;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -45,33 +45,10 @@ async fn send(
 }
 
 async fn upload_image(app: &axum::Router, uri: &str, filename: &str) -> Value {
-    const BOUNDARY: &str = "----overmindtestboundary";
-    let mut body = Vec::new();
-    body.extend_from_slice(
-        format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: image/jpeg\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(b"not really a jpeg");
-    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-    let request = Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
-        .body(Body::from(body))
-        .expect("build upload");
-    let response = app.clone().oneshot(request).await.expect("router responds");
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("body")
-        .to_bytes();
-    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    let (status, body) =
+        common::upload(app, uri, filename, "image/jpeg", b"not really a jpeg").await;
+    assert_eq!(status, StatusCode::OK, "upload: {body}");
+    body
 }
 
 async fn setup() -> (axum::Router, String) {

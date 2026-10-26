@@ -191,6 +191,13 @@ Found while the owner drove the Casa San Vito company; each is small, none is ur
 - **An unclaimed instance is open to more than the claim.** `require_owner` returns `Ok` while `users` is empty and the wall waves the whole API through — right for claiming, wrong for everything else: `/economy/pay-with`, `/claude-auth/start`, `/claude-auth/code` and `/auth/invites` all answer a stranger who reaches the port of a box nobody has claimed yet. M31's export took its own `require_claimed_owner` predicate rather than widen the hole; the general fix is a `ClaimedOwner` extractor (or a `require_owner` that tells "claimable" from "owner-only"), and it wants an ADR first — which routes stay open before the claim *is* the first-run flow.
 - **The CEO reports a deliverable it cannot see.** Twice on 27 Aug the CEO's unprompted update opened with "its `ARTIFACT.md` is not in the shared folder — I report what it declares, not what it contains", while the file sat at `data/artifacts/<session>/ARTIFACT.md` (23 KB and 21 KB) and in `task_artifacts`. The CEO was honest about the gap; the gap should not exist. Either the path it is told to read is not where artifacts land, or it is told nothing and goes looking. The digest that wakes it should carry the artifact's path — and the text, when it is short — in the same words the runner uses.
 
+## Debts from the scheduler fix (7 Sep 2026)
+
+Found by the review of the wakeup fix (a refusal is the wakeup's outcome, and the wakeup moves on); each written down here rather than widening a bugfix:
+
+- **Three suites still build their own multipart body.** `tests/common::upload` now exists and checks the status; `remedies.rs` and `universal_io.rs` call it. `characterization.rs:62`, `from_plan_to_work.rs:318` and `execution.rs:679` still carry a hand-rolled builder each, with a different signature — the next change to the attachments contract (part name, disposition, boundary) is three edits that could be one.
+- **The refused tasks are only prose in the audit row.** `agent.wakeup_processed` carries `remedies` as data but the tasks declined, and why, only inside `outcome`. ADR-0050's repetition detector wants `refused: [{task_id, reason}]` beside it — add it there, where the fingerprint is defined, not before.
+
 ## Frictions from the two-machine walk (27 Aug 2026, in the order they bit)
 
 The owner and a friend ran the walk: a fresh install on the friend's machine, shared over the tailnet. What bit, ranked:
