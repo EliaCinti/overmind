@@ -15,6 +15,7 @@ export const BOARD_COLUMNS: TaskStatus[] = [
   "in_progress",
   "in_review",
   "blocked",
+  "stalled",
   "done",
 ];
 
@@ -25,6 +26,7 @@ export const STATUS_VAR: Record<TaskStatus, string> = {
   in_progress: "var(--color-status-in_progress)",
   in_review: "var(--color-status-in_review)",
   blocked: "var(--color-status-blocked)",
+  stalled: "var(--color-status-stalled)",
   done: "var(--color-status-done)",
   cancelled: "var(--color-status-cancelled)",
 };
@@ -40,6 +42,8 @@ export const TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   in_progress: ["todo", "in_review", "blocked", "cancelled"],
   in_review: ["todo", "in_progress", "done", "cancelled"],
   blocked: ["todo", "in_progress", "cancelled"],
+  // Only the loop stalls a task (ADR-0050); a person puts it back or drops it.
+  stalled: ["todo", "cancelled"],
   done: [],
   cancelled: [],
 };

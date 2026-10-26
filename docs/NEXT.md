@@ -209,6 +209,12 @@ Found by the review of the wakeup fix (a refusal is the wakeup's outcome, and th
 - **Three suites still build their own multipart body.** `tests/common::upload` now exists and checks the status; `remedies.rs` and `universal_io.rs` call it. `characterization.rs:62`, `from_plan_to_work.rs:318` and `execution.rs:679` still carry a hand-rolled builder each, with a different signature — the next change to the attachments contract (part name, disposition, boundary) is three edits that could be one.
 - **The refused tasks are only prose in the audit row.** `agent.wakeup_processed` carries `remedies` as data but the tasks declined, and why, only inside `outcome`. ADR-0050's repetition detector wants `refused: [{task_id, reason}]` beside it — add it there, where the fingerprint is defined, not before.
 
+## Debts from the attempts cap (26 Oct 2026)
+
+Found by the review of M36a slice 1; older than it, written down here rather than widening the slice:
+
+- **A run that ends overwrites a task a person cancelled while it ran.** `in_progress → cancelled` is a person's transition, but every `UPDATE tasks` in `runner::finalize` (to `in_review`, `blocked`, `todo`, and now `stalled`) matches on the id alone, and its audit row always says `from: in_progress`. Cancel a task mid-run and the run's end brings it back — and the chain records a move from a state the task was not in. The fix is `AND status = 'in_progress'` on each, and an audit row only when a row moved; it touches every outcome, so it wants its own test per outcome.
+
 ## Frictions from the two-machine walk (27 Aug 2026, in the order they bit)
 
 The owner and a friend ran the walk: a fresh install on the friend's machine, shared over the tailnet. What bit, ranked:

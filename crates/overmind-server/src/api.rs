@@ -2106,11 +2106,35 @@ async fn list_tasks(
     .bind(&company_id)
     .fetch_all(&state.pool)
     .await?;
+    // Why the loop stopped a task (ADR-0050): the latest `task.stalled`
+    // packet, carried only while the task is still stalled, so the board can
+    // say "stopped after 3 time-outs" rather than show the last error alone.
+    let mut stalls: std::collections::HashMap<String, Value> =
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT task_id, payload FROM audit_events
+         WHERE company_id = ? AND kind = ?
+           AND task_id IN (SELECT id FROM tasks WHERE company_id = ? AND status = 'stalled')
+         ORDER BY seq",
+        )
+        .bind(&company_id)
+        .bind(event_kind::TASK_STALLED)
+        .bind(&company_id)
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .filter_map(|(task, payload)| Some((task, serde_json::from_str(&payload).ok()?)))
+        .collect();
     let tasks: Vec<Value> = rows
         .into_iter()
         .map(
             |(id, goal_id, title, status, priority, assignee, execution_kind, updated_at)| {
+                let stall = if status == "stalled" {
+                    stalls.remove(&id)
+                } else {
+                    None
+                };
                 json!({
+                    "stall": stall,
                     "id": id,
                     "goal_id": goal_id,
                     "title": title,
@@ -2193,6 +2217,15 @@ async fn transition_task(
         .bind(&task_id)
         .execute(&mut *tx)
         .await?;
+    // A person putting a stalled task back has looked at it: its count of
+    // failures starts again from here (ADR-0050, the M36a plan).
+    if from == TaskStatus::Stalled {
+        sqlx::query("UPDATE tasks SET attempts_since = ? WHERE id = ?")
+            .bind(now())
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     audit::append(
         &mut tx,
         Some(&company_id),

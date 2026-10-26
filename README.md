@@ -474,6 +474,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_COOKIE_SECURE` | `on` marks the session cookie `Secure` — required behind TLS, wrong on plain-HTTP localhost |
 | `OVERMIND_HEARTBEAT_SECS` | Scheduler tick (default `30`) |
 | `OVERMIND_SESSION_TIMEOUT_SECS` | Kill sessions over this (default `3600`) |
+| `OVERMIND_ATTEMPTS_CAP` | Failures of one task with the same cause before it stops as `stalled` (default `3`, ADR-0050) |
 | `OVERMIND_WEB_DIR` | Built SPA to serve (default `./web/dist`) |
 
 Build args for the image: `CLAUDE_CODE_VERSION` (pinned agent CLI), `WADACHI_VERSION` (pinned memory provider), `EXTRA_APT_PACKAGES` (toolchains your agents need). `ANTHROPIC_API_KEY` is passed through to the container only when it exists on the host.

@@ -71,8 +71,15 @@ export const en = {
     in_progress: "In progress",
     in_review: "In review",
     blocked: "Blocked",
+    stalled: "Stalled",
     done: "Done",
     cancelled: "Cancelled",
+  },
+  stallCause: {
+    timed_out: "it timed out",
+    infra: "an infrastructure error",
+    agent_failure: "the agent failed",
+    empty_handed: "it delivered nothing",
   },
   priority: {
     low: "Low",
@@ -461,6 +468,9 @@ export const en = {
   },
   task: {
     priorityLabel: "{p} priority",
+    stalledTitle: "Stopped by the loop",
+    stalledBody:
+      "It failed {n} times the same way — {cause}. Look at the last run below, then put it back in To do or cancel it.",
     actions: "Actions",
     startWithAgent: "Start with agent",
     remedyGrantMultimodal: "Characterize {name} for visual work and start",
@@ -660,8 +670,15 @@ export const it: Dictionary = {
     in_progress: "In corso",
     in_review: "In revisione",
     blocked: "Bloccato",
+    stalled: "Fermato dal loop",
     done: "Fatto",
     cancelled: "Annullato",
+  },
+  stallCause: {
+    timed_out: "è andato in timeout",
+    infra: "un errore d'infrastruttura",
+    agent_failure: "l'agente ha fallito",
+    empty_handed: "non ha consegnato nulla",
   },
   priority: {
     low: "Bassa",
@@ -1041,6 +1058,9 @@ export const it: Dictionary = {
   },
   task: {
     priorityLabel: "priorità {p}",
+    stalledTitle: "Fermato dal loop",
+    stalledBody:
+      "È fallito {n} volte nello stesso modo — {cause}. Guarda l'ultimo run qui sotto, poi rimettilo in Da fare o annullalo.",
     actions: "Azioni",
     startWithAgent: "Avvia con un agente",
     remedyGrantMultimodal: "Caratterizza {name} per il visivo e avvia",

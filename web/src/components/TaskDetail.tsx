@@ -295,6 +295,19 @@ function Inner({
               )}
             </div>
           )}
+          {task.status === "stalled" && task.stall && (
+            <div className="rounded-md border border-[var(--color-status-stalled)]/40 bg-[var(--color-status-stalled)]/10 px-3 py-2 text-sm">
+              <p className="font-medium text-[var(--color-status-stalled)]">
+                {t("task.stalledTitle")}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {t("task.stalledBody", {
+                  n: String(task.stall.attempts),
+                  cause: t(`stallCause.${task.stall.cause}`),
+                })}
+              </p>
+            </div>
+          )}
         </section>
 
         {/* Session */}

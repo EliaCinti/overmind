@@ -1718,6 +1718,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         /// `Some(status)` moves the task; release additionally clears the assignee.
         task_to: &'static str,
         release: bool,
+        /// The class of a failure, as data, for the attempts cap (ADR-0050).
+        cause: Option<&'static str>,
     }
     let f = match outcome {
         Outcome::Success { output } => Final {
@@ -1727,6 +1729,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             last_error: None,
             task_to: "in_review",
             release: false,
+            cause: None,
         },
         Outcome::AgentFailure { output, exit_code } => Final {
             session_status: "failed",
@@ -1739,6 +1742,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             exit_code: Some(exit_code),
             task_to: "blocked",
             release: false,
+            cause: Some("agent_failure"),
         },
         Outcome::TimedOut { timeout_secs } => Final {
             session_status: "failed",
@@ -1747,6 +1751,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             last_error: Some(format!("session timed out after {timeout_secs}s")),
             task_to: "todo",
             release: true,
+            cause: Some("timed_out"),
         },
         Outcome::Infra { error, release } => Final {
             session_status: "failed",
@@ -1755,6 +1760,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             last_error: Some(error),
             task_to: if release { "todo" } else { "blocked" },
             release,
+            cause: Some("infra"),
         },
     };
 
@@ -1906,16 +1912,22 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     } else {
         f.last_error.clone()
     };
+    let cause = if empty_handed {
+        Some("empty_handed")
+    } else {
+        f.cause
+    };
 
     // Releasing the reservation (→ 0): once the run is over, its actual cost
     // is a cost_event and counts as spent; the in-flight reservation is gone.
     sqlx::query(
-        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
+        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, failure_cause = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
     )
     .bind(session_status)
     .bind(&f.output)
     .bind(f.exit_code)
     .bind(&last_error)
+    .bind(cause)
     .bind(now())
     .bind(&ctx.session_id)
     .execute(&mut *tx)
@@ -1929,7 +1941,65 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .await?;
     }
 
-    if f.release {
+    // The attempts cap (ADR-0050 §1): the same failure, the cap-th time since
+    // a person last put the task back, is no longer bad luck. Counted on the
+    // sessions themselves, never on what the agent said about them.
+    let stalled = match cause {
+        Some(cause) => {
+            let sessions: Vec<(String,)> = sqlx::query_as(
+                "SELECT s.id FROM agent_task_sessions s JOIN tasks t ON t.id = s.task_id
+                 WHERE s.task_id = ? AND s.failure_cause = ?
+                   AND s.created_at >= COALESCE(t.attempts_since, '')
+                 ORDER BY s.created_at",
+            )
+            .bind(&ctx.task_id)
+            .bind(cause)
+            .fetch_all(&mut *tx)
+            .await?;
+            let cap = ctx.state.config.attempts_cap.max(1) as usize;
+            (sessions.len() >= cap).then(|| {
+                json!({
+                    "cause": cause,
+                    "attempts": sessions.len(),
+                    "cap": cap,
+                    "reason": format!(
+                        "failed {} times the same way ({cause}); last: {}",
+                        sessions.len(),
+                        last_error.as_deref().unwrap_or("no error recorded"),
+                    ),
+                    "sessions": sessions.into_iter().map(|(id,)| id).collect::<Vec<_>>(),
+                })
+            })
+        }
+        None => None,
+    };
+
+    if let Some(packet) = &stalled {
+        // Out of the queue: the scheduler never picks a stalled task, so the
+        // next wakeup takes the one behind it. The assignee stays — the task
+        // is stopped, not unowned (ADR-0046: no report of "nobody on it").
+        sqlx::query("UPDATE tasks SET status = 'stalled', updated_at = ? WHERE id = ?")
+        .bind(now())
+        .bind(&ctx.task_id)
+        .execute(&mut *tx)
+        .await?;
+        audit::append(
+            &mut tx,
+            Some(&ctx.company_id),
+            Some(&ctx.task_id),
+            event_kind::TASK_TRANSITIONED,
+            &json!({ "from": "in_progress", "to": "stalled" }),
+        )
+        .await?;
+        audit::append(
+            &mut tx,
+            Some(&ctx.company_id),
+            Some(&ctx.task_id),
+            event_kind::TASK_STALLED,
+            packet,
+        )
+        .await?;
+    } else if f.release {
         sqlx::query(
             "UPDATE tasks SET status = 'todo', assignee_agent_id = NULL, updated_at = ? WHERE id = ?",
         )
