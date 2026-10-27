@@ -330,7 +330,8 @@ function Inner({
                       cause: t(`stallCause.${task.stall.cause}`),
                     })}
               </p>
-              {task.stall.cause === "refused" && task.stall.refusal === "invalid" && (
+              {task.stall.cause === "refused" &&
+                (task.stall.refusal === "invalid" || !REFUSAL_KEY[task.stall.refusal ?? ""]) && (
                 <p className="mt-1 text-xs text-muted-foreground">{task.stall.reason}</p>
               )}
               {stallRemedy?.kind === "grant_multimodal" && (
