@@ -80,6 +80,12 @@ export const en = {
     infra: "an infrastructure error",
     agent_failure: "the agent failed",
     empty_handed: "it delivered nothing",
+    refused: "its start was refused",
+  },
+  stallRefusal: {
+    grant_multimodal: "it carries material to look at, and the agent is not characterized for visual work",
+    invalid: "it cannot start as it is — read the reason below",
+    conflict: "another agent kept taking it first",
   },
   priority: {
     low: "Low",
@@ -471,6 +477,9 @@ export const en = {
     stalledTitle: "Stopped by the loop",
     stalledBody:
       "It failed {n} times the same way — {cause}. Look at the last run below, then put it back in To do or cancel it.",
+    stalledRefusedBody:
+      "Its start was refused {n} times in a row for the same reason: {cause}. Fix that, then put it back in To do — or cancel it.",
+    remedyGrantMultimodalAndRequeue: "Characterize {name} for visual work and put it back in To do",
     actions: "Actions",
     startWithAgent: "Start with agent",
     remedyGrantMultimodal: "Characterize {name} for visual work and start",
@@ -679,6 +688,12 @@ export const it: Dictionary = {
     infra: "un errore d'infrastruttura",
     agent_failure: "l'agente ha fallito",
     empty_handed: "non ha consegnato nulla",
+    refused: "il suo avvio è stato rifiutato",
+  },
+  stallRefusal: {
+    grant_multimodal: "contiene materiale da guardare, e l'agente non è caratterizzato per il visivo",
+    invalid: "così com'è non può partire — leggi il motivo qui sotto",
+    conflict: "un altro agente lo prendeva sempre per primo",
   },
   priority: {
     low: "Bassa",
@@ -1061,6 +1076,9 @@ export const it: Dictionary = {
     stalledTitle: "Fermato dal loop",
     stalledBody:
       "È fallito {n} volte nello stesso modo — {cause}. Guarda l'ultimo run qui sotto, poi rimettilo in Da fare o annullalo.",
+    stalledRefusedBody:
+      "Il suo avvio è stato rifiutato {n} volte di fila per lo stesso motivo: {cause}. Sistemalo, poi rimettilo in Da fare — o annullalo.",
+    remedyGrantMultimodalAndRequeue: "Caratterizza {name} per il visivo e rimettilo in Da fare",
     actions: "Azioni",
     startWithAgent: "Avvia con un agente",
     remedyGrantMultimodal: "Caratterizza {name} per il visivo e avvia",

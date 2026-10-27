@@ -17,9 +17,16 @@ import { Button } from "./ui/button";
 import { Badge, Dot, Spinner } from "./ui/primitives";
 import { Deliverables } from "./Deliverables";
 import { formatBytes, iconFor } from "../lib/files";
-import { useFormats, useT } from "../lib/i18n";
+import { useFormats, useT, type TranslationKey } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
+
+/** Why a start was refused, as the `task.stalled` packet records it, in words. */
+const REFUSAL_KEY: Record<string, TranslationKey> = {
+  "remediable:grant_multimodal": "stallRefusal.grant_multimodal",
+  invalid: "stallRefusal.invalid",
+  conflict: "stallRefusal.conflict",
+};
 export function TaskDetail({
   task,
   agents,
@@ -187,6 +194,18 @@ function Inner({
 
   const transition = (to: TaskStatus) => act(() => api.transitionTask(task.id, to));
 
+  // A task stopped by repeated refusals carries what would unblock it: one
+  // click applies the repair and puts it back in the queue for the next wakeup.
+  const stallRemedy = task.status === "stalled" ? task.stall?.remedies?.[0] : undefined;
+  const applyStallRemedy = () => {
+    if (stallRemedy?.kind !== "grant_multimodal" || !stallRemedy.agent_id) return;
+    const agentId = stallRemedy.agent_id;
+    act(async () => {
+      await api.patchAgentTraits(agentId, { multimodal: true });
+      await api.transitionTask(task.id, "todo");
+    });
+  };
+
   const loadDiff = async () => {
     if (!session) return;
     setDiff(await api.getSessionDiff(session.id));
@@ -301,11 +320,33 @@ function Inner({
                 {t("task.stalledTitle")}
               </p>
               <p className="mt-1 text-muted-foreground">
-                {t("task.stalledBody", {
-                  n: String(task.stall.attempts),
-                  cause: t(`stallCause.${task.stall.cause}`),
-                })}
+                {task.stall.cause === "refused"
+                  ? t("task.stalledRefusedBody", {
+                      n: String(task.stall.attempts),
+                      cause: t(REFUSAL_KEY[task.stall.refusal ?? ""] ?? "stallRefusal.invalid"),
+                    })
+                  : t("task.stalledBody", {
+                      n: String(task.stall.attempts),
+                      cause: t(`stallCause.${task.stall.cause}`),
+                    })}
               </p>
+              {task.stall.cause === "refused" && task.stall.refusal === "invalid" && (
+                <p className="mt-1 text-xs text-muted-foreground">{task.stall.reason}</p>
+              )}
+              {stallRemedy?.kind === "grant_multimodal" && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  className="mt-2"
+                  disabled={busy}
+                  onClick={applyStallRemedy}
+                >
+                  {t("task.remedyGrantMultimodalAndRequeue", {
+                    name:
+                      agents.find((a) => a.id === stallRemedy.agent_id)?.name ?? t("chat.theAgent"),
+                  })}
+                </Button>
+              )}
             </div>
           )}
         </section>

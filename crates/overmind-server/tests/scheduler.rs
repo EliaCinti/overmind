@@ -748,3 +748,174 @@ async fn a_person_restarting_a_stalled_task_resets_its_count() {
     assert_eq!(task_status(&env, &task_id).await, "todo");
     assert_eq!(stalled_payloads(&env, &task_id).await.len(), 1);
 }
+
+// --- M36a, slice 2: the repetition detector on refused starts (ADR-0050 §3) --
+
+/// One wakeup of `agent`, processed by one beat.
+async fn wake(env: &Env, agent_id: &str) -> String {
+    let (status, w) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent_id}/wakeup"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "wakeup: {w}");
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("beat");
+    w["id"].as_str().expect("wakeup id").to_string()
+}
+
+async fn wakeup_payload(env: &Env, wakeup_id: &str) -> Value {
+    let (payload,): (String,) = sqlx::query_as(
+        "SELECT payload FROM audit_events WHERE kind = 'agent.wakeup_processed'
+         AND json_extract(payload, '$.request_id') = ?",
+    )
+    .bind(wakeup_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("audit row");
+    serde_json::from_str(&payload).expect("payload json")
+}
+
+/// TravelAgency's seventeen: after #107 a refused start no longer stalls the
+/// beat, but the next wakeup refuses the same task for the same reason, and
+/// the one after that, with nobody counting. The third time the same agent is
+/// refused the same task for the same reason, the task stops, says why, and
+/// carries what would unblock it.
+#[tokio::test]
+async fn a_start_refused_three_times_for_the_same_reason_stalls_the_task_with_its_remedy() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let task_id = make_todo_knowledge_task(&env, "Look at the sketch").await;
+    attach_sketch(&env, &task_id).await;
+    let agent = hire_with_traits(
+        &env,
+        "Nearsighted",
+        "researcher",
+        json!({ "multimodal": false }),
+    )
+    .await;
+
+    // The first two refusals leave the task where it was: a refusal can be
+    // fixed between one wakeup and the next. Each is recorded as data.
+    for _ in 0..2 {
+        let w = wake(&env, &agent).await;
+        assert_eq!(task_status(&env, &task_id).await, "todo");
+        let payload = wakeup_payload(&env, &w).await;
+        assert_eq!(
+            payload["refusals"],
+            json!([{ "task_id": task_id, "cause": "remediable:grant_multimodal" }]),
+            "{payload}"
+        );
+    }
+    // The third is a repetition: the task leaves the queue.
+    wake(&env, &agent).await;
+    assert_eq!(task_status(&env, &task_id).await, "stalled");
+    let stalled = stalled_payloads(&env, &task_id).await;
+    assert_eq!(stalled.len(), 1, "{stalled:?}");
+    assert_eq!(stalled[0]["cause"], "refused", "{stalled:?}");
+    assert_eq!(stalled[0]["refusal"], "remediable:grant_multimodal");
+    assert_eq!(stalled[0]["attempts"], 3);
+    assert_eq!(stalled[0]["agent_id"], agent.as_str());
+    let reason = stalled[0]["reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("refused 3 times") && reason.contains("not characterized for visual work"),
+        "{reason}"
+    );
+    // What would unblock it travels with it, as data.
+    assert_eq!(
+        stalled[0]["remedies"],
+        json!([{ "kind": "grant_multimodal", "agent_id": agent }]),
+        "{stalled:?}"
+    );
+
+    // A fourth wakeup does not reach it: a stalled task is out of the queue.
+    let w = wake(&env, &agent).await;
+    let (_, outcome) = wakeup_row(&env, &w).await;
+    assert_eq!(outcome.as_deref(), Some("no todo tasks it can take"));
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+/// A repetition is the same refusal, not any refusal: a task refused twice
+/// because it has no repository to work in, then twice because it carries a
+/// sketch, has been refused four times but repeated nothing three times. The
+/// run counts from the change.
+#[tokio::test]
+async fn a_refusal_that_changes_reason_is_not_a_repetition() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    // A second repository: a code task with no goal has no single home now.
+    let other = env.root.join("other-repo");
+    std::fs::create_dir_all(&other).expect("create other repo");
+    sh(
+        &other,
+        "git init -q -b main && git -c user.email=t@t -c user.name=T commit -q --allow-empty -m init",
+    );
+    let (_, project) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/projects", env.company_id),
+        Some(json!({ "title": "Other" })),
+    )
+    .await;
+    let (status, ws) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/projects/{}/workspaces",
+            project["id"].as_str().expect("project id")
+        ),
+        Some(json!({ "name": "main", "cwd": other.to_string_lossy() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "workspace: {ws}");
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({ "title": "Homeless" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let agent = hire_with_traits(
+        &env,
+        "Selfstarter",
+        "builder",
+        json!({ "autonomy": "act_within_budget", "multimodal": false }),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let w = wake(&env, &agent).await;
+        assert_eq!(
+            wakeup_payload(&env, &w).await["refusals"][0]["cause"],
+            "invalid"
+        );
+    }
+    // The multimodal gate stands before the repository check: the same task,
+    // refused for another reason.
+    attach_sketch(&env, &task_id).await;
+    for _ in 0..2 {
+        let w = wake(&env, &agent).await;
+        assert_eq!(
+            wakeup_payload(&env, &w).await["refusals"][0]["cause"],
+            "remediable:grant_multimodal"
+        );
+    }
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    assert!(stalled_payloads(&env, &task_id).await.is_empty());
+
+    // The third of the new reason is a repetition.
+    wake(&env, &agent).await;
+    assert_eq!(task_status(&env, &task_id).await, "stalled");
+    assert_eq!(stalled_payloads(&env, &task_id).await[0]["attempts"], 3);
+}

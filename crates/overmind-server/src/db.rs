@@ -402,6 +402,10 @@ pub struct Config {
     /// `stalled` (ADR-0050 §1, §10: fixed, re-derived from the ledger;
     /// `OVERMIND_ATTEMPTS_CAP`). Never below 1.
     pub attempts_cap: u32,
+    /// The same refused start -- one agent, one task, one cause -- at this
+    /// many of the agent's wakeups in a row stops the task as `stalled`
+    /// (ADR-0050 §3, §10; `OVERMIND_REPETITION_TOLERANCE`). Never below 1.
+    pub repetition_tolerance: u32,
     /// Cents reserved against an agent's budget at task start, before the real
     /// cost is known (`OVERMIND_START_ESTIMATE_CENTS`).
     pub start_estimate_cents: i64,
@@ -570,6 +574,7 @@ impl Default for Config {
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
             attempts_cap: 3,
+            repetition_tolerance: 3,
             start_estimate_cents: 50,
             memory_cmd: None,
             chat_compact_chars: 60_000,
@@ -619,6 +624,11 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .filter(|n: &u32| *n >= 1)
                 .unwrap_or(defaults.attempts_cap),
+            repetition_tolerance: std::env::var("OVERMIND_REPETITION_TOLERANCE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &u32| *n >= 1)
+                .unwrap_or(defaults.repetition_tolerance),
             start_estimate_cents: std::env::var("OVERMIND_START_ESTIMATE_CENTS")
                 .ok()
                 .and_then(|s| s.parse().ok())
