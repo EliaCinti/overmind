@@ -207,13 +207,15 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
         .await?;
         let mut told = Vec::new();
         if let Some(company_id) = &company_id {
+            let mut constrained = Vec::new();
             for refusal in &refusals {
-                if let Some(n) =
+                if let Some(c) =
                     brake_if_repeated(state, &mut tx, company_id, &agent_id, refusal).await?
                 {
-                    told.push(n);
+                    constrained.push(c);
                 }
             }
+            told = tell_constrained(&mut tx, company_id, &agent_id, constrained).await?;
         }
         tx.commit().await?;
         if let Some(company_id) = &company_id {
@@ -289,14 +291,14 @@ fn refused_cause(payload: &str, task_id: &str) -> Option<String> {
 /// different outcome in between -- another cause, or the task taken -- ends
 /// the run, and the count starts again when a person puts a stalled task back
 /// or the agent is characterized anew, which is how a remedy is applied.
-/// Returns the notification to deliver once the transaction commits.
+/// Returns what it constrained, for `tell_constrained`.
 async fn brake_if_repeated(
     state: &AppState,
     tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
     company_id: &str,
     agent_id: &str,
     refusal: &Refusal,
-) -> Result<Option<Value>, RunnerError> {
+) -> Result<Option<Constrained>, RunnerError> {
     let tolerance = state.config.repetition_tolerance.max(1);
     let recent: Vec<(String, String)> = sqlx::query_as(
         "SELECT json_extract(e.payload, '$.request_id'), e.payload
@@ -389,7 +391,7 @@ async fn constrain(
     refusal: &Refusal,
     wakeups: &[String],
     cap: u32,
-) -> Result<Value, RunnerError> {
+) -> Result<Constrained, RunnerError> {
     audit::append(
         tx,
         Some(company_id),
@@ -406,34 +408,85 @@ async fn constrain(
         }),
     )
     .await?;
-    let (agent, task): (String, String) =
-        sqlx::query_as("SELECT a.name, t.title FROM agents a, tasks t WHERE a.id = ? AND t.id = ?")
-            .bind(agent_id)
-            .bind(&refusal.task_id)
-            .fetch_one(&mut **tx)
-            .await?;
-    let title = format!("{agent} is no longer offered \"{task}\"");
-    let body = format!("Refused {} times: {}", wakeups.len(), refusal.message);
-    Ok(notify::post(
-        tx,
-        company_id,
-        notify::New {
-            kind: notify::kind::LOOP_CONSTRAINED,
-            title: &title,
-            body: &body,
-            params: json!({
-                "agent": agent,
-                "task": task,
-                "attempts": wakeups.len(),
-                "reason": refusal.message,
-                "remedy": refusal.remedy,
-            }),
-            agent_id: Some(agent_id),
-            subject: Some(("task", &refusal.task_id)),
-            approval_id: None,
-        },
-    )
-    .await?)
+    // A title is for the sentence only: a task gone since the refusal must not
+    // fail the wakeup that recorded it.
+    let title: Option<(String,)> = sqlx::query_as("SELECT title FROM tasks WHERE id = ?")
+        .bind(&refusal.task_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(Constrained {
+        task_id: refusal.task_id.clone(),
+        title: title.map(|(t,)| t).unwrap_or_else(|| refusal.task_id.clone()),
+        attempts: wakeups.len(),
+        reason: refusal.message.clone(),
+        remedy: refusal.remedy.clone(),
+    })
+}
+
+/// A task the loop stopped offering to an agent, waiting to be told.
+struct Constrained {
+    task_id: String,
+    title: String,
+    attempts: usize,
+    reason: String,
+    remedy: Option<Value>,
+}
+
+/// Tell the owner what one wakeup constrained: once per remedy, naming every
+/// task it holds back -- one missing trait is one thing to fix, however many
+/// sketches wait on it. Returns the notifications to deliver after commit.
+async fn tell_constrained(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    company_id: &str,
+    agent_id: &str,
+    constrained: Vec<Constrained>,
+) -> Result<Vec<Value>, RunnerError> {
+    let mut groups: Vec<Vec<Constrained>> = Vec::new();
+    for c in constrained {
+        match groups.iter_mut().find(|g| g[0].remedy == c.remedy) {
+            Some(g) => g.push(c),
+            None => groups.push(vec![c]),
+        }
+    }
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let name: Option<(String,)> = sqlx::query_as("SELECT name FROM agents WHERE id = ?")
+        .bind(agent_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let agent = name.map(|(n,)| n).unwrap_or_else(|| agent_id.to_string());
+    let mut told = Vec::new();
+    for group in groups {
+        let first = &group[0];
+        let tasks: Vec<&str> = group.iter().map(|c| c.title.as_str()).collect();
+        let title = format!("{agent} is no longer offered \"{}\"", tasks.join("\", \""));
+        let body = format!("Refused {} times: {}", first.attempts, first.reason);
+        told.push(
+            notify::post(
+                tx,
+                company_id,
+                notify::New {
+                    kind: notify::kind::LOOP_CONSTRAINED,
+                    title: &title,
+                    body: &body,
+                    params: json!({
+                        "agent": agent,
+                        "task": first.title,
+                        "tasks": tasks,
+                        "attempts": first.attempts,
+                        "reason": first.reason,
+                        "remedy": first.remedy,
+                    }),
+                    agent_id: Some(agent_id),
+                    subject: Some(("task", &first.task_id)),
+                    approval_id: None,
+                },
+            )
+            .await?,
+        );
+    }
+    Ok(told)
 }
 
 async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcome, RunnerError> {

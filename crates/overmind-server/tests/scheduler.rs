@@ -1001,6 +1001,29 @@ async fn the_owner_is_told_once_with_the_remedy() {
     );
 }
 
+/// One missing trait is one thing to fix, however many tasks it holds back:
+/// five sketches refused to the same agent are one item in the inbox, naming
+/// them all, not five items with the same button.
+#[tokio::test]
+async fn one_missing_trait_is_told_once_for_all_the_tasks_it_holds_back() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (first, agent) = sketch_and_nearsighted(&env).await;
+    let second = make_todo_knowledge_task(&env, "Look at the other sketch").await;
+    attach_sketch(&env, &second).await;
+    for _ in 0..3 {
+        wake(&env, &agent).await;
+    }
+    assert_eq!(constrained_payloads(&env, &first).await.len(), 1);
+    assert_eq!(constrained_payloads(&env, &second).await.len(), 1);
+    let told = notifications_of(&env, "loop.constrained").await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        told[0]["params"]["tasks"],
+        json!(["Look at the sketch", "Look at the other sketch"]),
+        "{told:?}"
+    );
+}
+
 /// The brake lifts when what it was about changes: applying the remedy is a
 /// change of characterization, and the next wakeup offers the task again.
 #[tokio::test]

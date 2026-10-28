@@ -293,6 +293,7 @@ export const en = {
     budgetExhaustedBody:
       "{spent} of {limit} spent this month, so {agent} could not take its turn. Raise its cap, or wait for the new month.",
     loopConstrainedTitle: "{agent} is no longer offered “{task}”",
+    loopConstrainedTitleMany: "{agent} is no longer offered {n} tasks: {tasks}",
     loopConstrainedBody:
       "Refused {n} times for the same reason: {reason}\n\nThe task stays in the queue for whoever can take it. Characterize {agent} for it, or give it to someone who can.",
     loopConstrainedGrantMultimodal: "Characterize {agent} for visual work",
@@ -895,6 +896,7 @@ export const it: Dictionary = {
     budgetExhaustedBody:
       "{spent} di {limit} spesi questo mese, quindi {agent} non ha potuto fare il suo turno. Alza il suo tetto, o aspetta il mese nuovo.",
     loopConstrainedTitle: "«{task}» non viene più offerto a {agent}",
+    loopConstrainedTitleMany: "{n} task non vengono più offerti a {agent}: {tasks}",
     loopConstrainedBody:
       "Rifiutato {n} volte per lo stesso motivo: {reason}\n\nIl task resta in coda per chi può prenderlo. Caratterizza {agent} per farlo, o affidalo a chi può.",
     loopConstrainedGrantMultimodal: "Caratterizza {agent} per il visivo",
@@ -1386,9 +1388,18 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
             limit: formatCents(Number(p.limitCents ?? 0)),
           }),
         };
-      case "loop.constrained":
+      case "loop.constrained": {
+        // One missing trait is told once for every task it holds back.
+        const tasks = Array.isArray(p.tasks) ? p.tasks.map(String) : [];
         return {
-          title: t("notif.loopConstrainedTitle", { agent: v("agent"), task: v("task") }),
+          title:
+            tasks.length > 1
+              ? t("notif.loopConstrainedTitleMany", {
+                  agent: v("agent"),
+                  n: String(tasks.length),
+                  tasks: tasks.join(", "),
+                })
+              : t("notif.loopConstrainedTitle", { agent: v("agent"), task: v("task") }),
           // The refusal's own words, as the runner wrote them.
           body: t("notif.loopConstrainedBody", {
             agent: v("agent"),
@@ -1396,6 +1407,7 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
             reason: v("reason"),
           }),
         };
+      }
       case "meeting.paused":
         return {
           title: t("notif.meetingPausedTitle", { topic: v("topic") }),
