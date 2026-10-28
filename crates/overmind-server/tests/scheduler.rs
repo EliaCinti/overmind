@@ -1048,6 +1048,28 @@ async fn granting_the_remedy_offers_the_task_again() {
     assert_eq!(payload["taken"], json!(task_id), "{payload}");
 }
 
+/// Only a change lifts it: a patch that changes nothing still writes a
+/// revision, and must not hand the task back to be refused three more times.
+#[tokio::test]
+async fn a_patch_that_changes_nothing_does_not_lift_the_brake() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (task_id, agent) = sketch_and_nearsighted(&env).await;
+    for _ in 0..3 {
+        wake(&env, &agent).await;
+    }
+    let (status, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/traits"),
+        Some(json!({ "multimodal": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "traits: {body}");
+    let w = wake(&env, &agent).await;
+    assert_eq!(wakeup_payload(&env, &w).await["refusals"], json!([]));
+    assert_eq!(constrained_payloads(&env, &task_id).await.len(), 1);
+}
+
 /// A repetition is the same refusal, not any refusal: a task refused twice
 /// because it has no repository to work in, then twice because it carries a
 /// sketch, has been refused four times but repeated nothing three times. The

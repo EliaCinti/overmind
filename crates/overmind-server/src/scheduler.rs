@@ -307,7 +307,7 @@ async fn brake_if_repeated(
            AND json_extract(e.payload, '$.agent_id') = ?
            AND e.created_at >= COALESCE(t.attempts_since, '')
            AND e.created_at >= COALESCE((SELECT MAX(r.created_at) FROM agent_config_revisions r
-                                         WHERE r.agent_id = ?), '')
+                                         WHERE r.agent_id = ? AND r.changed_keys <> '[]'), '')
            AND (json_extract(e.payload, '$.taken') = t.id
                 OR EXISTS (SELECT 1 FROM json_each(e.payload, '$.refusals') r
                            WHERE json_extract(r.value, '$.task_id') = t.id))
@@ -571,8 +571,9 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
     // is fetched so the outcome can say when the window was the limit.
     const WINDOW: usize = 20;
     // A task the loop stopped offering to this agent is not a candidate
-    // (`constrain`) -- until a person puts it back or the agent is
-    // characterized anew, the same two events that restart the count.
+    // (`constrain`) until the agent is characterized anew -- a revision that
+    // changed something. The cause was the agent's, so nothing done to the
+    // task lifts it; giving the task to someone else is the other way out.
     let sql = format!(
         "SELECT id FROM tasks WHERE company_id = ? AND status = 'todo'
            AND execution_kind IN ({placeholders})
@@ -582,7 +583,7 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
                AND json_extract(c.payload, '$.agent_id') = ?
                AND c.created_at >= COALESCE(tasks.attempts_since, '')
                AND c.created_at >= COALESCE((SELECT MAX(r.created_at) FROM agent_config_revisions r
-                                             WHERE r.agent_id = ?), ''))
+                                             WHERE r.agent_id = ? AND r.changed_keys <> '[]'), ''))
            ORDER BY created_at LIMIT {}",
         WINDOW + 1
     );
