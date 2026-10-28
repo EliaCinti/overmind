@@ -475,7 +475,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_HEARTBEAT_SECS` | Scheduler tick (default `30`) |
 | `OVERMIND_SESSION_TIMEOUT_SECS` | Kill sessions over this (default `3600`) |
 | `OVERMIND_ATTEMPTS_CAP` | Failures of one task with the same cause before it stops as `stalled` (default `3`, ADR-0050) |
-| `OVERMIND_REPETITION_TOLERANCE` | Wakeups in a row at which an agent is refused the same task for the same reason before the task stops as `stalled` (default `3`, ADR-0050) |
+| `OVERMIND_REPETITION_TOLERANCE` | Wakeups in a row at which an agent is refused the same task for the same reason before the brake trips: the task stops as `stalled` when the reason is the task's, and stops being offered to that agent when it is the agent's (default `3`, ADR-0050 and its addendum) |
 | `OVERMIND_WEB_DIR` | Built SPA to serve (default `./web/dist`) |
 
 Build args for the image: `CLAUDE_CODE_VERSION` (pinned agent CLI), `WADACHI_VERSION` (pinned memory provider), `EXTRA_APT_PACKAGES` (toolchains your agents need). `ANTHROPIC_API_KEY` is passed through to the container only when it exists on the host.
