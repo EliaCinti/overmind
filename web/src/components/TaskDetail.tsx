@@ -194,18 +194,6 @@ function Inner({
 
   const transition = (to: TaskStatus) => act(() => api.transitionTask(task.id, to));
 
-  // A task stopped by repeated refusals carries what would unblock it: one
-  // click applies the repair and puts it back in the queue for the next wakeup.
-  const stallRemedy = task.status === "stalled" ? task.stall?.remedies?.[0] : undefined;
-  const applyStallRemedy = () => {
-    if (stallRemedy?.kind !== "grant_multimodal" || !stallRemedy.agent_id) return;
-    const agentId = stallRemedy.agent_id;
-    act(async () => {
-      await api.patchAgentTraits(agentId, { multimodal: true });
-      await api.transitionTask(task.id, "todo");
-    });
-  };
-
   const loadDiff = async () => {
     if (!session) return;
     setDiff(await api.getSessionDiff(session.id));
@@ -333,20 +321,6 @@ function Inner({
               {task.stall.cause === "refused" &&
                 (task.stall.refusal === "invalid" || !REFUSAL_KEY[task.stall.refusal ?? ""]) && (
                 <p className="mt-1 text-xs text-muted-foreground">{task.stall.reason}</p>
-              )}
-              {stallRemedy?.kind === "grant_multimodal" && (
-                <Button
-                  size="sm"
-                  variant="primary"
-                  className="mt-2"
-                  disabled={busy}
-                  onClick={applyStallRemedy}
-                >
-                  {t("task.remedyGrantMultimodalAndRequeue", {
-                    name:
-                      agents.find((a) => a.id === stallRemedy.agent_id)?.name ?? t("chat.theAgent"),
-                  })}
-                </Button>
               )}
             </div>
           )}

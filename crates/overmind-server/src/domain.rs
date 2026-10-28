@@ -330,6 +330,9 @@ pub mod event_kind {
     pub const TASK_RELEASED: &str = "task.released";
     /// The loop stopped a task (ADR-0050): cause, count, reason, sessions.
     pub const TASK_STALLED: &str = "task.stalled";
+    /// The loop stopped offering a task to one agent, for a cause that is the
+    /// agent's (ADR-0050, addendum of 28 Oct): the task stays in the queue.
+    pub const LOOP_CONSTRAINED: &str = "loop.constrained";
     pub const ARTIFACT_CREATED: &str = "artifact.created";
     pub const CONVERSATION_CREATED: &str = "conversation.created";
     pub const MESSAGE_POSTED: &str = "message.posted";
