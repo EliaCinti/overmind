@@ -48,6 +48,7 @@ export function Inbox({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [applied, setApplied] = useState<Record<string, true>>({});
+  const [failed, setFailed] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let alive = true;
@@ -126,10 +127,18 @@ export function Inbox({
     const remedy = remedyOf(n);
     if (remedy?.kind !== "grant_multimodal") return;
     setBusy(n.id);
+    setFailed(({ [n.id]: _, ...rest }) => rest);
     try {
       await api.patchAgentTraits(remedy.agentId, { multimodal: true });
       await api.readNotification(n.id).catch(() => {});
       setApplied((a) => ({ ...a, [n.id]: true }));
+      // The org chart and the board read the agent's traits too.
+      onDecided();
+    } catch (e) {
+      setFailed((f) => ({
+        ...f,
+        [n.id]: e instanceof Error ? e.message : t("task.actionFailed"),
+      }));
     } finally {
       setBusy(null);
     }
@@ -237,6 +246,9 @@ export function Inbox({
                         })}
                       </Button>
                     ))}
+                  {failed[n.id] && (
+                    <span className="text-xs text-destructive">{failed[n.id]}</span>
+                  )}
                   {n.subject_type === "meeting" && n.subject_id && (
                     <Button
                       size="sm"
