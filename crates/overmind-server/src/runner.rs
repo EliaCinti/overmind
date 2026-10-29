@@ -2084,7 +2084,13 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // The spend is in the ledger: say so if what is left no longer covers the
     // next run (ADR-0050 §4). The run's own outcome does not depend on it.
     if let Some(agent_id) = &costed
-        && let Err(e) = crate::governance::warn_if_low(&ctx.state, &ctx.company_id, agent_id).await
+        && let Err(e) = crate::governance::warn_if_low(
+            &ctx.state,
+            &ctx.company_id,
+            agent_id,
+            crate::governance::SpendKind::Task,
+        )
+        .await
     {
         eprintln!("budget.low for {agent_id} not checked: {e}");
     }

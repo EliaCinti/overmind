@@ -410,9 +410,14 @@ async fn budget_low_is_said_once_per_window() {
     assert_eq!(budget_low_notifications(&env).await.len(), 1);
 
     // Asked again while still low: nothing new to say.
-    overmind_server::governance::warn_if_low(&env.state, &env.company, &agent)
-        .await
-        .expect("warn");
+    overmind_server::governance::warn_if_low(
+        &env.state,
+        &env.company,
+        &agent,
+        overmind_server::governance::SpendKind::Task,
+    )
+    .await
+    .expect("warn");
     assert_eq!(budget_low_notifications(&env).await.len(), 1);
 
     // The cap is raised: 9¢ left again. One more run, 4¢ left: said again.
@@ -427,4 +432,28 @@ async fn budget_low_is_said_once_per_window() {
     run_to_end(&env, &agent, "third").await;
     let told = budget_low_notifications(&env).await;
     assert_eq!(told.len(), 2, "{told:?}");
+}
+
+/// Lowering the cap is the other way to run low: no cost lands, so the owner
+/// hears it from the change itself, not from the next refusal.
+#[tokio::test]
+async fn lowering_the_cap_under_the_next_run_warns_at_once() {
+    let env = setup().await;
+    let agent = hire(&env, "Thrifty", 14).await;
+    past_task_runs(&env, &agent, &[5, 5, 5]).await;
+    run_to_end(&env, &agent, "first").await;
+    assert!(budget_low_notifications(&env).await.is_empty());
+
+    // 5¢ spent; a cap of 8 leaves 3, and the next run costs 5.
+    let (s, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/budget"),
+        Some(json!({ "monthly_budget_cents": 8 })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "budget: {body}");
+    let told = budget_low_notifications(&env).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["params"]["headroomCents"], 3, "{told:?}");
 }

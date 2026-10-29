@@ -1467,14 +1467,23 @@ pub(crate) async fn run_adapter(
 
     // Whatever happened, the money is spent and the hold must go: a reservation
     // that outlives its turn is a leak only a restart would clear.
-    if let Ok(output) = &outcome {
-        crate::governance::record_turn_cost(&state.pool, turn.company_id, turn.agent_id, output)
-            .await;
-    }
+    let costed = match &outcome {
+        Ok(output) => {
+            crate::governance::record_turn_cost(&state.pool, turn.company_id, turn.agent_id, output)
+                .await
+        }
+        Err(_) => false,
+    };
     crate::governance::release_turn(&state.pool, &reservation).await;
-    // After the release, so the headroom no longer counts this turn's hold.
-    if outcome.is_ok()
-        && let Err(e) = crate::governance::warn_if_low(state, turn.company_id, turn.agent_id).await
+    // Only when a cost landed: a turn that spent nothing moved no balance.
+    if costed
+        && let Err(e) = crate::governance::warn_if_low(
+            state,
+            turn.company_id,
+            turn.agent_id,
+            crate::governance::SpendKind::Turn,
+        )
+        .await
     {
         eprintln!("budget.low for {} not checked: {e}", turn.agent_id);
     }

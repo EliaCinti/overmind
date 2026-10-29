@@ -250,12 +250,12 @@ pub async fn record_turn_cost(
     company_id: &str,
     agent_id: &str,
     output: &str,
-) {
+) -> bool {
     let Some(cost) = crate::provider::current().cost(output) else {
-        return;
+        return false;
     };
     let now = chrono::Utc::now().to_rfc3339();
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO cost_events (id, company_id, agent_id, task_id, session_id, provider, model,
          input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at)
          VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -272,65 +272,69 @@ pub async fn record_turn_cost(
     .bind(&now)
     .bind(&now)
     .execute(pool)
-    .await;
+    .await
+    .is_ok()
 }
 
 /// `budget.low` (ADR-0050 §4) -- the warning ADR-0012 deferred at 80 % and
 /// never delivered. When what an agent has left this month falls under what
-/// its next task run is expected to cost, the owner hears it by name, before
-/// [`check`] refuses that run -- correctly, and silently. Called after a cost
-/// is recorded, so the spend it follows is already in the ledger.
+/// its next run of `kind` is expected to cost, the owner hears it by name,
+/// before [`check`] refuses that run -- correctly, and silently. Called where
+/// the balance moves: after a cost is recorded, and after the cap changes.
 ///
-/// Once per agent, window and cap: a run that spends while already low has
-/// nothing new to say, and a raised cap is a new promise that can run low too.
+/// "Left" is the cap less what is *spent*: a reservation is a hold that ends
+/// with its run, and a warning spent on a hold would be gone by the time the
+/// money really runs out. Once per agent and month since the cap last
+/// changed -- spending while already low has nothing new to say, and a
+/// changed cap is a new promise that can run low too. Read and written in one
+/// write transaction, so two costs landing together cannot both say it.
 pub async fn warn_if_low(
     state: &crate::db::AppState,
     company_id: &str,
     agent_id: &str,
+    kind: SpendKind,
 ) -> Result<(), sqlx::Error> {
+    let mut tx = state.write_tx().await?;
     let agent: Option<(String, String)> =
         sqlx::query_as("SELECT name, traits FROM agents WHERE id = ?")
             .bind(agent_id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *tx)
             .await?;
     let Some((name, traits)) = agent else {
         return Ok(());
     };
     let cap = crate::runner::trait_budget_cents(&traits);
-    let mut conn = state.pool.acquire().await?;
-    let Some(headroom) = headroom_cents(&mut conn, agent_id, cap, None).await? else {
+    if cap <= 0 {
         return Ok(());
-    };
-    let next = estimate_cents(
-        &mut conn,
-        agent_id,
-        SpendKind::Task,
-        state.config.start_estimate_cents,
-    )
-    .await?
-    .cents;
+    }
+    let window = month_window_start();
+    let headroom = (cap - spent_cents(&mut tx, agent_id, &window).await?).max(0);
+    let next = estimate_cents(&mut tx, agent_id, kind, state.config.start_estimate_cents)
+        .await?
+        .cents;
     if headroom >= next {
         return Ok(());
     }
     let said: Option<(i64,)> = sqlx::query_as(
         "SELECT 1 FROM audit_events
          WHERE kind = ? AND company_id = ? AND json_extract(payload, '$.agent_id') = ?
-           AND created_at >= ? AND json_extract(payload, '$.limit_cents') = ?
+           AND created_at >= ?
+           AND created_at >= COALESCE((SELECT MAX(r.created_at) FROM agent_config_revisions r
+                                       WHERE r.agent_id = ? AND r.source = 'budget'
+                                         AND r.changed_keys <> '[]'), '')
          LIMIT 1",
     )
     .bind(crate::domain::event_kind::BUDGET_LOW)
     .bind(company_id)
     .bind(agent_id)
-    .bind(month_window_start())
-    .bind(cap)
-    .fetch_optional(&mut *conn)
+    .bind(&window)
+    .bind(agent_id)
+    .fetch_optional(&mut *tx)
     .await?;
-    drop(conn);
     if said.is_some() {
         return Ok(());
     }
 
-    let mut tx = state.write_tx().await?;
     crate::audit::append(
         &mut tx,
         Some(company_id),
@@ -347,8 +351,9 @@ pub async fn warn_if_low(
     .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let title = format!("{name} is running low on budget");
     let body = format!(
-        "{} left this month, and its next run costs about {}. Raise its cap before it is refused.",
+        "{} left of {} this month, and its next run costs about {}. Raise its cap now, or the next start will be refused.",
         euros(headroom),
+        euros(cap),
         euros(next)
     );
     let n = crate::notify::post(
@@ -365,13 +370,16 @@ pub async fn warn_if_low(
                 "limitCents": cap,
             }),
             agent_id: Some(agent_id),
-            subject: None,
+            // The same subject budget.exhausted names, so the two read as one
+            // story about one agent.
+            subject: Some(("agent", agent_id)),
             approval_id: None,
         },
     )
     .await?;
     tx.commit().await?;
     crate::notify::deliver(state, company_id, &n);
+    state.notify(company_id);
     Ok(())
 }
 
