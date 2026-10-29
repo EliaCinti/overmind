@@ -1113,3 +1113,158 @@ async fn a_refusal_that_changes_reason_is_not_a_repetition() {
     assert_eq!(task_status(&env, &task_id).await, "todo");
     assert_eq!(constrained_payloads(&env, &task_id).await[0]["attempts"], 3);
 }
+
+// --- M36a, slice 4: a stop is a wind-down, with a handoff (ADR-0050 §4) -----
+
+/// Says what it did, leaves a file, then outlives its deadline.
+const TALKING_SLOW_STUB: &str =
+    "#!/bin/sh\necho 'read the brief, drafted the outline'\necho draft > notes.md\nsleep 30\n";
+/// Repeats the prompt it was given, then finishes.
+const PROMPT_STUB: &str = "#!/bin/sh\nprintf '%s\\n' \"$OVERMIND_TASK_PROMPT\"\n";
+
+async fn handoffs(env: &Env, task_id: &str) -> Vec<String> {
+    sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT content FROM task_artifacts WHERE task_id = ? AND kind = 'handoff' ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(&env.state.pool)
+    .await
+    .expect("artifacts")
+    .into_iter()
+    .map(|(c,)| c.unwrap_or_default())
+    .collect()
+}
+
+/// A run killed at its deadline used to leave a failed session, an empty
+/// output and a task back in the queue -- no account of what it had done.
+/// Now Overmind writes one from what the run left behind: why it stopped,
+/// what it changed, and the last thing it said.
+#[tokio::test]
+async fn a_run_killed_at_its_deadline_leaves_a_handoff() {
+    let env = build_env(TALKING_SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Never finishes").await;
+
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "failed");
+    let handoff = handoffs(&env, &task_id).await;
+    assert_eq!(handoff.len(), 1, "{handoff:?}");
+    assert!(handoff[0].contains("timed out"), "{}", handoff[0]);
+    assert!(handoff[0].contains("notes.md"), "{}", handoff[0]);
+    assert!(
+        handoff[0].contains("read the brief, drafted the outline"),
+        "{}",
+        handoff[0]
+    );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+/// The handoff is for the next attempt: it starts from where the last one
+/// stopped, not from the brief alone.
+#[tokio::test]
+async fn the_next_attempt_reads_the_previous_handoff() {
+    let env = build_env(TALKING_SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Finishes the second time").await;
+    attempt(&env, &task_id, &agent_id).await;
+
+    std::fs::write(env.root.join("stub-agent.sh"), PROMPT_STUB).expect("swap stub");
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let prompt = session["output"].as_str().unwrap_or("");
+    assert!(prompt.contains("previous attempt"), "{prompt}");
+    assert!(
+        prompt.contains("read the brief, drafted the outline"),
+        "{prompt}"
+    );
+}
+
+/// Two numbers per bound (ADR-0050 §4): the run is told the advertised one
+/// and asked to hand off before it; the enforced one stays where it was and
+/// fires only when the wind-down misbehaves.
+#[tokio::test]
+async fn the_prompt_states_the_advertised_bound_not_the_enforced_one() {
+    let env = build_env(PROMPT_STUB, None, |c| c.session_timeout_secs = 100).await;
+    let agent_id = hire_with_traits(
+        &env,
+        "Bounded",
+        "builder",
+        json!({ "monthly_budget_cents": 1000 }),
+    )
+    .await;
+    let task_id = make_todo_task(&env, "Bounded work").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let prompt = session["output"].as_str().unwrap_or("");
+    assert!(prompt.contains("90 seconds"), "{prompt}");
+    assert!(prompt.contains("€8.50"), "{prompt}");
+    assert!(prompt.contains("HANDOFF.md"), "{prompt}");
+    assert!(!prompt.contains("100 seconds"), "{prompt}");
+    assert!(!prompt.contains("€10.00"), "{prompt}");
+}
+
+/// The handoff file is in a directory the agent owns, read by a server that
+/// is not in the cage: a link planted in its place must not carry a host file
+/// out into the drawer and the next prompt.
+#[tokio::test]
+async fn a_handoff_planted_as_a_symlink_is_not_followed() {
+    let secret_dir = std::env::temp_dir().join(format!("om-secret-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&secret_dir).expect("secret dir");
+    let secret = secret_dir.join("id_rsa");
+    std::fs::write(&secret, "PRIVATE-KEY-MATERIAL").expect("secret");
+    let stub = format!(
+        "#!/bin/sh\nmkdir -p deliverables\nln -s '{}' deliverables/HANDOFF.md\n",
+        secret.display()
+    );
+    let env = build_env(&stub, None, |_| {}).await;
+    let agent_id = hire(&env, "Sly", "builder").await;
+    let task_id = make_todo_task(&env, "Innocent work").await;
+
+    attempt(&env, &task_id, &agent_id).await;
+    for text in handoffs(&env, &task_id).await {
+        assert!(!text.contains("PRIVATE-KEY-MATERIAL"), "{text}");
+    }
+    let (leaked,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_artifacts WHERE task_id = ? AND content LIKE '%PRIVATE-KEY-MATERIAL%'",
+    )
+    .bind(&task_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("count");
+    assert_eq!(leaked, 0);
+}
+
+/// Stops itself in time, as the prompt asks, and leaves its own handoff.
+const HANDING_OFF_STUB: &str =
+    "#!/bin/sh\nmkdir -p deliverables\necho 'pending: the second half' > deliverables/HANDOFF.md\n";
+
+/// A run that does what the prompt asks -- stops before its bound and writes
+/// its handoff -- is not finished work: the task goes back to the queue with
+/// the handoff, not to review with "what is pending" filed as a deliverable.
+#[tokio::test]
+async fn a_run_that_hands_off_in_time_goes_back_to_the_queue_with_its_handoff() {
+    let env = build_env(HANDING_OFF_STUB, None, |_| {}).await;
+    let agent_id = hire(&env, "Careful", "builder").await;
+    let task_id = make_todo_task(&env, "Half a day of work").await;
+
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "completed");
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    let handoff = handoffs(&env, &task_id).await;
+    assert_eq!(handoff.len(), 1, "{handoff:?}");
+    assert!(
+        handoff[0].contains("pending: the second half"),
+        "{}",
+        handoff[0]
+    );
+    let (documents,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_artifacts WHERE task_id = ? AND kind <> 'handoff'",
+    )
+    .bind(&task_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("count");
+    assert_eq!(
+        documents, 0,
+        "the handoff must not be filed as a deliverable"
+    );
+}
