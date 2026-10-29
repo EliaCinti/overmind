@@ -17,9 +17,16 @@ import { Button } from "./ui/button";
 import { Badge, Dot, Spinner } from "./ui/primitives";
 import { Deliverables } from "./Deliverables";
 import { formatBytes, iconFor } from "../lib/files";
-import { useFormats, useT } from "../lib/i18n";
+import { useFormats, useT, type TranslationKey } from "../lib/i18n";
 import { cn } from "../lib/utils";
 
+
+/** Why a start was refused, as the `task.stalled` packet records it, in words. */
+const REFUSAL_KEY: Record<string, TranslationKey> = {
+  "remediable:grant_multimodal": "stallRefusal.grant_multimodal",
+  invalid: "stallRefusal.invalid",
+  conflict: "stallRefusal.conflict",
+};
 export function TaskDetail({
   task,
   agents,
@@ -301,11 +308,20 @@ function Inner({
                 {t("task.stalledTitle")}
               </p>
               <p className="mt-1 text-muted-foreground">
-                {t("task.stalledBody", {
-                  n: String(task.stall.attempts),
-                  cause: t(`stallCause.${task.stall.cause}`),
-                })}
+                {task.stall.cause === "refused"
+                  ? t("task.stalledRefusedBody", {
+                      n: String(task.stall.attempts),
+                      cause: t(REFUSAL_KEY[task.stall.refusal ?? ""] ?? "stallRefusal.invalid"),
+                    })
+                  : t("task.stalledBody", {
+                      n: String(task.stall.attempts),
+                      cause: t(`stallCause.${task.stall.cause}`),
+                    })}
               </p>
+              {task.stall.cause === "refused" &&
+                (task.stall.refusal === "invalid" || !REFUSAL_KEY[task.stall.refusal ?? ""]) && (
+                <p className="mt-1 text-xs text-muted-foreground">{task.stall.reason}</p>
+              )}
             </div>
           )}
         </section>

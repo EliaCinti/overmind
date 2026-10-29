@@ -33,6 +33,9 @@ pub mod kind {
     /// An agent's headroom fell under its next run's cost: raise the cap
     /// before the wallet refuses it (ADR-0050 §4).
     pub const BUDGET_LOW: &str = "budget.low";
+    /// An agent was refused the same task for a cause of its own until the
+    /// loop stopped offering it; carries the remedy (ADR-0050, 28 Oct).
+    pub const LOOP_CONSTRAINED: &str = "loop.constrained";
     /// A room stopped mid-deliberation for the same reason, and is waiting to
     /// be resumed rather than being closed (ADR-0022).
     pub const MEETING_PAUSED: &str = "meeting.paused";
