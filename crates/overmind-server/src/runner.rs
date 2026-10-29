@@ -2375,6 +2375,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // Cost capture: the Claude Code CLI (and our stubs) print a final JSON
     // object with total_cost_usd and usage. Missing/unparseable cost is not
     // an error — the session already carries the full output.
+    let mut costed: Option<String> = None;
     if let Some(cost) = crate::provider::current().cost(&f.output) {
         let agent_id: Option<(String,)> =
             sqlx::query_as("SELECT agent_id FROM agent_task_sessions WHERE id = ?")
@@ -2382,6 +2383,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                 .fetch_optional(&mut *tx)
                 .await?;
         if let Some((agent_id,)) = agent_id {
+            costed = Some(agent_id.clone());
             sqlx::query(
                 "INSERT INTO cost_events (id, company_id, agent_id, task_id, session_id, provider, model,
                  input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at)
@@ -2406,6 +2408,19 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     }
     tx.commit().await?;
     ctx.state.notify(&ctx.company_id);
+    // The spend is in the ledger: say so if what is left no longer covers the
+    // next run (ADR-0050 §4). The run's own outcome does not depend on it.
+    if let Some(agent_id) = &costed
+        && let Err(e) = crate::governance::warn_if_low(
+            &ctx.state,
+            &ctx.company_id,
+            agent_id,
+            crate::governance::SpendKind::Task,
+        )
+        .await
+    {
+        eprintln!("budget.low for {agent_id} not checked: {e}");
+    }
 
     // The floor moves on its own (M30, ADR-0042): a completed run releases
     // the tasks that were waiting on this one — each inherits the

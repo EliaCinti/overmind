@@ -749,6 +749,371 @@ async fn a_person_restarting_a_stalled_task_resets_its_count() {
     assert_eq!(stalled_payloads(&env, &task_id).await.len(), 1);
 }
 
+// --- M36a, slice 2: the repetition detector on refused starts (ADR-0050 §3) --
+
+/// One wakeup of `agent`, processed by one beat.
+async fn wake(env: &Env, agent_id: &str) -> String {
+    let (status, w) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent_id}/wakeup"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "wakeup: {w}");
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("beat");
+    w["id"].as_str().expect("wakeup id").to_string()
+}
+
+async fn wakeup_payload(env: &Env, wakeup_id: &str) -> Value {
+    let (payload,): (String,) = sqlx::query_as(
+        "SELECT payload FROM audit_events WHERE kind = 'agent.wakeup_processed'
+         AND json_extract(payload, '$.request_id') = ?",
+    )
+    .bind(wakeup_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("audit row");
+    serde_json::from_str(&payload).expect("payload json")
+}
+
+async fn constrained_payloads(env: &Env, task_id: &str) -> Vec<Value> {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT payload FROM audit_events WHERE kind = 'loop.constrained' AND task_id = ? ORDER BY seq",
+    )
+    .bind(task_id)
+    .fetch_all(&env.state.pool)
+    .await
+    .expect("audit")
+    .into_iter()
+    .map(|(p,)| serde_json::from_str(&p).expect("payload"))
+    .collect()
+}
+
+async fn notifications_of(env: &Env, kind: &str) -> Vec<Value> {
+    let (status, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/notifications", env.company_id),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "notifications: {body}");
+    body.as_array()
+        .cloned()
+        .or_else(|| body["notifications"].as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n["kind"] == kind)
+        .collect()
+}
+
+/// A code task with no goal, in a company with a second repository: it has
+/// no single home, so its start is refused as `invalid` whoever asks.
+async fn make_homeless_code_task(env: &Env) -> String {
+    let other = env.root.join("other-repo");
+    std::fs::create_dir_all(&other).expect("create other repo");
+    sh(
+        &other,
+        "git init -q -b main && git -c user.email=t@t -c user.name=T commit -q --allow-empty -m init",
+    );
+    let (_, project) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/projects", env.company_id),
+        Some(json!({ "title": "Other" })),
+    )
+    .await;
+    let (status, ws) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/projects/{}/workspaces",
+            project["id"].as_str().expect("project id")
+        ),
+        Some(json!({ "name": "main", "cwd": other.to_string_lossy() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "workspace: {ws}");
+    let (_, task) = send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{}/tasks", env.company_id),
+        Some(json!({ "title": "Homeless" })),
+    )
+    .await;
+    let task_id = task["id"].as_str().expect("task id").to_string();
+    let (status, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    task_id
+}
+
+/// TravelAgency's seventeen: after #107 a refused start no longer stalls the
+/// beat, but the next wakeup refuses the same task for the same reason, and
+/// the one after that, with nobody counting. When the reason is the task's
+/// own — no agent could start it — the third time the task stops and says why.
+#[tokio::test]
+async fn a_start_the_task_makes_impossible_three_times_stalls_the_task() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let task_id = make_homeless_code_task(&env).await;
+    let agent = hire_with_traits(
+        &env,
+        "Selfstarter",
+        "builder",
+        json!({ "autonomy": "act_within_budget" }),
+    )
+    .await;
+
+    // The first two refusals leave the task where it was: a refusal can be
+    // fixed between one wakeup and the next. Each is recorded as data.
+    for _ in 0..2 {
+        let w = wake(&env, &agent).await;
+        assert_eq!(task_status(&env, &task_id).await, "todo");
+        let payload = wakeup_payload(&env, &w).await;
+        assert_eq!(
+            payload["refusals"],
+            json!([{ "task_id": task_id, "cause": "invalid" }]),
+            "{payload}"
+        );
+    }
+    // The third is a repetition: the task leaves the queue.
+    wake(&env, &agent).await;
+    assert_eq!(task_status(&env, &task_id).await, "stalled");
+    let stalled = stalled_payloads(&env, &task_id).await;
+    assert_eq!(stalled.len(), 1, "{stalled:?}");
+    assert_eq!(stalled[0]["cause"], "refused", "{stalled:?}");
+    assert_eq!(stalled[0]["refusal"], "invalid");
+    assert_eq!(stalled[0]["attempts"], 3);
+    assert_eq!(stalled[0]["agent_id"], agent.as_str());
+    let reason = stalled[0]["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("refused 3 times"), "{reason}");
+    assert_eq!(stalled[0]["remedies"], json!([]), "{stalled:?}");
+    assert!(constrained_payloads(&env, &task_id).await.is_empty());
+
+    // A fourth wakeup does not reach it: a stalled task is out of the queue.
+    let w = wake(&env, &agent).await;
+    let (_, outcome) = wakeup_row(&env, &w).await;
+    assert_eq!(outcome.as_deref(), Some("no todo tasks it can take"));
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+/// A sketch, and an agent not characterized to look at it.
+async fn sketch_and_nearsighted(env: &Env) -> (String, String) {
+    let task_id = make_todo_knowledge_task(env, "Look at the sketch").await;
+    attach_sketch(env, &task_id).await;
+    let agent = hire_with_traits(
+        env,
+        "Nearsighted",
+        "researcher",
+        json!({ "multimodal": false }),
+    )
+    .await;
+    (task_id, agent)
+}
+
+/// A refusal that belongs to the agent is the agent's to pay for, not the
+/// task's (ADR-0050, addendum of 28 Oct). Stalling the task would hide a
+/// sketch from the one colleague who can look at it, merely because they were
+/// busy while a nearsighted one kept waking up — and the board would then
+/// offer to give sight to the wrong agent. Past the tolerance, the agent stops
+/// being offered the task; the task stays in the queue for everyone else.
+#[tokio::test]
+async fn the_refused_agent_stops_being_offered_the_task_others_still_are() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (task_id, nearsighted) = sketch_and_nearsighted(&env).await;
+    let sighted =
+        hire_with_traits(&env, "Sighted", "researcher", json!({ "multimodal": true })).await;
+
+    for _ in 0..3 {
+        let w = wake(&env, &nearsighted).await;
+        let payload = wakeup_payload(&env, &w).await;
+        assert_eq!(
+            payload["refusals"],
+            json!([{ "task_id": task_id, "cause": "remediable:grant_multimodal" }]),
+            "{payload}"
+        );
+        assert_eq!(task_status(&env, &task_id).await, "todo");
+    }
+    assert!(stalled_payloads(&env, &task_id).await.is_empty());
+    let constrained = constrained_payloads(&env, &task_id).await;
+    assert_eq!(constrained.len(), 1, "{constrained:?}");
+    assert_eq!(constrained[0]["cause"], "remediable:grant_multimodal");
+    assert_eq!(constrained[0]["agent_id"], nearsighted.as_str());
+    assert_eq!(constrained[0]["attempts"], 3);
+    assert_eq!(constrained[0]["cap"], 3);
+    assert_eq!(
+        constrained[0]["remedies"],
+        json!([{ "kind": "grant_multimodal", "agent_id": nearsighted }]),
+        "{constrained:?}"
+    );
+    assert_eq!(
+        constrained[0]["wakeups"].as_array().map(Vec::len),
+        Some(3),
+        "{constrained:?}"
+    );
+
+    // The fourth wakeup does not offer it again: nothing to refuse.
+    let w = wake(&env, &nearsighted).await;
+    let (_, outcome) = wakeup_row(&env, &w).await;
+    assert_eq!(outcome.as_deref(), Some("no todo tasks it can take"));
+    assert_eq!(wakeup_payload(&env, &w).await["refusals"], json!([]));
+
+    // The colleague who can look at it, once awake, takes it.
+    let w = wake(&env, &sighted).await;
+    let payload = wakeup_payload(&env, &w).await;
+    assert_eq!(payload["taken"], json!(task_id), "{payload}");
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+/// The owner hears of it once, with the remedy as data — not once per
+/// wakeup: after the trip the agent is not offered the task, so there is
+/// nothing left to repeat.
+#[tokio::test]
+async fn the_owner_is_told_once_with_the_remedy() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (task_id, agent) = sketch_and_nearsighted(&env).await;
+    for _ in 0..5 {
+        wake(&env, &agent).await;
+    }
+    let told = notifications_of(&env, "loop.constrained").await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["agent_id"], agent.as_str(), "{told:?}");
+    assert_eq!(told[0]["subject_type"], "task", "{told:?}");
+    assert_eq!(told[0]["subject_id"], task_id.as_str(), "{told:?}");
+    let params = &told[0]["params"];
+    assert_eq!(params["agent"], "Nearsighted", "{params}");
+    assert_eq!(params["task"], "Look at the sketch", "{params}");
+    assert_eq!(params["attempts"], 3, "{params}");
+    assert_eq!(
+        params["remedy"],
+        json!({ "kind": "grant_multimodal", "agent_id": agent }),
+        "{params}"
+    );
+}
+
+/// One missing trait is one thing to fix, however many tasks it holds back:
+/// five sketches refused to the same agent are one item in the inbox, naming
+/// them all, not five items with the same button.
+#[tokio::test]
+async fn one_missing_trait_is_told_once_for_all_the_tasks_it_holds_back() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (first, agent) = sketch_and_nearsighted(&env).await;
+    let second = make_todo_knowledge_task(&env, "Look at the other sketch").await;
+    attach_sketch(&env, &second).await;
+    for _ in 0..3 {
+        wake(&env, &agent).await;
+    }
+    assert_eq!(constrained_payloads(&env, &first).await.len(), 1);
+    assert_eq!(constrained_payloads(&env, &second).await.len(), 1);
+    let told = notifications_of(&env, "loop.constrained").await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        told[0]["params"]["tasks"],
+        json!(["Look at the sketch", "Look at the other sketch"]),
+        "{told:?}"
+    );
+}
+
+/// The brake lifts when what it was about changes: applying the remedy is a
+/// change of characterization, and the next wakeup offers the task again.
+#[tokio::test]
+async fn granting_the_remedy_offers_the_task_again() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (task_id, agent) = sketch_and_nearsighted(&env).await;
+    for _ in 0..3 {
+        wake(&env, &agent).await;
+    }
+    assert_eq!(constrained_payloads(&env, &task_id).await.len(), 1);
+
+    let (status, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/traits"),
+        Some(json!({ "multimodal": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "traits: {body}");
+    let w = wake(&env, &agent).await;
+    let payload = wakeup_payload(&env, &w).await;
+    assert_eq!(payload["taken"], json!(task_id), "{payload}");
+}
+
+/// Only a change lifts it: a patch that changes nothing still writes a
+/// revision, and must not hand the task back to be refused three more times.
+#[tokio::test]
+async fn a_patch_that_changes_nothing_does_not_lift_the_brake() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let (task_id, agent) = sketch_and_nearsighted(&env).await;
+    for _ in 0..3 {
+        wake(&env, &agent).await;
+    }
+    let (status, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/traits"),
+        Some(json!({ "multimodal": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "traits: {body}");
+    let w = wake(&env, &agent).await;
+    assert_eq!(wakeup_payload(&env, &w).await["refusals"], json!([]));
+    assert_eq!(constrained_payloads(&env, &task_id).await.len(), 1);
+}
+
+/// A repetition is the same refusal, not any refusal: a task refused twice
+/// because it has no repository to work in, then twice because it carries a
+/// sketch, has been refused four times but repeated nothing three times. The
+/// run counts from the change.
+#[tokio::test]
+async fn a_refusal_that_changes_reason_is_not_a_repetition() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let task_id = make_homeless_code_task(&env).await;
+    let agent = hire_with_traits(
+        &env,
+        "Selfstarter",
+        "builder",
+        json!({ "autonomy": "act_within_budget", "multimodal": false }),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let w = wake(&env, &agent).await;
+        assert_eq!(
+            wakeup_payload(&env, &w).await["refusals"][0]["cause"],
+            "invalid"
+        );
+    }
+    // The multimodal gate stands before the repository check: the same task,
+    // refused for another reason.
+    attach_sketch(&env, &task_id).await;
+    for _ in 0..2 {
+        let w = wake(&env, &agent).await;
+        assert_eq!(
+            wakeup_payload(&env, &w).await["refusals"][0]["cause"],
+            "remediable:grant_multimodal"
+        );
+    }
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    assert!(stalled_payloads(&env, &task_id).await.is_empty());
+    assert!(constrained_payloads(&env, &task_id).await.is_empty());
+
+    // The third of the new reason is a repetition — of a cause that belongs
+    // to the agent, so it is the agent that stops being offered the task.
+    wake(&env, &agent).await;
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    assert_eq!(constrained_payloads(&env, &task_id).await[0]["attempts"], 3);
+}
+
 // --- M36a, slice 4: a stop is a wind-down, with a handoff (ADR-0050 §4) -----
 
 /// Says what it did, leaves a file, then outlives its deadline.

@@ -108,6 +108,21 @@ Response: **inform** (the observation is injected into the run's next context: *
 - **Knowledge work still has no `cargo test`.** Unchanged, owned by M35, named here so decision 3's stagnation predicate for knowledge runs is understood as *delivered and verified*, with `empty_handed` as the floor.
 - **This is Pillar 1, again.** *If we can't prove what an agent did and what it cost, the feature doesn't ship.* Today the cost is proved; after M36a the *stopping* is proved; after M35 the *doing* is.
 
+## Addendum — a brake on the agent is not a brake on the task (2026-10-28)
+
+Decision 3 fingerprints a refused start as (agent, task, cause) and decision 9 reads its acceptance as *"a refusal repeated to its tolerance stops the task as `stalled`"*. The first implementation (M36a slice 2) did exactly that, and its review found the two halves disagree: **the count is one agent's, the stall is everyone's.** An agent not characterized for visual work, refused a sketch three times, stalls the sketch for the colleague who could see it — and the board then proposes to grant multimodal to the agent that happened to be woken, not to the one the task needs.
+
+What a refusal is *about* decides what the brake stops:
+
+- **A cause that belongs to the agent** — today every `remediable:<kind>`, whose remedy is a patch to the agent (the multimodal gate, ADR-0021) — stops **that agent being offered that task**, nothing more. This is decision 3's *constrain* rung, not its *stop*: the task stays `todo` for everyone else, and the wakeup's candidate loop skips it for this agent. The trip appends `loop.constrained` (agent, task, cause, attempts, cap, remedies, the refused wakeups) and notifies the owner **once**, with the remedy as data: characterize this agent, or give the task to someone who can take it. Once is by construction — after the trip the agent is not offered the task, so it cannot be refused again.
+- **A cause that belongs to the task** — `invalid` (a start the task itself makes impossible, whoever asks) — stops the task as `stalled`, as before. `conflict` is the task's too, and in practice never trips: a task taken by someone else is no longer `todo`.
+
+**The brake lifts when what it was about changes.** The count reads the agent's wakeups since the later of the task's `attempts_since` (a person putting a stalled task back) and the agent's last `agent_config_revisions` row (a characterization change — which is how a remedy is applied, `patch_agent_traits`). So granting the remedy re-offers the task on the next wakeup, with no state of its own to clear: the audit chain and the revisions table are still the only inputs, as decision 3 requires.
+
+**Rejected: stall only when no colleague could clear the gate.** It was built and it does not work. Every company's CEO is founded multimodal, holding `task:code` and `task:knowledge`, acting within budget, so it always counts as a colleague who could — but the scheduler wakes no agent on its own (wakeups come from a person or a meeting), so that colleague is never asked and the brake never trips. Whether someone *could* take a task is not whether anyone *will*, and a brake that depends on the second cannot be computed from the first. If every agent who could be offered a task has been constrained, the task stays `todo` with one notification per agent, each naming its remedy — an account of itself, which is what decision 4 asks for.
+
+Decision 9's acceptance therefore reads: *a refusal repeated to its tolerance stops the task as `stalled` with the reason when the cause is the task's, and stops offering it to that agent — telling the owner once, with the remedy — when the cause is the agent's.* `loop.constrained` was already among the event kinds this ADR adds; the one new thing is a notification kind of the same name.
+
 ## Sources, read 7 September 2026
 
 - Simone Rizzo — the owner's reference on loop engineering (video, summarised by the owner on 7 September; channel [@simone_rizzo98](https://www.youtube.com/@simone_rizzo98)): a verifiable goal, bounded attempts, self-documented steps; the matrix-multiplication case, 320× without a human.

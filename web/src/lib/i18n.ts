@@ -80,6 +80,12 @@ export const en = {
     infra: "an infrastructure error",
     agent_failure: "the agent failed",
     empty_handed: "it delivered nothing",
+    refused: "its start was refused",
+  },
+  stallRefusal: {
+    grant_multimodal: "it carries material to look at, and the agent is not characterized for visual work",
+    invalid: "it cannot start as it is — read the reason below",
+    conflict: "another agent kept taking it first",
   },
   priority: {
     low: "Low",
@@ -286,6 +292,15 @@ export const en = {
     budgetExhaustedTitle: "{agent} is out of budget",
     budgetExhaustedBody:
       "{spent} of {limit} spent this month, so {agent} could not take its turn. Raise its cap, or wait for the new month.",
+    budgetLowTitle: "{agent} is running low on budget",
+    budgetLowBody:
+      "{left} left of {limit} this month, and its next run costs about {next}. Raise its cap now, or the next start will be refused.",
+    loopConstrainedTitle: "{agent} is no longer offered “{task}”",
+    loopConstrainedTitleMany: "{agent} is no longer offered {n} tasks: {tasks}",
+    loopConstrainedBody:
+      "Refused {n} times for the same reason: {reason}\n\nThe task stays in the queue for whoever can take it. Characterize {agent} for it, or give it to someone who can.",
+    loopConstrainedGrantMultimodal: "Characterize {agent} for visual work",
+    loopConstrainedApplied: "Done — {agent} will be offered it again",
     meetingPausedTitle: "Meeting paused: {topic}",
     meetingPausedPlanTitle: "Meeting paused: {topic}",
     meetingPausedPlanBody:
@@ -471,6 +486,8 @@ export const en = {
     stalledTitle: "Stopped by the loop",
     stalledBody:
       "It failed {n} times the same way — {cause}. Look at the last run below, then put it back in To do or cancel it.",
+    stalledRefusedBody:
+      "Its start was refused {n} times in a row for the same reason: {cause}. Fix that, then put it back in To do — or cancel it.",
     actions: "Actions",
     startWithAgent: "Start with agent",
     remedyGrantMultimodal: "Characterize {name} for visual work and start",
@@ -679,6 +696,12 @@ export const it: Dictionary = {
     infra: "un errore d'infrastruttura",
     agent_failure: "l'agente ha fallito",
     empty_handed: "non ha consegnato nulla",
+    refused: "il suo avvio è stato rifiutato",
+  },
+  stallRefusal: {
+    grant_multimodal: "contiene materiale da guardare, e l'agente non è caratterizzato per il visivo",
+    invalid: "così com'è non può partire — leggi il motivo qui sotto",
+    conflict: "un altro agente lo prendeva sempre per primo",
   },
   priority: {
     low: "Bassa",
@@ -875,6 +898,15 @@ export const it: Dictionary = {
     budgetExhaustedTitle: "{agent} ha finito il budget",
     budgetExhaustedBody:
       "{spent} di {limit} spesi questo mese, quindi {agent} non ha potuto fare il suo turno. Alza il suo tetto, o aspetta il mese nuovo.",
+    budgetLowTitle: "{agent} sta finendo il budget",
+    budgetLowBody:
+      "Restano {left} di {limit} questo mese, e il suo prossimo run costa circa {next}. Alza il suo tetto adesso, o il prossimo avvio verrà rifiutato.",
+    loopConstrainedTitle: "«{task}» non viene più offerto a {agent}",
+    loopConstrainedTitleMany: "{n} task non vengono più offerti a {agent}: {tasks}",
+    loopConstrainedBody:
+      "Rifiutato {n} volte per lo stesso motivo: {reason}\n\nIl task resta in coda per chi può prenderlo. Caratterizza {agent} per farlo, o affidalo a chi può.",
+    loopConstrainedGrantMultimodal: "Caratterizza {agent} per il visivo",
+    loopConstrainedApplied: "Fatto — {agent} lo riceverà di nuovo",
     meetingPausedTitle: "Riunione in pausa: {topic}",
     meetingPausedPlanTitle: "Riunione in pausa: {topic}",
     meetingPausedPlanBody:
@@ -1061,6 +1093,8 @@ export const it: Dictionary = {
     stalledTitle: "Fermato dal loop",
     stalledBody:
       "È fallito {n} volte nello stesso modo — {cause}. Guarda l'ultimo run qui sotto, poi rimettilo in Da fare o annullalo.",
+    stalledRefusedBody:
+      "Il suo avvio è stato rifiutato {n} volte di fila per lo stesso motivo: {cause}. Sistemalo, poi rimettilo in Da fare — o annullalo.",
     actions: "Azioni",
     startWithAgent: "Avvia con un agente",
     remedyGrantMultimodal: "Caratterizza {name} per il visivo e avvia",
@@ -1360,6 +1394,35 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
             limit: formatCents(Number(p.limitCents ?? 0)),
           }),
         };
+      case "budget.low":
+        return {
+          title: t("notif.budgetLowTitle", { agent: v("agent") }),
+          body: t("notif.budgetLowBody", {
+            left: formatCents(Number(p.headroomCents ?? 0)),
+            limit: formatCents(Number(p.limitCents ?? 0)),
+            next: formatCents(Number(p.nextCents ?? 0)),
+          }),
+        };
+      case "loop.constrained": {
+        // One missing trait is told once for every task it holds back.
+        const tasks = Array.isArray(p.tasks) ? p.tasks.map(String) : [];
+        return {
+          title:
+            tasks.length > 1
+              ? t("notif.loopConstrainedTitleMany", {
+                  agent: v("agent"),
+                  n: String(tasks.length),
+                  tasks: tasks.join(", "),
+                })
+              : t("notif.loopConstrainedTitle", { agent: v("agent"), task: v("task") }),
+          // The refusal's own words, as the runner wrote them.
+          body: t("notif.loopConstrainedBody", {
+            agent: v("agent"),
+            n: v("attempts"),
+            reason: v("reason"),
+          }),
+        };
+      }
       case "meeting.paused":
         return {
           title: t("notif.meetingPausedTitle", { topic: v("topic") }),

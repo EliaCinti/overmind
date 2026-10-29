@@ -47,6 +47,8 @@ export function Inbox({
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [applied, setApplied] = useState<Record<string, true>>({});
+  const [failed, setFailed] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let alive = true;
@@ -112,6 +114,31 @@ export function Inbox({
           approvals.some((a) => a.id === x.approval_id && a.status === "pending"),
       );
       if (!stillWaiting) setOpen(false);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const remedyOf = (n: Notification) => {
+    const r = n.params?.remedy as { kind?: string; agent_id?: string } | null | undefined;
+    return r?.kind && r.agent_id ? { kind: r.kind, agentId: r.agent_id } : undefined;
+  };
+  const applyRemedy = async (n: Notification) => {
+    const remedy = remedyOf(n);
+    if (remedy?.kind !== "grant_multimodal") return;
+    setBusy(n.id);
+    setFailed(({ [n.id]: _, ...rest }) => rest);
+    try {
+      await api.patchAgentTraits(remedy.agentId, { multimodal: true });
+      await api.readNotification(n.id).catch(() => {});
+      setApplied((a) => ({ ...a, [n.id]: true }));
+      // The org chart and the board read the agent's traits too.
+      onDecided();
+    } catch (e) {
+      setFailed((f) => ({
+        ...f,
+        [n.id]: e instanceof Error ? e.message : t("task.actionFailed"),
+      }));
     } finally {
       setBusy(null);
     }
@@ -198,6 +225,29 @@ export function Inbox({
                     >
                       {t("inbox.viewProposal")}
                     </Button>
+                  )}
+                  {/* The repair, where Overmind can apply it: characterizing the
+                      agent is what lifts the brake (ADR-0050, 28 Oct). */}
+                  {n.kind === "loop.constrained" &&
+                    remedyOf(n)?.kind === "grant_multimodal" &&
+                    (applied[n.id] ? (
+                      <span className="text-xs text-muted-foreground">
+                        {t("notif.loopConstrainedApplied", { agent: String(n.params?.agent ?? "") })}
+                      </span>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy === n.id}
+                        onClick={() => applyRemedy(n)}
+                      >
+                        {t("notif.loopConstrainedGrantMultimodal", {
+                          agent: String(n.params?.agent ?? ""),
+                        })}
+                      </Button>
+                    ))}
+                  {failed[n.id] && (
+                    <span className="text-xs text-destructive">{failed[n.id]}</span>
                   )}
                   {n.subject_type === "meeting" && n.subject_id && (
                     <Button
