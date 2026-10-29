@@ -275,6 +275,106 @@ pub async fn record_turn_cost(
     .await;
 }
 
+/// `budget.low` (ADR-0050 §4) -- the warning ADR-0012 deferred at 80 % and
+/// never delivered. When what an agent has left this month falls under what
+/// its next task run is expected to cost, the owner hears it by name, before
+/// [`check`] refuses that run -- correctly, and silently. Called after a cost
+/// is recorded, so the spend it follows is already in the ledger.
+///
+/// Once per agent, window and cap: a run that spends while already low has
+/// nothing new to say, and a raised cap is a new promise that can run low too.
+pub async fn warn_if_low(
+    state: &crate::db::AppState,
+    company_id: &str,
+    agent_id: &str,
+) -> Result<(), sqlx::Error> {
+    let agent: Option<(String, String)> =
+        sqlx::query_as("SELECT name, traits FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((name, traits)) = agent else {
+        return Ok(());
+    };
+    let cap = crate::runner::trait_budget_cents(&traits);
+    let mut conn = state.pool.acquire().await?;
+    let Some(headroom) = headroom_cents(&mut conn, agent_id, cap, None).await? else {
+        return Ok(());
+    };
+    let next = estimate_cents(
+        &mut conn,
+        agent_id,
+        SpendKind::Task,
+        state.config.start_estimate_cents,
+    )
+    .await?
+    .cents;
+    if headroom >= next {
+        return Ok(());
+    }
+    let said: Option<(i64,)> = sqlx::query_as(
+        "SELECT 1 FROM audit_events
+         WHERE kind = ? AND company_id = ? AND json_extract(payload, '$.agent_id') = ?
+           AND created_at >= ? AND json_extract(payload, '$.limit_cents') = ?
+         LIMIT 1",
+    )
+    .bind(crate::domain::event_kind::BUDGET_LOW)
+    .bind(company_id)
+    .bind(agent_id)
+    .bind(month_window_start())
+    .bind(cap)
+    .fetch_optional(&mut *conn)
+    .await?;
+    drop(conn);
+    if said.is_some() {
+        return Ok(());
+    }
+
+    let mut tx = state.write_tx().await?;
+    crate::audit::append(
+        &mut tx,
+        Some(company_id),
+        None,
+        crate::domain::event_kind::BUDGET_LOW,
+        &json!({
+            "agent_id": agent_id,
+            "limit_cents": cap,
+            "headroom_cents": headroom,
+            "next_cents": next,
+        }),
+    )
+    .await
+    .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let title = format!("{name} is running low on budget");
+    let body = format!(
+        "{} left this month, and its next run costs about {}. Raise its cap before it is refused.",
+        euros(headroom),
+        euros(next)
+    );
+    let n = crate::notify::post(
+        &mut tx,
+        company_id,
+        crate::notify::New {
+            kind: crate::notify::kind::BUDGET_LOW,
+            title: &title,
+            body: &body,
+            params: json!({
+                "agent": name,
+                "headroomCents": headroom,
+                "nextCents": next,
+                "limitCents": cap,
+            }),
+            agent_id: Some(agent_id),
+            subject: None,
+            approval_id: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    crate::notify::deliver(state, company_id, &n);
+    Ok(())
+}
+
 /// Release a turn's reservation, however the turn ended. Best-effort on
 /// purpose: a failure here must not mask the turn's own outcome, and the worst
 /// case is a reservation that reads as in-flight until it is cleaned up —

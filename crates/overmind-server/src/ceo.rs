@@ -1472,6 +1472,12 @@ pub(crate) async fn run_adapter(
             .await;
     }
     crate::governance::release_turn(&state.pool, &reservation).await;
+    // After the release, so the headroom no longer counts this turn's hold.
+    if outcome.is_ok()
+        && let Err(e) = crate::governance::warn_if_low(state, turn.company_id, turn.agent_id).await
+    {
+        eprintln!("budget.low for {} not checked: {e}", turn.agent_id);
+    }
 
     // What the turn learned about the plan on its way past (ADR-0030). Recorded
     // *after* the money is settled, because a plan that has run out does not

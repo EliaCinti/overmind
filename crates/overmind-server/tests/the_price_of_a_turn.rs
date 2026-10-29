@@ -299,3 +299,132 @@ async fn one_data_point_is_not_a_price() {
     assert_eq!(line["estimates"]["task"]["cents"], json!(50), "{line}");
     assert_eq!(line["estimates"]["task"]["samples"], json!(1), "{line}");
 }
+
+// --- M36a, slice 3: `budget.low` (ADR-0050 §4) ------------------------------
+
+/// Start a task for `agent` and wait for its run to end; the stub costs 5¢.
+async fn run_to_end(env: &Env, agent: &str, title: &str) {
+    let task = make_todo(env, title).await;
+    let (s, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task}/start"),
+        Some(json!({ "agent_id": agent })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::ACCEPTED, "start: {started}");
+    let session = started["session_id"].as_str().expect("session id");
+    for _ in 0..100 {
+        let (_, v) = send(&env.app, "GET", &format!("/api/sessions/{session}"), None).await;
+        if matches!(v["status"].as_str(), Some("completed" | "failed")) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("session {session} did not finish in time");
+}
+
+async fn budget_low_notifications(env: &Env) -> Vec<Value> {
+    let (_, body) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{}/notifications", env.company),
+        None,
+    )
+    .await;
+    body.as_array()
+        .cloned()
+        .or_else(|| body["notifications"].as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n["kind"] == "budget.low")
+        .collect()
+}
+
+async fn first_seq(env: &Env, kind: &str) -> Option<i64> {
+    sqlx::query_as::<_, (i64,)>(
+        "SELECT MIN(seq) FROM audit_events WHERE kind = ? HAVING COUNT(*) > 0",
+    )
+    .bind(kind)
+    .fetch_optional(&env.state.pool)
+    .await
+    .expect("audit")
+    .map(|(s,)| s)
+}
+
+/// The wallet refuses a turn correctly and silently; `budget.exhausted`
+/// arrives after. ADR-0012's warning was never built. When what is left falls
+/// under what this agent's next run costs, the owner hears it -- by name, and
+/// before the refusal, so there is still time to raise the cap.
+#[tokio::test]
+async fn budget_low_names_the_agent_before_the_wallet_says_no() {
+    let env = setup().await;
+    // Cap 14¢, each run 5¢ (last month's history, so the estimate is 5 and
+    // none of it counts as this month's spend).
+    let agent = hire(&env, "Thrifty", 14).await;
+    past_task_runs(&env, &agent, &[5, 5, 5]).await;
+
+    run_to_end(&env, &agent, "first").await;
+    // 9¢ left, a run costs 5: nothing to say yet.
+    assert!(budget_low_notifications(&env).await.is_empty());
+
+    run_to_end(&env, &agent, "second").await;
+    // 4¢ left, the next run costs 5: said now, by name.
+    let told = budget_low_notifications(&env).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["agent_id"], json!(agent), "{told:?}");
+    let params = &told[0]["params"];
+    assert_eq!(params["agent"], "Thrifty", "{params}");
+    assert_eq!(params["headroomCents"], 4, "{params}");
+    assert_eq!(params["nextCents"], 5, "{params}");
+    assert_eq!(params["limitCents"], 14, "{params}");
+
+    // And the wallet says no only after.
+    let task = make_todo(&env, "third").await;
+    let (s, _) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task}/start"),
+        Some(json!({ "agent_id": agent })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PAYMENT_REQUIRED);
+    let low = first_seq(&env, "budget.low")
+        .await
+        .expect("budget.low on the chain");
+    let blocked = first_seq(&env, "budget.blocked")
+        .await
+        .expect("budget.blocked");
+    assert!(low < blocked, "low at {low}, blocked at {blocked}");
+}
+
+/// Once per agent per window, not once per run -- and again when the cap is
+/// raised, because a raised cap is a new promise that can run low too.
+#[tokio::test]
+async fn budget_low_is_said_once_per_window() {
+    let env = setup().await;
+    let agent = hire(&env, "Thrifty", 14).await;
+    past_task_runs(&env, &agent, &[5, 5, 5]).await;
+    run_to_end(&env, &agent, "first").await;
+    run_to_end(&env, &agent, "second").await;
+    assert_eq!(budget_low_notifications(&env).await.len(), 1);
+
+    // Asked again while still low: nothing new to say.
+    overmind_server::governance::warn_if_low(&env.state, &env.company, &agent)
+        .await
+        .expect("warn");
+    assert_eq!(budget_low_notifications(&env).await.len(), 1);
+
+    // The cap is raised: 9¢ left again. One more run, 4¢ left: said again.
+    let (s, body) = send(
+        &env.app,
+        "POST",
+        &format!("/api/agents/{agent}/budget"),
+        Some(json!({ "monthly_budget_cents": 19 })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "budget: {body}");
+    run_to_end(&env, &agent, "third").await;
+    let told = budget_low_notifications(&env).await;
+    assert_eq!(told.len(), 2, "{told:?}");
+}
