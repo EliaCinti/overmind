@@ -416,7 +416,9 @@ async fn constrain(
         .await?;
     Ok(Constrained {
         task_id: refusal.task_id.clone(),
-        title: title.map(|(t,)| t).unwrap_or_else(|| refusal.task_id.clone()),
+        title: title
+            .map(|(t,)| t)
+            .unwrap_or_else(|| refusal.task_id.clone()),
         attempts: wakeups.len(),
         reason: refusal.message.clone(),
         remedy: refusal.remedy.clone(),
