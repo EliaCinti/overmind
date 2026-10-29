@@ -748,3 +748,91 @@ async fn a_person_restarting_a_stalled_task_resets_its_count() {
     assert_eq!(task_status(&env, &task_id).await, "todo");
     assert_eq!(stalled_payloads(&env, &task_id).await.len(), 1);
 }
+
+// --- M36a, slice 4: a stop is a wind-down, with a handoff (ADR-0050 §4) -----
+
+/// Says what it did, leaves a file, then outlives its deadline.
+const TALKING_SLOW_STUB: &str =
+    "#!/bin/sh\necho 'read the brief, drafted the outline'\necho draft > notes.md\nsleep 30\n";
+/// Repeats the prompt it was given, then finishes.
+const PROMPT_STUB: &str = "#!/bin/sh\nprintf '%s\\n' \"$OVERMIND_TASK_PROMPT\"\n";
+
+async fn handoffs(env: &Env, task_id: &str) -> Vec<String> {
+    sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT content FROM task_artifacts WHERE task_id = ? AND kind = 'handoff' ORDER BY created_at",
+    )
+    .bind(task_id)
+    .fetch_all(&env.state.pool)
+    .await
+    .expect("artifacts")
+    .into_iter()
+    .map(|(c,)| c.unwrap_or_default())
+    .collect()
+}
+
+/// A run killed at its deadline used to leave a failed session, an empty
+/// output and a task back in the queue -- no account of what it had done.
+/// Now Overmind writes one from what the run left behind: why it stopped,
+/// what it changed, and the last thing it said.
+#[tokio::test]
+async fn a_run_killed_at_its_deadline_leaves_a_handoff() {
+    let env = build_env(TALKING_SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Never finishes").await;
+
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "failed");
+    let handoff = handoffs(&env, &task_id).await;
+    assert_eq!(handoff.len(), 1, "{handoff:?}");
+    assert!(handoff[0].contains("timed out"), "{}", handoff[0]);
+    assert!(handoff[0].contains("notes.md"), "{}", handoff[0]);
+    assert!(
+        handoff[0].contains("read the brief, drafted the outline"),
+        "{}",
+        handoff[0]
+    );
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+/// The handoff is for the next attempt: it starts from where the last one
+/// stopped, not from the brief alone.
+#[tokio::test]
+async fn the_next_attempt_reads_the_previous_handoff() {
+    let env = build_env(TALKING_SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Finishes the second time").await;
+    attempt(&env, &task_id, &agent_id).await;
+
+    std::fs::write(env.root.join("stub-agent.sh"), PROMPT_STUB).expect("swap stub");
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let prompt = session["output"].as_str().unwrap_or("");
+    assert!(prompt.contains("previous attempt"), "{prompt}");
+    assert!(
+        prompt.contains("read the brief, drafted the outline"),
+        "{prompt}"
+    );
+}
+
+/// Two numbers per bound (ADR-0050 §4): the run is told the advertised one
+/// and asked to hand off before it; the enforced one stays where it was and
+/// fires only when the wind-down misbehaves.
+#[tokio::test]
+async fn the_prompt_states_the_advertised_bound_not_the_enforced_one() {
+    let env = build_env(PROMPT_STUB, None, |c| c.session_timeout_secs = 100).await;
+    let agent_id = hire_with_traits(
+        &env,
+        "Bounded",
+        "builder",
+        json!({ "monthly_budget_cents": 1000 }),
+    )
+    .await;
+    let task_id = make_todo_task(&env, "Bounded work").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let prompt = session["output"].as_str().unwrap_or("");
+    assert!(prompt.contains("90 seconds"), "{prompt}");
+    assert!(prompt.contains("€8.50"), "{prompt}");
+    assert!(prompt.contains("HANDOFF.md"), "{prompt}");
+    assert!(!prompt.contains("100 seconds"), "{prompt}");
+    assert!(!prompt.contains("€10.00"), "{prompt}");
+}

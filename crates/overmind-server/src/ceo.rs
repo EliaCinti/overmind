@@ -1568,7 +1568,8 @@ async fn spawn_adapter(
     .await;
     state.clear_activity(activity_key);
     match drained {
-        Ok(Some(out)) => {
+        Ok(out) if out.timed_out => Err(CeoError::Invalid("agent turn timed out".into())),
+        Ok(out) => {
             if out.status.success() && !out.stdout.trim().is_empty() {
                 return Ok(out.stdout);
             }
@@ -1581,7 +1582,6 @@ async fn spawn_adapter(
         Err(e) => Err(CeoError::Invalid(format!(
             "failed to read agent output: {e}"
         ))),
-        Ok(None) => Err(CeoError::Invalid("agent turn timed out".into())),
     }
 }
 

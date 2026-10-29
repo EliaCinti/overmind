@@ -45,6 +45,15 @@ impl Provider for ClaudeCode {
         adapter_failure(output)
     }
 
+    fn stopped_at_bound(&self, output: &str) -> bool {
+        // The same envelope `adapter_failure` names "stopped at this agent's
+        // budget cap" -- read by its subtype, not by our sentence.
+        last_object_with(output, "is_error").is_some_and(|e| {
+            e.get("is_error").and_then(Value::as_bool) == Some(true)
+                && e.get("subtype").and_then(Value::as_str) == Some("error_max_budget_usd")
+        })
+    }
+
     fn economy_probe(&self) -> (&'static str, &'static [&'static str]) {
         ("claude", &["auth", "status", "--json"])
     }

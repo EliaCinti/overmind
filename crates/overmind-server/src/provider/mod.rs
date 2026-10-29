@@ -129,6 +129,15 @@ pub trait Provider: Send + Sync {
             .map(|s| crate::ceo::clamp_agent_text(&s))
     }
 
+    /// Whether the turn was stopped by the money bound Overmind handed it,
+    /// rather than failing on its own -- read as data from the envelope, never
+    /// from the sentence. A run stopped at a bound owes a handoff (ADR-0050
+    /// §4). `false` for a provider that cannot tell: its time bound still
+    /// produces one.
+    fn stopped_at_bound(&self, _output: &str) -> bool {
+        false
+    }
+
     /// The command that asks this CLI who pays: the binary, then its
     /// arguments (ADR-0030).
     ///

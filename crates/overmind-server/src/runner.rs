@@ -43,6 +43,12 @@ const MAX_ARTIFACTS: usize = 200;
 /// Text kept inline in the row for preview and search; beyond this only the
 /// file on disk. 256 KB is far past any document a human reads in a drawer.
 const MAX_INLINE_BYTES: u64 = 256 * 1024;
+/// What a run stopped short writes for the next attempt (ADR-0050 §4) --
+/// under `deliverables/` in a code run, so it never lands in the diff.
+const HANDOFF_FILE: &str = "HANDOFF.md";
+/// How much of a run's own handoff, and of its last words, a handoff keeps.
+const MAX_HANDOFF_CHARS: usize = 16_000;
+const HANDOFF_TAIL_CHARS: usize = 2_000;
 
 /// Files attached to this task, as `(filename, mime, size, absolute path)`.
 async fn task_inputs(state: &AppState, task_id: &str) -> Vec<(String, String, i64, String)> {
@@ -279,6 +285,8 @@ pub(crate) struct Drained {
     pub status: std::process::ExitStatus,
     pub stdout: String,
     pub stderr: String,
+    /// Killed at its deadline: `stdout`/`stderr` are what it had said by then.
+    pub timed_out: bool,
 }
 
 /// Wait for the child while reading its stdout line by line, narrating each
@@ -290,7 +298,7 @@ pub(crate) async fn drain_narrating(
     key: &str,
     mut child: tokio::process::Child,
     timeout_secs: u64,
-) -> std::io::Result<Option<Drained>> {
+) -> std::io::Result<Drained> {
     use tokio::io::AsyncBufReadExt;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -299,8 +307,15 @@ pub(crate) async fn drain_narrating(
     // Bound once, outside the loop: the provider is a `&'static dyn`, so this
     // costs nothing and keeps the hot path free of a lookup per line.
     let provider = crate::provider::current();
+    // Shared with the readers rather than returned by them: a run killed at
+    // its deadline may leave a grandchild holding the pipe open, so its reader
+    // never ends -- and what it had read by then is the run's only account of
+    // itself (ADR-0050 §4).
+    let out_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let err_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let out_shared = out_buf.clone();
+    let err_shared = err_buf.clone();
     let out_task = tokio::spawn(async move {
-        let mut buf = String::new();
         // The reply as it streams (ADR-0039 addendum): text deltas accumulate
         // and the readable part rides as a `draft` activity, so the chat can
         // show the words appearing. Bounded — narration, not storage.
@@ -332,31 +347,43 @@ pub(crate) async fn drain_narrating(
                         accum.clear();
                     }
                 }
-                buf.push_str(&line);
-                buf.push('\n');
+                if let Ok(mut buf) = out_shared.lock() {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
             }
         }
-        buf
     });
     let err_task = tokio::spawn(async move {
-        let mut buf = String::new();
         if let Some(stderr) = stderr {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                buf.push_str(&line);
-                buf.push('\n');
+                if let Ok(mut buf) = err_shared.lock() {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
             }
         }
-        buf
     });
+    let take = |buf: &std::sync::Mutex<String>| {
+        buf.lock()
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default()
+    };
     let waited =
         tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), child.wait()).await;
     match waited {
         Err(_elapsed) => {
             let _ = child.kill().await;
+            let status = child.wait().await?;
             out_task.abort();
             err_task.abort();
-            Ok(None)
+            Ok(Drained {
+                status,
+                stdout: take(&out_buf),
+                stderr: take(&err_buf),
+                timed_out: true,
+            })
         }
         Ok(Err(e)) => {
             out_task.abort();
@@ -364,19 +391,128 @@ pub(crate) async fn drain_narrating(
             Err(e)
         }
         Ok(Ok(status)) => {
-            let stdout = out_task.await.unwrap_or_default();
-            let stderr = err_task.await.unwrap_or_default();
-            Ok(Some(Drained {
+            let _ = out_task.await;
+            let _ = err_task.await;
+            Ok(Drained {
                 status,
-                stdout,
-                stderr,
-            }))
+                stdout: take(&out_buf),
+                stderr: take(&err_buf),
+                timed_out: false,
+            })
         }
     }
 }
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Where a run of `kind` is told to leave its handoff.
+fn handoff_path(kind: ExecutionKind) -> String {
+    match kind {
+        ExecutionKind::Code => format!("{DELIVERABLES_DIR}/{HANDOFF_FILE}"),
+        ExecutionKind::Knowledge => HANDOFF_FILE.to_string(),
+    }
+}
+
+/// The bounds a run is told: 90 % of its time and 85 % of its money (ADR-0050
+/// §10), and what to leave behind if it will not finish inside them.
+fn advertised_bounds(timeout_secs: u64, ceiling_cents: Option<i64>, kind: ExecutionKind) -> String {
+    let secs = timeout_secs * 9 / 10;
+    let money = ceiling_cents
+        .map(|c| {
+            format!(
+                " and about {} to spend",
+                crate::governance::euros(c * 85 / 100)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "\n\nYou have about {secs} seconds{money} for this run. If you see you will not finish inside that, stop before it and write `{}`: what you did, what is still pending, and what you would do next -- the next attempt starts from it.",
+        handoff_path(kind)
+    )
+}
+
+/// The handoff the last attempt at this task left, as a prompt block.
+async fn previous_handoff(state: &AppState, task_id: &str, session_id: &str) -> String {
+    let last: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT content FROM task_artifacts
+         WHERE task_id = ? AND kind = 'handoff' AND session_id IS NOT ?
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(task_id)
+    .bind(session_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    match last.and_then(|(c,)| c) {
+        Some(text) if !text.trim().is_empty() => format!(
+            "\n\nA previous attempt at this task stopped before finishing. What it handed on:\n\n{text}\n\nStart from there, not from the brief alone."
+        ),
+        _ => String::new(),
+    }
+}
+
+/// The last `n` characters of `s`, on a character boundary.
+fn tail_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().rev().nth(n.saturating_sub(1)) {
+        Some((i, _)) if n > 0 => &s[i..],
+        _ => s,
+    }
+}
+
+/// What a run stopped at a bound hands on: its own handoff when it wrote one
+/// in time, else what Overmind can read from the state it left -- the files it
+/// changed and the last thing it said. Never the agent's word for what it did
+/// unless the agent wrote it, and then named as its own.
+async fn handoff_text(ctx: &SessionContext, reason: &str, output: &str) -> String {
+    let own = tokio::fs::read_to_string(ctx.worktree_dir.join(handoff_path(ctx.exec_kind)))
+        .await
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if let Some(own) = own {
+        let own: String = own.chars().take(MAX_HANDOFF_CHARS).collect();
+        return format!("The run stopped because {reason}. Its own handoff:\n\n{own}");
+    }
+    let changed: Vec<String> = match ctx.exec_kind {
+        ExecutionKind::Code => {
+            let mut git = tokio::process::Command::new("git");
+            git.args(["status", "--porcelain"])
+                .current_dir(&ctx.worktree_dir)
+                .stdin(Stdio::null());
+            for (k, v) in crate::sandbox::git_isolation() {
+                git.env(k, v);
+            }
+            match git.output().await {
+                Ok(out) => String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|l| l.get(3..).map(str::to_string))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        }
+        ExecutionKind::Knowledge => files::collect_files(&ctx.worktree_dir, MAX_ARTIFACTS)
+            .await
+            .into_iter()
+            .map(|(rel, _)| files::safe_relative(&rel))
+            .filter(|r| !r.is_empty() && !r.starts_with(&format!("{INPUTS_DIR}/")))
+            .collect(),
+    };
+    let changed = if changed.is_empty() {
+        "- nothing".to_string()
+    } else {
+        changed
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let said = tail_chars(output.trim(), HANDOFF_TAIL_CHARS);
+    let said = if said.is_empty() { "(nothing)" } else { said };
+    format!(
+        "The run stopped because {reason}, before writing a handoff of its own. Overmind wrote this from what it left behind.\n\n## What it changed\n{changed}\n\n## The last thing it said\n```\n{said}\n```"
+    )
 }
 
 /// Last 12 hex chars of a UUID — the random tail. UUIDv7's *leading* bytes
@@ -1226,10 +1362,22 @@ pub(crate) enum Mode {
 }
 
 enum Outcome {
-    Success { output: String },
-    AgentFailure { output: String, exit_code: i32 },
-    TimedOut { timeout_secs: u64 },
-    Infra { error: String, release: bool },
+    Success {
+        output: String,
+    },
+    AgentFailure {
+        output: String,
+        exit_code: i32,
+    },
+    /// `partial` is what it had said by the deadline, for its handoff.
+    TimedOut {
+        timeout_secs: u64,
+        partial: String,
+    },
+    Infra {
+        error: String,
+        release: bool,
+    },
 }
 
 async fn run_session(ctx: SessionContext, mode: Mode) {
@@ -1612,14 +1760,24 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         .map(|p| format!("{}\n\n", p.block(&company)))
         .unwrap_or_default();
 
+    // Two numbers per bound (ADR-0050 §4): the run is told the advertised one
+    // and asked to hand off before it; the enforced one -- the timeout, the
+    // ceiling handed to the adapter -- fires only if the wind-down misbehaves.
+    let bounds_block = advertised_bounds(
+        ctx.state.config.session_timeout_secs,
+        ceiling.filter(|c| *c > 0),
+        ctx.exec_kind,
+    );
+    let previous_block = previous_handoff(&ctx.state, &ctx.task_id, &ctx.session_id).await;
+
     let prompt = if resume {
         format!(
-            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}{inputs_block}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{meeting_hint}{language}",
+            "{persona_block}You are resuming interrupted work on the task \"{}\".\n\n{}{}{}{inputs_block}{previous_block}\n\nThe current directory may contain partial work from the interrupted run — inspect it first, then finish the task. {deliver}{bounds_block}{meeting_hint}{language}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     } else {
         format!(
-            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}{inputs_block}\n\n{deliver}{meeting_hint}{language}",
+            "{persona_block}You are working on the task \"{}\".\n\n{}{}{}{inputs_block}{previous_block}\n\n{deliver}{bounds_block}{meeting_hint}{language}",
             ctx.title, ctx.description, memory_block, decisions_block
         )
     };
@@ -1681,12 +1839,15 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let drained = drain_narrating(&ctx.state, &ctx.session_id, child, timeout_secs).await;
     ctx.state.clear_activity(&ctx.session_id);
     match drained {
-        Ok(None) => Outcome::TimedOut { timeout_secs },
+        Ok(out) if out.timed_out => Outcome::TimedOut {
+            timeout_secs,
+            partial: out.stdout,
+        },
         Err(e) => Outcome::Infra {
             error: format!("failed to read agent output: {e}"),
             release: false,
         },
-        Ok(Some(out)) => {
+        Ok(out) => {
             let mut output = out.stdout;
             let stderr = out.stderr;
             if !stderr.trim().is_empty() {
@@ -1720,6 +1881,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         release: bool,
         /// The class of a failure, as data, for the attempts cap (ADR-0050).
         cause: Option<&'static str>,
+        /// Stopped at an enforced bound: the run owes a handoff (ADR-0050 §4).
+        bound: Option<String>,
     }
     let f = match outcome {
         Outcome::Success { output } => Final {
@@ -1730,6 +1893,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             task_to: "in_review",
             release: false,
             cause: None,
+            bound: None,
         },
         Outcome::AgentFailure { output, exit_code } => Final {
             session_status: "failed",
@@ -1738,20 +1902,29 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                     .failure(&output)
                     .unwrap_or_else(|| format!("agent exited with code {exit_code}")),
             ),
+            bound: crate::provider::current()
+                .stopped_at_bound(&output)
+                .then(|| "it reached its budget ceiling".to_string()),
             output,
             exit_code: Some(exit_code),
             task_to: "blocked",
             release: false,
             cause: Some("agent_failure"),
         },
-        Outcome::TimedOut { timeout_secs } => Final {
+        Outcome::TimedOut {
+            timeout_secs,
+            partial,
+        } => Final {
             session_status: "failed",
-            output: String::new(),
+            // What it had said by then: the session keeps it, and so does the
+            // handoff below.
+            output: partial,
             exit_code: None,
             last_error: Some(format!("session timed out after {timeout_secs}s")),
             task_to: "todo",
             release: true,
             cause: Some("timed_out"),
+            bound: Some(format!("it timed out after {timeout_secs}s")),
         },
         Outcome::Infra { error, release } => Final {
             session_status: "failed",
@@ -1761,6 +1934,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             task_to: if release { "todo" } else { "blocked" },
             release,
             cause: Some("infra"),
+            bound: None,
         },
     };
 
@@ -1872,6 +2046,35 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     } else {
         0
     };
+
+    // A run stopped at a bound leaves an account of itself (ADR-0050 §4): its
+    // own HANDOFF.md if it wrote one before the bound, else one Overmind
+    // composes from what it left behind. An artifact of the task, so the
+    // drawer shows it and the next attempt is handed it.
+    if let Some(reason) = &f.bound {
+        let text = handoff_text(ctx, reason, &f.output).await;
+        sqlx::query(
+            "INSERT INTO task_artifacts
+             (id, task_id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at)
+             VALUES (?, ?, ?, 'handoff', 'Handoff', 'text/markdown', ?, NULL, ?, NULL, ?)",
+        )
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(&ctx.task_id)
+        .bind(&ctx.session_id)
+        .bind(&text)
+        .bind(text.len() as i64)
+        .bind(now())
+        .execute(&mut *tx)
+        .await?;
+        audit::append(
+            &mut tx,
+            Some(&ctx.company_id),
+            Some(&ctx.task_id),
+            event_kind::ARTIFACT_CREATED,
+            &json!({ "session_id": ctx.session_id, "title": "Handoff", "kind": "handoff" }),
+        )
+        .await?;
+    }
 
     // A knowledge run's deliverable **is** what it wrote, so one that wrote
     // nothing delivered nothing — however cleanly the adapter exited. Until now
