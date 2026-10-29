@@ -13,6 +13,7 @@ use tokio::time::{Duration, MissedTickBehavior, interval};
 use crate::audit;
 use crate::db::AppState;
 use crate::domain::{ExecutionKind, event_kind, perm};
+use crate::notify;
 use crate::runner::{self, RunnerError};
 
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
@@ -168,6 +169,8 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
             company_id,
             summary: outcome,
             remedies,
+            refusals,
+            taken,
         } = wakeup_outcome(state, &agent_id).await?;
         sqlx::query(
             "UPDATE agent_wakeup_requests SET status = 'done', outcome = ?, finished_at = ? WHERE id = ?",
@@ -191,11 +194,34 @@ async fn process_wakeups(state: &AppState) -> Result<(), RunnerError> {
                 // `RunnerError::Remediable` is that nobody string-matches the
                 // sentence, and the audit row is where a consumer would look.
                 "remedies": remedies,
+                // The repetition detector's input (ADR-0050 §3): which task
+                // was refused and why, as data -- the variant, and for a
+                // remedy its kind -- and which task was taken, if any.
+                "refusals": refusals
+                    .iter()
+                    .map(|r| json!({ "task_id": r.task_id, "cause": r.cause }))
+                    .collect::<Vec<_>>(),
+                "taken": taken,
             }),
         )
         .await?;
+        let mut told = Vec::new();
+        if let Some(company_id) = &company_id {
+            let mut constrained = Vec::new();
+            for refusal in &refusals {
+                if let Some(c) =
+                    brake_if_repeated(state, &mut tx, company_id, &agent_id, refusal).await?
+                {
+                    constrained.push(c);
+                }
+            }
+            told = tell_constrained(&mut tx, company_id, &agent_id, constrained).await?;
+        }
         tx.commit().await?;
         if let Some(company_id) = &company_id {
+            for n in &told {
+                notify::deliver(state, company_id, n);
+            }
             state.notify(company_id);
         }
     }
@@ -209,6 +235,9 @@ struct WakeupOutcome {
     company_id: Option<String>,
     summary: String,
     remedies: Vec<Value>,
+    refusals: Vec<Refusal>,
+    /// The task the wakeup started, or filed an approval for.
+    taken: Option<String>,
 }
 
 impl WakeupOutcome {
@@ -217,8 +246,249 @@ impl WakeupOutcome {
             company_id,
             summary: summary.into(),
             remedies: Vec::new(),
+            refusals: Vec::new(),
+            taken: None,
         }
     }
+}
+
+/// A start refused for the task's sake, not the agent's.
+struct Refusal {
+    task_id: String,
+    /// What the detector compares: the variant, and for a remedy its kind
+    /// (`invalid`, `conflict`, `remediable:grant_multimodal`). Never the
+    /// sentence, which may name the files or the repository that changed.
+    cause: String,
+    message: String,
+    remedy: Option<Value>,
+}
+
+/// The cause a `agent.wakeup_processed` payload records for refusing
+/// `task_id`, if it refused it at all (a wakeup that took it did not).
+fn refused_cause(payload: &str, task_id: &str) -> Option<String> {
+    let payload: Value = serde_json::from_str(payload).ok()?;
+    payload
+        .get("refusals")?
+        .as_array()?
+        .iter()
+        .find(|r| r.get("task_id").and_then(Value::as_str) == Some(task_id))?
+        .get("cause")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The repetition detector on refused starts (ADR-0050 §3, and its addendum
+/// of 28 Oct): the same agent refused the same task for the same cause at
+/// `repetition_tolerance` of its wakeups in a row is no longer waiting for
+/// something to change. What the cause is *about* decides what stops. One
+/// that is the task's own stops the task as `stalled`, with the reason. One
+/// that is the agent's -- a remedy is a patch to the agent -- stops offering
+/// that task to that agent and tells the owner once: the count is one
+/// agent's, and a stall would be everyone's.
+///
+/// Read from the audit chain alone: only the wakeups that reached this task
+/// count (a wakeup that found the agent busy says nothing about it), a
+/// different outcome in between -- another cause, or the task taken -- ends
+/// the run, and the count starts again when a person puts a stalled task back
+/// or the agent is characterized anew, which is how a remedy is applied.
+/// Returns what it constrained, for `tell_constrained`.
+async fn brake_if_repeated(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    company_id: &str,
+    agent_id: &str,
+    refusal: &Refusal,
+) -> Result<Option<Constrained>, RunnerError> {
+    let tolerance = state.config.repetition_tolerance.max(1);
+    let recent: Vec<(String, String)> = sqlx::query_as(
+        "SELECT json_extract(e.payload, '$.request_id'), e.payload
+         FROM audit_events e JOIN tasks t ON t.id = ?
+         WHERE e.kind = ? AND e.company_id = ?
+           AND json_extract(e.payload, '$.agent_id') = ?
+           AND e.created_at >= COALESCE(t.attempts_since, '')
+           AND e.created_at >= COALESCE((SELECT MAX(r.created_at) FROM agent_config_revisions r
+                                         WHERE r.agent_id = ? AND r.changed_keys <> '[]'), '')
+           AND (json_extract(e.payload, '$.taken') = t.id
+                OR EXISTS (SELECT 1 FROM json_each(e.payload, '$.refusals') r
+                           WHERE json_extract(r.value, '$.task_id') = t.id))
+         ORDER BY e.seq DESC LIMIT ?",
+    )
+    .bind(&refusal.task_id)
+    .bind(event_kind::WAKEUP_PROCESSED)
+    .bind(company_id)
+    .bind(agent_id)
+    .bind(agent_id)
+    .bind(tolerance)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut wakeups: Vec<String> = recent
+        .into_iter()
+        .take_while(|(_, payload)| {
+            refused_cause(payload, &refusal.task_id) == Some(refusal.cause.clone())
+        })
+        .map(|(request_id, _)| request_id)
+        .collect();
+    if wakeups.len() < tolerance as usize {
+        return Ok(None);
+    }
+    wakeups.reverse();
+    if refusal.cause.starts_with("remediable:") {
+        return constrain(tx, company_id, agent_id, refusal, &wakeups, tolerance)
+            .await
+            .map(Some);
+    }
+
+    // Only a task still waiting in the queue stops: one a person or another
+    // agent has moved since the refusal is not the loop's to stall.
+    let moved = sqlx::query(
+        "UPDATE tasks SET status = 'stalled', updated_at = ? WHERE id = ? AND status = 'todo'",
+    )
+    .bind(now())
+    .bind(&refusal.task_id)
+    .execute(&mut **tx)
+    .await?;
+    if moved.rows_affected() == 0 {
+        return Ok(None);
+    }
+    audit::append(
+        tx,
+        Some(company_id),
+        Some(&refusal.task_id),
+        event_kind::TASK_TRANSITIONED,
+        &json!({ "from": "todo", "to": "stalled" }),
+    )
+    .await?;
+    audit::append(
+        tx,
+        Some(company_id),
+        Some(&refusal.task_id),
+        event_kind::TASK_STALLED,
+        &json!({
+            "cause": "refused",
+            "refusal": refusal.cause,
+            "attempts": wakeups.len(),
+            "cap": tolerance,
+            "reason": format!("refused {} times: {}", wakeups.len(), refusal.message),
+            "agent_id": agent_id,
+            "remedies": refusal.remedy.iter().collect::<Vec<_>>(),
+            // No session ran: the evidence is the wakeups that were refused.
+            "sessions": [],
+            "wakeups": wakeups,
+        }),
+    )
+    .await?;
+    Ok(None)
+}
+
+/// The agent stops being offered the task; everyone else still is. The audit
+/// row is what the wakeup's candidate query reads, so it is the brake itself,
+/// not a record of one -- and it is told to the owner here, once, because
+/// after it the agent is never offered the task again to be refused it.
+async fn constrain(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    company_id: &str,
+    agent_id: &str,
+    refusal: &Refusal,
+    wakeups: &[String],
+    cap: u32,
+) -> Result<Constrained, RunnerError> {
+    audit::append(
+        tx,
+        Some(company_id),
+        Some(&refusal.task_id),
+        event_kind::LOOP_CONSTRAINED,
+        &json!({
+            "cause": refusal.cause,
+            "agent_id": agent_id,
+            "attempts": wakeups.len(),
+            "cap": cap,
+            "reason": format!("refused {} times: {}", wakeups.len(), refusal.message),
+            "remedies": refusal.remedy.iter().collect::<Vec<_>>(),
+            "wakeups": wakeups,
+        }),
+    )
+    .await?;
+    // A title is for the sentence only: a task gone since the refusal must not
+    // fail the wakeup that recorded it.
+    let title: Option<(String,)> = sqlx::query_as("SELECT title FROM tasks WHERE id = ?")
+        .bind(&refusal.task_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    Ok(Constrained {
+        task_id: refusal.task_id.clone(),
+        title: title
+            .map(|(t,)| t)
+            .unwrap_or_else(|| refusal.task_id.clone()),
+        attempts: wakeups.len(),
+        reason: refusal.message.clone(),
+        remedy: refusal.remedy.clone(),
+    })
+}
+
+/// A task the loop stopped offering to an agent, waiting to be told.
+struct Constrained {
+    task_id: String,
+    title: String,
+    attempts: usize,
+    reason: String,
+    remedy: Option<Value>,
+}
+
+/// Tell the owner what one wakeup constrained: once per remedy, naming every
+/// task it holds back -- one missing trait is one thing to fix, however many
+/// sketches wait on it. Returns the notifications to deliver after commit.
+async fn tell_constrained(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    company_id: &str,
+    agent_id: &str,
+    constrained: Vec<Constrained>,
+) -> Result<Vec<Value>, RunnerError> {
+    let mut groups: Vec<Vec<Constrained>> = Vec::new();
+    for c in constrained {
+        match groups.iter_mut().find(|g| g[0].remedy == c.remedy) {
+            Some(g) => g.push(c),
+            None => groups.push(vec![c]),
+        }
+    }
+    if groups.is_empty() {
+        return Ok(Vec::new());
+    }
+    let name: Option<(String,)> = sqlx::query_as("SELECT name FROM agents WHERE id = ?")
+        .bind(agent_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let agent = name.map(|(n,)| n).unwrap_or_else(|| agent_id.to_string());
+    let mut told = Vec::new();
+    for group in groups {
+        let first = &group[0];
+        let tasks: Vec<&str> = group.iter().map(|c| c.title.as_str()).collect();
+        let title = format!("{agent} is no longer offered \"{}\"", tasks.join("\", \""));
+        let body = format!("Refused {} times: {}", first.attempts, first.reason);
+        told.push(
+            notify::post(
+                tx,
+                company_id,
+                notify::New {
+                    kind: notify::kind::LOOP_CONSTRAINED,
+                    title: &title,
+                    body: &body,
+                    params: json!({
+                        "agent": agent,
+                        "task": first.title,
+                        "tasks": tasks,
+                        "attempts": first.attempts,
+                        "reason": first.reason,
+                        "remedy": first.remedy,
+                    }),
+                    agent_id: Some(agent_id),
+                    subject: Some(("task", &first.task_id)),
+                    approval_id: None,
+                },
+            )
+            .await?,
+        );
+    }
+    Ok(told)
 }
 
 async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcome, RunnerError> {
@@ -302,15 +572,31 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
     // beat is not the place to try a whole backlog. One more than the window
     // is fetched so the outcome can say when the window was the limit.
     const WINDOW: usize = 20;
+    // A task the loop stopped offering to this agent is not a candidate
+    // (`constrain`) until the agent is characterized anew -- a revision that
+    // changed something. The cause was the agent's, so nothing done to the
+    // task lifts it; giving the task to someone else is the other way out.
     let sql = format!(
         "SELECT id FROM tasks WHERE company_id = ? AND status = 'todo'
-           AND execution_kind IN ({placeholders}) ORDER BY created_at LIMIT {}",
+           AND execution_kind IN ({placeholders})
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_events c
+             WHERE c.kind = ? AND c.task_id = tasks.id
+               AND json_extract(c.payload, '$.agent_id') = ?
+               AND c.created_at >= COALESCE(tasks.attempts_since, '')
+               AND c.created_at >= COALESCE((SELECT MAX(r.created_at) FROM agent_config_revisions r
+                                             WHERE r.agent_id = ? AND r.changed_keys <> '[]'), ''))
+           ORDER BY created_at LIMIT {}",
         WINDOW + 1
     );
     let mut query = sqlx::query_as::<_, (String,)>(&sql).bind(&company_id);
     for k in &kinds {
         query = query.bind(*k);
     }
+    query = query
+        .bind(event_kind::LOOP_CONSTRAINED)
+        .bind(agent_id)
+        .bind(agent_id);
     let mut candidates: Vec<(String,)> = query.fetch_all(&state.pool).await?;
     if candidates.is_empty() {
         return Ok(WakeupOutcome::new(
@@ -333,16 +619,20 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
     // task would fare better.
     let mut refused: Vec<String> = Vec::new();
     let mut remedies: Vec<Value> = Vec::new();
+    let mut refusals: Vec<Refusal> = Vec::new();
+    let mut taken: Option<String> = None;
     let last: Option<String> = 'tasks: {
         for (task_id,) in candidates {
             match runner::start_task(state, &task_id, agent_id, false).await {
                 Ok(runner::StartResult::Started(outcome)) => {
+                    taken = Some(task_id.clone());
                     break 'tasks Some(format!(
                         "started task {task_id} (session {})",
                         outcome.session_id
                     ));
                 }
                 Ok(runner::StartResult::ApprovalRequired { approval_id }) => {
+                    taken = Some(task_id.clone());
                     break 'tasks Some(format!("task {task_id} needs approval ({approval_id})"));
                 }
                 // The agent's condition: over its budget, paused, or not
@@ -361,12 +651,31 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
                 // well be fine.
                 Err(RunnerError::Conflict) => {
                     refused.push(format!("task {task_id} was taken by someone else"));
+                    refusals.push(Refusal {
+                        task_id,
+                        cause: "conflict".into(),
+                        message: "taken by someone else".into(),
+                        remedy: None,
+                    });
                 }
                 Err(RunnerError::Invalid(msg)) => {
                     refused.push(format!("task {task_id} cannot start: {msg}"));
+                    refusals.push(Refusal {
+                        task_id,
+                        cause: "invalid".into(),
+                        message: msg,
+                        remedy: None,
+                    });
                 }
                 Err(RunnerError::Remediable { message, remedy }) => {
                     refused.push(format!("task {task_id} refused: {message}"));
+                    let kind = remedy.get("kind").and_then(Value::as_str).unwrap_or("");
+                    refusals.push(Refusal {
+                        task_id,
+                        cause: format!("remediable:{kind}"),
+                        message,
+                        remedy: Some(remedy.clone()),
+                    });
                     // A remedy is about the agent, so five sketches name the
                     // same one: keep each once.
                     if !remedies.contains(&remedy) {
@@ -398,5 +707,7 @@ async fn wakeup_outcome(state: &AppState, agent_id: &str) -> Result<WakeupOutcom
         company_id: Some(company_id),
         summary,
         remedies,
+        refusals,
+        taken,
     })
 }

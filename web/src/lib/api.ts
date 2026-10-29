@@ -310,13 +310,21 @@ export interface Task {
   stall?: TaskStall | null;
 }
 
-/** The `task.stalled` packet: the same failure reached the attempts cap. */
+/** The `task.stalled` packet: the same failure reached the attempts cap, or
+ *  the same refused start reached the repetition tolerance (`refused`). */
 export interface TaskStall {
-  cause: "timed_out" | "infra" | "agent_failure" | "empty_handed";
+  cause: "timed_out" | "infra" | "agent_failure" | "empty_handed" | "refused";
   attempts: number;
   cap: number;
   reason: string;
   sessions: string[];
+  /** Only for `refused`: why the start was refused, as data
+   *  (`invalid`, `conflict`, `remediable:<kind>`). */
+  refusal?: string;
+  /** Only for `refused`: the agent that was refused. */
+  agent_id?: string;
+  /** Only for `refused`: what would unblock it. */
+  remedies?: { kind: string; agent_id?: string }[];
 }
 
 /** A knowledge run's deliverable (ADR-0017): a document, table, or research note. */
