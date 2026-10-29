@@ -4235,6 +4235,17 @@ async fn set_agent_budget(
     .await?;
     tx.commit().await?;
     state.notify(&company_id);
+    // A lower cap is the other way to run low, with no cost landing to say so.
+    if let Err(e) = crate::governance::warn_if_low(
+        &state,
+        &company_id,
+        &agent_id,
+        crate::governance::SpendKind::Task,
+    )
+    .await
+    {
+        eprintln!("budget.low for {agent_id} not checked: {e}");
+    }
     Ok(Json(
         json!({ "id": agent_id, "monthly_budget_cents": req.monthly_budget_cents }),
     ))

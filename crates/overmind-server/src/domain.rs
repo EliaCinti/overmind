@@ -350,6 +350,9 @@ pub mod event_kind {
     pub const WAKEUP_REQUESTED: &str = "agent.wakeup_requested";
     pub const WAKEUP_PROCESSED: &str = "agent.wakeup_processed";
     pub const BUDGET_BLOCKED: &str = "budget.blocked";
+    /// What an agent has left fell under its next run's estimate, before the
+    /// wallet refused anything (ADR-0050 §4).
+    pub const BUDGET_LOW: &str = "budget.low";
     pub const APPROVAL_REQUESTED: &str = "approval.requested";
     pub const APPROVAL_DECIDED: &str = "approval.decided";
     pub const AGENT_PAUSED: &str = "agent.paused";

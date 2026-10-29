@@ -292,6 +292,9 @@ export const en = {
     budgetExhaustedTitle: "{agent} is out of budget",
     budgetExhaustedBody:
       "{spent} of {limit} spent this month, so {agent} could not take its turn. Raise its cap, or wait for the new month.",
+    budgetLowTitle: "{agent} is running low on budget",
+    budgetLowBody:
+      "{left} left of {limit} this month, and its next run costs about {next}. Raise its cap now, or the next start will be refused.",
     loopConstrainedTitle: "{agent} is no longer offered “{task}”",
     loopConstrainedTitleMany: "{agent} is no longer offered {n} tasks: {tasks}",
     loopConstrainedBody:
@@ -895,6 +898,9 @@ export const it: Dictionary = {
     budgetExhaustedTitle: "{agent} ha finito il budget",
     budgetExhaustedBody:
       "{spent} di {limit} spesi questo mese, quindi {agent} non ha potuto fare il suo turno. Alza il suo tetto, o aspetta il mese nuovo.",
+    budgetLowTitle: "{agent} sta finendo il budget",
+    budgetLowBody:
+      "Restano {left} di {limit} questo mese, e il suo prossimo run costa circa {next}. Alza il suo tetto adesso, o il prossimo avvio verrà rifiutato.",
     loopConstrainedTitle: "«{task}» non viene più offerto a {agent}",
     loopConstrainedTitleMany: "{n} task non vengono più offerti a {agent}: {tasks}",
     loopConstrainedBody:
@@ -1386,6 +1392,15 @@ export function useNotificationText(): (n: Notification) => { title: string; bod
             agent: v("agent"),
             spent: formatCents(Number(p.spentCents ?? 0)),
             limit: formatCents(Number(p.limitCents ?? 0)),
+          }),
+        };
+      case "budget.low":
+        return {
+          title: t("notif.budgetLowTitle", { agent: v("agent") }),
+          body: t("notif.budgetLowBody", {
+            left: formatCents(Number(p.headroomCents ?? 0)),
+            limit: formatCents(Number(p.limitCents ?? 0)),
+            next: formatCents(Number(p.nextCents ?? 0)),
           }),
         };
       case "loop.constrained": {
