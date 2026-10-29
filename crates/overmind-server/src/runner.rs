@@ -468,6 +468,64 @@ async fn previous_handoff(state: &AppState, task_id: &str, session_id: &str) -> 
     }
 }
 
+/// The run's own handoff, read without following a link anywhere on the way.
+///
+/// The file sits in a directory the agent owns, and the server reading it is
+/// not in the cage: a `HANDOFF.md` -- or a `deliverables/` -- planted as a link
+/// would otherwise carry `~/.ssh` or Overmind's own database into the drawer
+/// and the next prompt. So each step is opened `O_NOFOLLOW` from the one before
+/// (`openat`), leaving no gap between checking a name and opening it, and only
+/// a plain file is read -- the shape `backup.rs` uses for the same reason.
+async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Option<String> {
+    let worktree = worktree.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::ffi::CString;
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::fs::OpenOptionsExt;
+        let open_at = |dir: &OwnedFd, name: &str, flags: libc::c_int| -> Option<OwnedFd> {
+            let name = CString::new(name).ok()?;
+            // SAFETY: `name` is a valid C string and `dir` an open descriptor;
+            // a negative return is an error, never a descriptor to own.
+            let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+            // SAFETY: a non-negative `fd` was just returned to us and is owned here.
+            (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+        };
+        let root: OwnedFd = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&worktree)
+            .ok()?
+            .into();
+        let dir = match kind {
+            ExecutionKind::Code => open_at(
+                &root,
+                DELIVERABLES_DIR,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )?,
+            ExecutionKind::Knowledge => root,
+        };
+        let fd = open_at(
+            &dir,
+            HANDOFF_FILE,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )?;
+        let file = std::fs::File::from(fd);
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut text = String::new();
+        file.take((MAX_HANDOFF_CHARS * 4) as u64)
+            .read_to_string(&mut text)
+            .ok()?;
+        let text: String = text.chars().take(MAX_HANDOFF_CHARS).collect();
+        (!text.trim().is_empty()).then_some(text)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// The last `n` characters of `s`, on a character boundary.
 fn tail_chars(s: &str, n: usize) -> &str {
     match s.char_indices().rev().nth(n.saturating_sub(1)) {
@@ -482,11 +540,7 @@ fn tail_chars(s: &str, n: usize) -> &str {
 /// unless the agent wrote it, and then named as its own.
 async fn handoff_text(ctx: &SessionContext, stop: &crate::i18n::Stop, output: &str) -> String {
     let lang = crate::i18n::company_language(&ctx.state, &ctx.company_id).await;
-    let own = tokio::fs::read_to_string(ctx.worktree_dir.join(handoff_path(ctx.exec_kind)))
-        .await
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| s.chars().take(MAX_HANDOFF_CHARS).collect::<String>());
+    let own = read_own_handoff(&ctx.worktree_dir, ctx.exec_kind).await;
     let changed: Option<Vec<String>> = if own.is_some() {
         None
     } else {
@@ -1931,9 +1985,9 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // task goes back to the queue with the handoff, not to review with a note
     // about what is pending filed as the deliverable.
     let handed_off = matches!(outcome, Outcome::Success { .. })
-        && tokio::fs::metadata(ctx.worktree_dir.join(handoff_path(ctx.exec_kind)))
+        && read_own_handoff(&ctx.worktree_dir, ctx.exec_kind)
             .await
-            .is_ok_and(|m| m.len() > 0);
+            .is_some();
     let f = match outcome {
         Outcome::Success { output } if handed_off => Final {
             session_status: "completed",

@@ -837,6 +837,37 @@ async fn the_prompt_states_the_advertised_bound_not_the_enforced_one() {
     assert!(!prompt.contains("€10.00"), "{prompt}");
 }
 
+/// The handoff file is in a directory the agent owns, read by a server that
+/// is not in the cage: a link planted in its place must not carry a host file
+/// out into the drawer and the next prompt.
+#[tokio::test]
+async fn a_handoff_planted_as_a_symlink_is_not_followed() {
+    let secret_dir = std::env::temp_dir().join(format!("om-secret-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&secret_dir).expect("secret dir");
+    let secret = secret_dir.join("id_rsa");
+    std::fs::write(&secret, "PRIVATE-KEY-MATERIAL").expect("secret");
+    let stub = format!(
+        "#!/bin/sh\nmkdir -p deliverables\nln -s '{}' deliverables/HANDOFF.md\n",
+        secret.display()
+    );
+    let env = build_env(&stub, None, |_| {}).await;
+    let agent_id = hire(&env, "Sly", "builder").await;
+    let task_id = make_todo_task(&env, "Innocent work").await;
+
+    attempt(&env, &task_id, &agent_id).await;
+    for text in handoffs(&env, &task_id).await {
+        assert!(!text.contains("PRIVATE-KEY-MATERIAL"), "{text}");
+    }
+    let (leaked,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_artifacts WHERE task_id = ? AND content LIKE '%PRIVATE-KEY-MATERIAL%'",
+    )
+    .bind(&task_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("count");
+    assert_eq!(leaked, 0);
+}
+
 /// Stops itself in time, as the prompt asks, and leaves its own handoff.
 const HANDING_OFF_STUB: &str =
     "#!/bin/sh\nmkdir -p deliverables\necho 'pending: the second half' > deliverables/HANDOFF.md\n";
