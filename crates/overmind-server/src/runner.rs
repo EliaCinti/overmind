@@ -315,7 +315,7 @@ pub(crate) async fn drain_narrating(
     let err_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let out_shared = out_buf.clone();
     let err_shared = err_buf.clone();
-    let out_task = tokio::spawn(async move {
+    let mut out_task = tokio::spawn(async move {
         // The reply as it streams (ADR-0039 addendum): text deltas accumulate
         // and the readable part rides as a `draft` activity, so the chat can
         // show the words appearing. Bounded — narration, not storage.
@@ -354,7 +354,7 @@ pub(crate) async fn drain_narrating(
             }
         }
     });
-    let err_task = tokio::spawn(async move {
+    let mut err_task = tokio::spawn(async move {
         if let Some(stderr) = stderr {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -375,9 +375,18 @@ pub(crate) async fn drain_narrating(
     match waited {
         Err(_elapsed) => {
             let _ = child.kill().await;
-            let status = child.wait().await?;
+            let status = child.wait().await;
+            // A moment for the last lines already in the pipe, never more: a
+            // grandchild may keep it open for good.
+            let grace = std::time::Duration::from_millis(500);
+            let _ = tokio::time::timeout(grace, async {
+                let _ = (&mut out_task).await;
+                let _ = (&mut err_task).await;
+            })
+            .await;
             out_task.abort();
             err_task.abort();
+            let status = status?;
             Ok(Drained {
                 status,
                 stdout: take(&out_buf),
@@ -433,12 +442,17 @@ fn advertised_bounds(timeout_secs: u64, ceiling_cents: Option<i64>, kind: Execut
     )
 }
 
-/// The handoff the last attempt at this task left, as a prompt block.
+/// The handoff the attempt just before this one left, as a prompt block --
+/// only that one: after a run that finished, or a person's reset, an older
+/// handoff describes work that is no longer where things stand.
 async fn previous_handoff(state: &AppState, task_id: &str, session_id: &str) -> String {
     let last: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT content FROM task_artifacts
-         WHERE task_id = ? AND kind = 'handoff' AND session_id IS NOT ?
-         ORDER BY created_at DESC LIMIT 1",
+        "SELECT a.content FROM task_artifacts a
+         WHERE a.kind = 'handoff' AND a.session_id = (
+           SELECT s.id FROM agent_task_sessions s
+           WHERE s.task_id = ? AND s.id IS NOT ?
+           ORDER BY s.created_at DESC LIMIT 1)
+         ORDER BY a.created_at DESC LIMIT 1",
     )
     .bind(task_id)
     .bind(session_id)
@@ -466,52 +480,71 @@ fn tail_chars(s: &str, n: usize) -> &str {
 /// in time, else what Overmind can read from the state it left -- the files it
 /// changed and the last thing it said. Never the agent's word for what it did
 /// unless the agent wrote it, and then named as its own.
-async fn handoff_text(ctx: &SessionContext, reason: &str, output: &str) -> String {
+async fn handoff_text(ctx: &SessionContext, stop: &crate::i18n::Stop, output: &str) -> String {
+    let lang = crate::i18n::company_language(&ctx.state, &ctx.company_id).await;
     let own = tokio::fs::read_to_string(ctx.worktree_dir.join(handoff_path(ctx.exec_kind)))
         .await
         .ok()
-        .filter(|s| !s.trim().is_empty());
-    if let Some(own) = own {
-        let own: String = own.chars().take(MAX_HANDOFF_CHARS).collect();
-        return format!("The run stopped because {reason}. Its own handoff:\n\n{own}");
-    }
-    let changed: Vec<String> = match ctx.exec_kind {
-        ExecutionKind::Code => {
-            let mut git = tokio::process::Command::new("git");
-            git.args(["status", "--porcelain"])
-                .current_dir(&ctx.worktree_dir)
-                .stdin(Stdio::null());
-            for (k, v) in crate::sandbox::git_isolation() {
-                git.env(k, v);
-            }
-            match git.output().await {
-                Ok(out) => String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .filter_map(|l| l.get(3..).map(str::to_string))
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
-        }
-        ExecutionKind::Knowledge => files::collect_files(&ctx.worktree_dir, MAX_ARTIFACTS)
-            .await
-            .into_iter()
-            .map(|(rel, _)| files::safe_relative(&rel))
-            .filter(|r| !r.is_empty() && !r.starts_with(&format!("{INPUTS_DIR}/")))
-            .collect(),
-    };
-    let changed = if changed.is_empty() {
-        "- nothing".to_string()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.chars().take(MAX_HANDOFF_CHARS).collect::<String>());
+    let changed: Option<Vec<String>> = if own.is_some() {
+        None
     } else {
-        changed
-            .iter()
-            .map(|f| format!("- {f}"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        match ctx.exec_kind {
+            ExecutionKind::Code => {
+                // safe.directory as the `git()` helper passes it: in the
+                // uid-split image the run dir belongs to the agent, and git
+                // would refuse -- and an empty answer must not read as "nothing".
+                let mut git = tokio::process::Command::new("git");
+                git.arg("-c")
+                    .arg(format!("safe.directory={}", ctx.worktree_dir.display()))
+                    .args(["status", "--porcelain"])
+                    .current_dir(&ctx.worktree_dir)
+                    .stdin(Stdio::null());
+                for (k, v) in crate::sandbox::git_isolation() {
+                    git.env(k, v);
+                }
+                match git.output().await {
+                    Ok(out) if out.status.success() => Some(
+                        String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .filter_map(|l| l.get(3..).map(str::to_string))
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+            }
+            ExecutionKind::Knowledge => Some(
+                files::collect_files(&ctx.worktree_dir, MAX_ARTIFACTS)
+                    .await
+                    .into_iter()
+                    .map(|(rel, _)| files::safe_relative(&rel))
+                    .filter(|r| !r.is_empty() && !r.starts_with(&format!("{INPUTS_DIR}/")))
+                    .collect(),
+            ),
+        }
     };
-    let said = tail_chars(output.trim(), HANDOFF_TAIL_CHARS);
-    let said = if said.is_empty() { "(nothing)" } else { said };
-    format!(
-        "The run stopped because {reason}, before writing a handoff of its own. Overmind wrote this from what it left behind.\n\n## What it changed\n{changed}\n\n## The last thing it said\n```\n{said}\n```"
+    // What it *said*, not its wire format: a stream of JSON envelopes is read
+    // back into text, and only lines that are not envelopes are kept as-is.
+    let provider = crate::provider::current();
+    let mut said = String::new();
+    for line in output.lines() {
+        if let Some(delta) = provider.text_delta(line) {
+            said.push_str(&delta);
+        } else if !line.trim_start().starts_with('{') {
+            said.push_str(line);
+            said.push('\n');
+        }
+    }
+    crate::i18n::handoff(
+        &lang,
+        &crate::i18n::Handoff {
+            stop,
+            own: own.as_deref(),
+            changed: changed.as_deref(),
+            code_run: ctx.exec_kind == ExecutionKind::Code,
+            said: tail_chars(said.trim(), HANDOFF_TAIL_CHARS),
+        },
     )
 }
 
@@ -1839,10 +1872,19 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let drained = drain_narrating(&ctx.state, &ctx.session_id, child, timeout_secs).await;
     ctx.state.clear_activity(&ctx.session_id);
     match drained {
-        Ok(out) if out.timed_out => Outcome::TimedOut {
-            timeout_secs,
-            partial: out.stdout,
-        },
+        Ok(out) if out.timed_out => {
+            // Kept the way a finished run's is: stderr is often where a stuck
+            // adapter explained itself.
+            let mut partial = out.stdout;
+            if !out.stderr.trim().is_empty() {
+                partial.push_str("\n--- stderr ---\n");
+                partial.push_str(out.stderr.trim());
+            }
+            Outcome::TimedOut {
+                timeout_secs,
+                partial,
+            }
+        }
         Err(e) => Outcome::Infra {
             error: format!("failed to read agent output: {e}"),
             release: false,
@@ -1881,10 +1923,28 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         release: bool,
         /// The class of a failure, as data, for the attempts cap (ADR-0050).
         cause: Option<&'static str>,
-        /// Stopped at an enforced bound: the run owes a handoff (ADR-0050 §4).
-        bound: Option<String>,
+        /// Stopped short of done: the run owes a handoff (ADR-0050 §4).
+        bound: Option<crate::i18n::Stop>,
     }
+    // A run that did what its prompt asks when it will not finish in time --
+    // stopped, wrote its handoff, exited cleanly -- is not finished work: the
+    // task goes back to the queue with the handoff, not to review with a note
+    // about what is pending filed as the deliverable.
+    let handed_off = matches!(outcome, Outcome::Success { .. })
+        && tokio::fs::metadata(ctx.worktree_dir.join(handoff_path(ctx.exec_kind)))
+            .await
+            .is_ok_and(|m| m.len() > 0);
     let f = match outcome {
+        Outcome::Success { output } if handed_off => Final {
+            session_status: "completed",
+            output,
+            exit_code: Some(0),
+            last_error: None,
+            task_to: "todo",
+            release: true,
+            cause: None,
+            bound: Some(crate::i18n::Stop::HandedOff),
+        },
         Outcome::Success { output } => Final {
             session_status: "completed",
             output,
@@ -1904,7 +1964,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             ),
             bound: crate::provider::current()
                 .stopped_at_bound(&output)
-                .then(|| "it reached its budget ceiling".to_string()),
+                .then_some(crate::i18n::Stop::Ceiling),
             output,
             exit_code: Some(exit_code),
             task_to: "blocked",
@@ -1924,7 +1984,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             task_to: "todo",
             release: true,
             cause: Some("timed_out"),
-            bound: Some(format!("it timed out after {timeout_secs}s")),
+            bound: Some(crate::i18n::Stop::TimedOut(timeout_secs)),
         },
         Outcome::Infra { error, release } => Final {
             session_status: "failed",
@@ -1936,6 +1996,13 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             cause: Some("infra"),
             bound: None,
         },
+    };
+
+    // Composed before the write lock: it runs git and walks the run dir, and
+    // every other writer on the server would wait on that.
+    let handoff = match &f.bound {
+        Some(stop) => Some(handoff_text(ctx, stop, &f.output).await),
+        None => None,
     };
 
     let mut tx = ctx.state.write_tx().await?;
@@ -1966,6 +2033,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             // Control files and the inputs we placed are not deliverables.
             if rel_str.is_empty()
                 || rel_str == MEETING_REQUEST_FILE
+                // A handoff is the next attempt's, not a deliverable.
+                || (f.bound.is_some() && rel_str == HANDOFF_FILE)
                 || rel_str.starts_with(&format!("{INPUTS_DIR}/"))
                 || (inline_root && rel_str.starts_with(&format!("{DELIVERABLES_DIR}/")))
             {
@@ -2051,8 +2120,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // own HANDOFF.md if it wrote one before the bound, else one Overmind
     // composes from what it left behind. An artifact of the task, so the
     // drawer shows it and the next attempt is handed it.
-    if let Some(reason) = &f.bound {
-        let text = handoff_text(ctx, reason, &f.output).await;
+    if let Some(text) = &handoff {
         sqlx::query(
             "INSERT INTO task_artifacts
              (id, task_id, session_id, kind, title, mime, content, file_path, size_bytes, relative_path, created_at)
@@ -2061,7 +2129,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         .bind(uuid::Uuid::now_v7().to_string())
         .bind(&ctx.task_id)
         .bind(&ctx.session_id)
-        .bind(&text)
+        .bind(text.as_str())
         .bind(text.len() as i64)
         .bind(now())
         .execute(&mut *tx)
@@ -2091,7 +2159,9 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     //
     // Code runs are excluded on purpose: their deliverable is the diff, and one
     // that deliberately changed nothing is a legitimate answer.
+    // A run that handed off owes a handoff, not a deliverable.
     let empty_handed = f.session_status == "completed"
+        && f.bound.is_none()
         && ctx.exec_kind == ExecutionKind::Knowledge
         && delivered == 0;
     let session_status = if empty_handed {

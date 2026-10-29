@@ -151,6 +151,84 @@ pub fn meeting_request_summary(code: &str, convener: &str, topic: &str) -> Strin
     }
 }
 
+/// Why a run stopped short of done, for its handoff (ADR-0050 §4).
+pub enum Stop {
+    TimedOut(u64),
+    Ceiling,
+    /// It stopped itself before its bounds and wrote its own handoff.
+    HandedOff,
+}
+
+/// The handoff a run stopped short hands on, shown to the person on the task
+/// and to the next attempt. `own` is the run's own file when it wrote one;
+/// otherwise `changed` and `said` are what Overmind read from what it left.
+/// `code` says whether the changes stay behind in a worktree the next attempt
+/// will not have -- said plainly, so it does not look for them.
+pub struct Handoff<'a> {
+    pub stop: &'a Stop,
+    pub own: Option<&'a str>,
+    pub changed: Option<&'a [String]>,
+    pub code_run: bool,
+    pub said: &'a str,
+}
+
+pub fn handoff(code: &str, h: &Handoff) -> String {
+    let it = code == "it";
+    let reason = match (h.stop, it) {
+        (Stop::TimedOut(s), true) => format!("è scaduto il tempo ({s}s)"),
+        (Stop::TimedOut(s), false) => format!("it timed out after {s}s"),
+        (Stop::Ceiling, true) => "ha raggiunto il tetto di spesa".to_string(),
+        (Stop::Ceiling, false) => "it reached its budget ceiling".to_string(),
+        (Stop::HandedOff, true) => "si è fermato da solo prima dei suoi limiti".to_string(),
+        (Stop::HandedOff, false) => "it stopped itself before its bounds".to_string(),
+    };
+    if let Some(own) = h.own {
+        return if it {
+            format!("Il run si è fermato perché {reason}. Il suo handoff:\n\n{own}")
+        } else {
+            format!("The run stopped because {reason}. Its own handoff:\n\n{own}")
+        };
+    }
+    let changed = match h.changed {
+        None if it => "- (non leggibile)".to_string(),
+        None => "- (could not be read)".to_string(),
+        Some([]) if it => "- niente".to_string(),
+        Some([]) => "- nothing".to_string(),
+        Some(files) => files
+            .iter()
+            .map(|f| format!("- {f}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let kept = match (h.code_run, it) {
+        (true, true) => {
+            "\n\nQuesti cambi erano nella sua worktree e non sono in quella del prossimo tentativo, che riparte dal repository."
+        }
+        (true, false) => {
+            "\n\nThese changes were in its worktree and are not in the next attempt's, which starts from the repository again."
+        }
+        (false, _) => "",
+    };
+    let said = if h.said.trim().is_empty() {
+        if it { "(niente)" } else { "(nothing)" }
+    } else {
+        h.said
+    };
+    // A fence longer than any run of backticks in what it said, so its own
+    // code blocks cannot close ours.
+    let longest = said.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat((longest + 1).max(3));
+    if it {
+        format!(
+            "Il run si è fermato perché {reason}, prima di scrivere un handoff suo. Overmind l'ha scritto da ciò che ha lasciato.\n\n## Cosa ha cambiato\n{changed}{kept}\n\n## L'ultima cosa che ha detto\n{fence}\n{said}\n{fence}"
+        )
+    } else {
+        format!(
+            "The run stopped because {reason}, before writing a handoff of its own. Overmind wrote this from what it left behind.\n\n## What it changed\n{changed}{kept}\n\n## The last thing it said\n{fence}\n{said}\n{fence}"
+        )
+    }
+}
+
 #[cfg(test)]
 mod summary_tests {
     use super::{meeting_request_summary, start_task_summary};

@@ -836,3 +836,39 @@ async fn the_prompt_states_the_advertised_bound_not_the_enforced_one() {
     assert!(!prompt.contains("100 seconds"), "{prompt}");
     assert!(!prompt.contains("€10.00"), "{prompt}");
 }
+
+/// Stops itself in time, as the prompt asks, and leaves its own handoff.
+const HANDING_OFF_STUB: &str =
+    "#!/bin/sh\nmkdir -p deliverables\necho 'pending: the second half' > deliverables/HANDOFF.md\n";
+
+/// A run that does what the prompt asks -- stops before its bound and writes
+/// its handoff -- is not finished work: the task goes back to the queue with
+/// the handoff, not to review with "what is pending" filed as a deliverable.
+#[tokio::test]
+async fn a_run_that_hands_off_in_time_goes_back_to_the_queue_with_its_handoff() {
+    let env = build_env(HANDING_OFF_STUB, None, |_| {}).await;
+    let agent_id = hire(&env, "Careful", "builder").await;
+    let task_id = make_todo_task(&env, "Half a day of work").await;
+
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "completed");
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    let handoff = handoffs(&env, &task_id).await;
+    assert_eq!(handoff.len(), 1, "{handoff:?}");
+    assert!(
+        handoff[0].contains("pending: the second half"),
+        "{}",
+        handoff[0]
+    );
+    let (documents,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_artifacts WHERE task_id = ? AND kind <> 'handoff'",
+    )
+    .bind(&task_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("count");
+    assert_eq!(
+        documents, 0,
+        "the handoff must not be filed as a deliverable"
+    );
+}
