@@ -622,34 +622,45 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
         .arg(format!("safe.directory={}", cwd.display()))
         .args(args)
         .current_dir(cwd);
-    Ok(run_git(cmd).await?.trim().to_string())
+    // No time limit: nothing here is the agent's, and cloning a large
+    // repository from a slow disk is allowed to be slow.
+    Ok(run_git(cmd, None).await?.trim().to_string())
 }
 
-/// How long any git the server runs may take. A ceiling, not an expectation:
-/// cloning a large repository is the slow case, and a diff someone opened
-/// must not hold a task forever on a command an agent planted.
-const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long git over a run's files may take ([`caged_git`]). A diff someone
+/// opened must not hold forever on a command an agent planted.
+const CAGED_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Run a git command to its end, or to [`GIT_TIMEOUT`], and return what it
-/// printed -- untrimmed, since `status --porcelain` starts with a space.
-async fn run_git(mut cmd: Command) -> Result<String, RunnerError> {
+/// Run a git command to its end, or to `limit`, and return what it printed --
+/// untrimmed, since `status --porcelain` starts with a space.
+async fn run_git(
+    mut cmd: Command,
+    limit: Option<std::time::Duration>,
+) -> Result<String, RunnerError> {
     cmd.stdout(Stdio::piped());
-    run_spawned(cmd).await
+    run_spawned(cmd, limit).await
 }
 
 /// [`run_git`] for a command whose stdout the caller has already pointed
 /// somewhere. Not `output()`, which would quietly put it back on a pipe.
-async fn run_spawned(mut cmd: Command) -> Result<String, RunnerError> {
+async fn run_spawned(
+    mut cmd: Command,
+    limit: Option<std::time::Duration>,
+) -> Result<String, RunnerError> {
     cmd.stdin(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let child = cmd
         .spawn()
         .map_err(|e| RunnerError::Git(format!("failed to run git: {e}")))?;
-    let out = tokio::time::timeout(GIT_TIMEOUT, child.wait_with_output())
-        .await
-        .map_err(|_| RunnerError::Git(format!("git did not finish in {}s", GIT_TIMEOUT.as_secs())))?
-        .map_err(|e| RunnerError::Git(format!("failed to run git: {e}")))?;
+    let waited = child.wait_with_output();
+    let out = match limit {
+        Some(limit) => tokio::time::timeout(limit, waited)
+            .await
+            .map_err(|_| RunnerError::Git(format!("git did not finish in {}s", limit.as_secs())))?,
+        None => waited.await,
+    }
+    .map_err(|e| RunnerError::Git(format!("failed to run git: {e}")))?;
     if !out.status.success() {
         return Err(RunnerError::Git(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
@@ -716,7 +727,11 @@ async fn git_in_run(
     run_was_caged: bool,
     args: &[&str],
 ) -> Result<String, RunnerError> {
-    run_git(caged_git(state, cage, run_was_caged, args)?).await
+    run_git(
+        caged_git(state, cage, run_was_caged, args)?,
+        Some(CAGED_GIT_TIMEOUT),
+    )
+    .await
 }
 
 /// Was any run of this session caged? Unknown -- a session from before the
@@ -2804,18 +2819,20 @@ pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, 
         Ok(cmd)
     };
     let diff = async {
-        run_git(caged(&["read-tree", &base_sha])?).await?;
+        run_git(caged(&["read-tree", &base_sha])?, Some(CAGED_GIT_TIMEOUT)).await?;
         // `git diff` ignores untracked files; intent-to-add makes new files
         // created by the agent show up in the diff without staging content.
-        run_git(caged(&["add", "--intent-to-add", "--all"])?).await?;
+        run_git(
+            caged(&["add", "--intent-to-add", "--all"])?,
+            Some(CAGED_GIT_TIMEOUT),
+        )
+        .await?;
         // What a person reviews is the bytes, not what a driver the agent
         // configured says they are.
-        run_git(caged(&[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            &base_sha,
-        ])?)
+        run_git(
+            caged(&["diff", "--no-ext-diff", "--no-textconv", &base_sha])?,
+            Some(CAGED_GIT_TIMEOUT),
+        )
         .await
     }
     .await;
@@ -2939,7 +2956,7 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
             &["bundle", "create", "-", &dst, &format!("^{base_sha}")],
         )?;
         bundle.stdout(Stdio::from(file));
-        run_spawned(bundle).await?;
+        run_spawned(bundle, Some(CAGED_GIT_TIMEOUT)).await?;
         let bundle_path = path.to_string_lossy();
         git(
             Path::new(&repo),
