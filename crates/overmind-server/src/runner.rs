@@ -3003,7 +3003,15 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
     .await;
     let _ = std::fs::remove_file(&path);
     fetched?;
-    Ok(Some(tip))
+    // What the chain records is what the operator's repository now holds,
+    // read there: anything the agent left running could have moved the ref
+    // in the clone between the first read and the bundle.
+    let landed = git(
+        Path::new(&repo),
+        &["rev-parse", "--verify", "--end-of-options", &dst],
+    )
+    .await?;
+    Ok(Some(landed))
 }
 
 #[cfg(test)]
