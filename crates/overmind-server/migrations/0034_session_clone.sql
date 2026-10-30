@@ -7,3 +7,10 @@
 -- 1 once any of its runs was caged, 0 if none was. Sessions from before this
 -- migration have none, and are treated as caged: nobody can say they were not.
 ALTER TABLE agent_task_sessions ADD COLUMN caged INTEGER;
+
+-- The git dir a session's clone was made from: where its branch goes back to
+-- when the run ends. Recorded, not resolved again from the task, which may
+-- have moved to another project -- or the company gained a second repository
+-- -- while the run was under way. Sessions from before have none: they were
+-- worktrees, and their commits are in the repository already.
+ALTER TABLE agent_task_sessions ADD COLUMN repo_git_dir TEXT;

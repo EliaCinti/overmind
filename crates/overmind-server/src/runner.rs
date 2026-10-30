@@ -1706,13 +1706,7 @@ async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), Run
         spec.default_ref.as_deref().unwrap_or("HEAD")
     );
     let base_sha = git(repo, &["rev-parse", "--verify", "--end-of-options", &start]).await?;
-    // The git dir, not the working tree: a workspace may be a subdirectory of
-    // its repository, or a linked worktree, and `clone` takes neither.
-    let common = git(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .await?;
+    let common = operator_git_dir(repo).await?;
     let run_dir = ctx.worktree_dir.to_string_lossy().into_owned();
     // No hardlinks: an object shared by inode is the operator's file, and in
     // the agent's hands it could be rewritten (ADR-0052, rejected options).
@@ -1745,14 +1739,27 @@ async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), Run
     exclude_from_git(&ctx.worktree_dir).await;
     place_inputs(ctx).await;
     sqlx::query(
-        "UPDATE agent_task_sessions SET status = 'running', base_sha = ?, started_at = ? WHERE id = ?",
+        "UPDATE agent_task_sessions SET status = 'running', base_sha = ?, repo_git_dir = ?, started_at = ? WHERE id = ?",
     )
     .bind(&base_sha)
+    .bind(&common)
     .bind(now())
     .bind(&ctx.session_id)
     .execute(&ctx.state.pool)
     .await?;
     Ok(())
+}
+
+/// The operator's repository's git dir: what a run is cloned from, and where
+/// a session from before ADR-0052 kept its worktree. The git dir, not the
+/// working tree: a workspace may be a subdirectory of its repository, or a
+/// linked worktree, and `clone` takes neither.
+async fn operator_git_dir(repo: &Path) -> Result<String, RunnerError> {
+    git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await
 }
 
 /// A per-run MCP config file, and the token it carries, both gone when this
@@ -2867,13 +2874,7 @@ async fn git_dir_from_before(
         return None;
     }
     let (repo, _) = task_workspace(state, task_id).await.ok()?;
-    let common = git(
-        Path::new(&repo),
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .await
-    .ok()?;
-    let common = PathBuf::from(common);
+    let common = PathBuf::from(operator_git_dir(Path::new(&repo)).await.ok()?);
     tokio::fs::metadata(common.join("worktrees").join(session_id))
         .await
         .ok()?
@@ -2890,13 +2891,16 @@ async fn git_dir_from_before(
 /// operator's config alone, and takes from it the one ref this run owns,
 /// under `overmind/`, whatever else the bundle names.
 async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError> {
-    let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT branch, base_sha FROM agent_task_sessions WHERE id = ?")
-            .bind(&ctx.session_id)
-            .fetch_optional(&ctx.state.pool)
-            .await?;
-    // Never started, or nothing left of it: there is no clone to read.
-    let Some((branch, Some(base_sha))) = row else {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT branch, base_sha, repo_git_dir FROM agent_task_sessions WHERE id = ?",
+    )
+    .bind(&ctx.session_id)
+    .fetch_optional(&ctx.state.pool)
+    .await?;
+    // Never started, or nothing left of it: there is no clone to read. And a
+    // session without a recorded git dir is a worktree from before ADR-0052,
+    // whose commits are in the operator's repository already.
+    let Some((branch, Some(base_sha), Some(repo))) = row else {
         return Ok(None);
     };
     if !ctx.worktree_dir.is_dir() {
@@ -2932,8 +2936,6 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
     if tip == base_sha {
         return Ok(None);
     }
-    let (repo, _) = task_workspace(&ctx.state, &ctx.task_id).await?;
-
     let dir = ctx.state.config.data_dir.join("bundles");
     crate::sandbox::mkdir_mode(&dir, 0o700)
         .map_err(|e| RunnerError::Git(format!("cannot make the bundles dir: {e}")))?;

@@ -1652,3 +1652,59 @@ async fn a_caged_runs_files_are_not_read_once_the_cage_is_off() {
         .expect_err("a caged run's diff is refused without a cage");
     assert!(refused.to_string().contains("no cage"), "{refused}");
 }
+
+/// The branch goes back to the repository the clone was made from, not to
+/// whichever one the task points at when the run ends.
+#[tokio::test]
+async fn the_branch_goes_back_where_the_clone_came_from() {
+    let stub = r#"#!/bin/sh
+touch started
+sleep 1
+echo work > work.txt
+git add work.txt
+git commit -qm "the agent's work"
+"#;
+    let env = build_env(stub, None, |_| {}).await;
+    let agent_id = hire(&env, "Mover", "builder").await;
+    let task_id = make_todo_task(&env, "Outlives a move").await;
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{started}");
+    let run_dir = PathBuf::from(started["workspace_path"].as_str().expect("run dir"));
+    for _ in 0..100 {
+        if run_dir.join("started").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // While it runs, the workspace is pointed at another repository.
+    let elsewhere = env.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("dir");
+    sh(
+        &elsewhere,
+        "git init -q -b main && git -c user.email=t@t -c user.name=T commit -q --allow-empty -m other",
+    );
+    sqlx::query("UPDATE project_workspaces SET cwd = ?")
+        .bind(elsewhere.to_string_lossy().into_owned())
+        .execute(&env.state.pool)
+        .await
+        .expect("repoint the workspace");
+
+    let session_id = started["session_id"].as_str().expect("session id");
+    let session = wait_for_session(&env.app, session_id).await;
+    let branch = session["branch"].as_str().expect("branch");
+    assert_eq!(
+        sh(
+            &env.root.join("repo"),
+            &format!("git show {branch}:work.txt")
+        ),
+        "work",
+        "{session}"
+    );
+}
