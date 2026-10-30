@@ -547,19 +547,35 @@ async fn handoff_text(ctx: &SessionContext, stop: &crate::i18n::Stop, output: &s
         match ctx.exec_kind {
             // The clone is the agent's, so this git runs in its cage
             // (ADR-0052). A failure must not read as "nothing changed".
-            ExecutionKind::Code => git_in_run(
-                &ctx.state,
-                &crate::sandbox::Cage::new(&ctx.worktree_dir),
-                run_was_caged(&ctx.state, &ctx.session_id).await,
-                &["status", "--porcelain"],
-            )
-            .await
-            .ok()
-            .map(|out| {
-                out.lines()
-                    .filter_map(|l| l.get(3..).map(str::to_string))
-                    .collect()
-            }),
+            ExecutionKind::Code => {
+                // A worktree from before, resumed across the upgrade, reads
+                // its git dir as its diff does.
+                let readable: Vec<PathBuf> = git_dir_from_before(
+                    &ctx.state,
+                    &ctx.task_id,
+                    &ctx.session_id,
+                    &ctx.worktree_dir,
+                )
+                .await
+                .into_iter()
+                .collect();
+                git_in_run(
+                    &ctx.state,
+                    &crate::sandbox::Cage {
+                        run_dir: &ctx.worktree_dir,
+                        readable: &readable,
+                    },
+                    run_was_caged(&ctx.state, &ctx.session_id).await,
+                    &["status", "--porcelain"],
+                )
+                .await
+                .ok()
+                .map(|out| {
+                    out.lines()
+                        .filter_map(|l| l.get(3..).map(str::to_string))
+                        .collect()
+                })
+            }
             ExecutionKind::Knowledge => Some(
                 files::collect_files(&ctx.worktree_dir, MAX_ARTIFACTS)
                     .await
