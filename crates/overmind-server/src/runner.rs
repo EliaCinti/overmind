@@ -2983,6 +2983,12 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
                 "transfer.fsckObjects=true",
                 "-c",
                 "core.hooksPath=/dev/null",
+                // The owner's repository is repacked by the owner, never by
+                // a server that is root in the image.
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
                 "fetch",
                 "--quiet",
                 "--no-tags",
