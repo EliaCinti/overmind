@@ -327,6 +327,11 @@ pub mod event_kind {
     pub const SESSION_STARTED: &str = "session.started";
     pub const SESSION_FINISHED: &str = "session.finished";
     pub const SESSION_RESUMED: &str = "session.resumed";
+    /// A `code` run's commits reached the operator's repository as its branch
+    /// (ADR-0052): the server wrote there, so it says so.
+    pub const BRANCH_RETURNED: &str = "session.branch_returned";
+    /// They did not: the run is not failed for it, and the reason is here.
+    pub const BRANCH_NOT_RETURNED: &str = "session.branch_not_returned";
     pub const TASK_RELEASED: &str = "task.released";
     /// The loop stopped a task (ADR-0050): cause, count, reason, sessions.
     pub const TASK_STALLED: &str = "task.stalled";

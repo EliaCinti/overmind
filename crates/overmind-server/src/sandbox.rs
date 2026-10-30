@@ -49,9 +49,23 @@ use crate::db::Config;
 
 /// Where a caged run may write, beyond the system paths every process needs.
 pub struct Cage<'a> {
-    /// The run's own directory: the git worktree for a `code` task, the scratch
-    /// dir for a `knowledge` task or a conversational turn.
+    /// The run's own directory: the clone for a `code` task (ADR-0052), the
+    /// scratch dir for a `knowledge` task or a conversational turn.
     pub run_dir: &'a Path,
+    /// Read, never written. Empty for every run: the one use is the diff of a
+    /// session from before ADR-0052, whose git dir lives in the operator's
+    /// repository -- reading it does not widen what an agent can plant there.
+    pub readable: &'a [PathBuf],
+}
+
+impl<'a> Cage<'a> {
+    /// The cage every run gets: its own directory, nothing to read beyond it.
+    pub fn new(run_dir: &'a Path) -> Self {
+        Cage {
+            run_dir,
+            readable: &[],
+        }
+    }
 }
 
 /// The unprivileged user agent work runs as, when Overmind is privileged enough
@@ -120,11 +134,10 @@ fn writable_paths(config: &Config, cage: &Cage<'_>) -> Vec<PathBuf> {
     // agent's own home; on a machine it is the user's, and the run would fail
     // without it long before it failed usefully.
     writable.extend(config.agent_home.iter().filter_map(|p| real_path(p)));
-    // Mounted repositories. Writable, not readable: a `code` run commits, and a
-    // worktree keeps its git metadata in `<repo>/.git/worktrees/<name>` — inside
-    // the repository, not inside the run directory. Granting the run directory
-    // alone would give an agent a checkout it could edit and never commit.
-    writable.extend(config.repos_dir.iter().filter_map(|p| real_path(p)));
+    // Not the mounted repositories (ADR-0052). A `code` run works in a clone
+    // whose whole `.git` is in its run directory; granting the operator's
+    // repository let an agent plant hooks and config there, which then ran as
+    // the server at the next checkout and as the owner on the host.
     writable.extend(adapter_paths().iter().filter_map(|p| real_path(p)));
     writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
     writable
@@ -244,12 +257,13 @@ fn build_landlock(
     // the same shape as the macOS profile's read grants, spelled for Linux.
     // `/dev` is in the writable set because `/dev/null` is, and a run that
     // cannot open it fails in ways nobody enjoys reading.
-    let readable: Vec<&Path> = [
+    let mut readable: Vec<&Path> = [
         "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/run",
     ]
     .iter()
     .map(Path::new)
     .collect();
+    readable.extend(cage.readable.iter().map(PathBuf::as_path));
     let mut writable = writable_paths(config, cage);
     writable.push(PathBuf::from("/dev"));
 
@@ -358,7 +372,10 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     writable.push(PathBuf::from("/private/tmp"));
 
     let mut allow_read = String::new();
-    for p in adapter_read_paths() {
+    for p in adapter_read_paths()
+        .into_iter()
+        .chain(cage.readable.iter().cloned())
+    {
         if let Some(rp) = real_path(&p)
             && let Some(q) = quote(&rp)
         {
@@ -390,7 +407,8 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
 
 ; The adapter's own sign-in, readable and never writable: a subscription's
 ; token lives in the login Keychain, and a cage that starves the adapter of
-; its credential kills the run before the first word (M23).
+; its credential kills the run before the first word (M23). Also the cage's
+; read-only paths: a git dir from before ADR-0052, for its diff.
 (allow file-read*
 {allow_read})
 
@@ -490,6 +508,27 @@ impl CommandEnv for std::process::Command {
 }
 
 pub fn command(config: &Config, held: &Confinement, script: &str) -> Command {
+    let mut cmd = caged_shell(config, held, script);
+    credentials(config, &mut cmd);
+    cmd
+}
+
+/// [`command`] without the adapter's credentials, for our own tools run over
+/// what an agent left behind (ADR-0052): the server's git over a run's clone.
+///
+/// The cage is the agent's; the token is not needed. A command an agent
+/// planted for that git to run -- a clean filter, say -- would otherwise read
+/// the subscription token from its environment every time someone opened a
+/// diff. Both are removed rather than merely not added: the server's own
+/// environment may carry either.
+pub fn command_without_credentials(config: &Config, held: &Confinement, script: &str) -> Command {
+    let mut cmd = caged_shell(config, held, script);
+    cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY");
+    cmd
+}
+
+fn caged_shell(config: &Config, held: &Confinement, script: &str) -> Command {
     let mut cmd = match &held.profile {
         Some(text) => {
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
@@ -519,7 +558,6 @@ pub fn command(config: &Config, held: &Confinement, script: &str) -> Command {
             cmd.pre_exec(move || crate::landlock::restrict(rules.as_raw_fd()));
         }
     }
-    credentials(config, &mut cmd);
     cmd
 }
 
@@ -823,7 +861,7 @@ mod tests {
     fn the_run_directory_is_writable_and_nothing_else_is_named() {
         let cfg = config(Vec::new());
         let dir = PathBuf::from("/tmp/run-me");
-        let text = profile(&cfg, &Cage { run_dir: &dir }).expect("profile");
+        let text = profile(&cfg, &Cage::new(&dir)).expect("profile");
         assert!(text.contains("(deny default)"), "{text}");
         assert!(text.contains("(subpath \"/tmp/run-me\")"), "{text}");
         // The home itself is never granted wholesale — only the adapter's own
@@ -850,17 +888,39 @@ mod tests {
     #[test]
     fn extra_paths_are_granted_and_quoted() {
         let cfg = config(vec![PathBuf::from("/data/with \"quotes\"")]);
-        let text = profile(
-            &cfg,
-            &Cage {
-                run_dir: Path::new("/tmp/x"),
-            },
-        )
-        .expect("profile");
+        let text = profile(&cfg, &Cage::new(Path::new("/tmp/x"))).expect("profile");
         assert!(
             text.contains(r#"(subpath "/data/with \"quotes\"")"#),
             "{text}"
         );
+    }
+
+    /// ADR-0052: a run works in a clone, so the operator's repositories are
+    /// granted neither to write nor to read.
+    #[test]
+    fn the_operators_repositories_are_not_in_the_cage() {
+        let cfg = Config {
+            repos_dir: Some(PathBuf::from("/srv/the-operators-repos")),
+            ..config(Vec::new())
+        };
+        let text = profile(&cfg, &Cage::new(Path::new("/tmp/x"))).expect("profile");
+        assert!(!text.contains("the-operators-repos"), "{text}");
+    }
+
+    /// The one read-only grant -- a git dir from before ADR-0052, for its
+    /// diff -- is read and never written.
+    #[test]
+    fn a_readable_path_is_never_writable() {
+        let cfg = config(Vec::new());
+        let readable = [PathBuf::from("/srv/repo/.git")];
+        let cage = Cage {
+            run_dir: Path::new("/tmp/x"),
+            readable: &readable,
+        };
+        let text = profile(&cfg, &cage).expect("profile");
+        let write_stanza = text.split("(allow file*\n").nth(1).expect("write stanza");
+        assert!(text.contains("(subpath \"/srv/repo/.git\")"), "{text}");
+        assert!(!write_stanza.contains("/srv/repo"), "{text}");
     }
 
     #[test]
@@ -868,13 +928,7 @@ mod tests {
         // A newline would end the profile line and turn the rest into
         // something else entirely; the path is dropped instead.
         let cfg = config(vec![PathBuf::from("/data/two\nlines")]);
-        let text = profile(
-            &cfg,
-            &Cage {
-                run_dir: Path::new("/tmp/x"),
-            },
-        )
-        .expect("profile");
+        let text = profile(&cfg, &Cage::new(Path::new("/tmp/x"))).expect("profile");
         assert!(!text.contains("two\nlines"), "{text}");
     }
 
@@ -951,12 +1005,7 @@ mod tests {
             agent_uid: Some(10_001),
             ..Config::default()
         };
-        let held = confinement(
-            &cfg,
-            &Cage {
-                run_dir: Path::new("/tmp/x"),
-            },
-        );
+        let held = confinement(&cfg, &Cage::new(Path::new("/tmp/x")));
         assert!(held.profile.is_none());
         assert!(held.agent_user.is_none());
         #[cfg(target_os = "linux")]
@@ -1017,9 +1066,7 @@ mod tests {
             sandbox: false,
             ..Config::default()
         };
-        let cage = Cage {
-            run_dir: Path::new("/tmp/x"),
-        };
+        let cage = Cage::new(Path::new("/tmp/x"));
         let cmd = command(&cfg, &confinement(&cfg, &cage), "echo hi");
         assert_eq!(cmd.as_std().get_program(), "sh");
     }
@@ -1054,7 +1101,7 @@ mod tests {
         assert!(key_is_removed(&as_agent_std(&cfg, "claude")));
         let run = cfg.data_dir.join("run");
         assert!(key_is_removed(
-            command(&cfg, &confinement(&cfg, &Cage { run_dir: &run }), "true").as_std()
+            command(&cfg, &confinement(&cfg, &Cage::new(&run)), "true").as_std()
         ));
     }
 

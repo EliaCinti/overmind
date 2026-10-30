@@ -92,6 +92,19 @@ async fn build_env(
     tweak: impl FnOnce(&mut overmind_server::Config),
 ) -> Env {
     let root = unique_root();
+    let script_path = root.join("stub-agent.sh");
+    build_env_in(root, script_path, stub, db_url, tweak).await
+}
+
+/// [`build_env`] with the repository and the data dir under `root`, and the
+/// stub at `script_path` -- which has to stay somewhere the cage can read.
+async fn build_env_in(
+    root: PathBuf,
+    script_path: PathBuf,
+    stub: &str,
+    db_url: Option<String>,
+    tweak: impl FnOnce(&mut overmind_server::Config),
+) -> Env {
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
     sh(&repo, "git init -q -b main");
@@ -99,7 +112,9 @@ async fn build_env(
         &repo,
         "echo '# Demo' > README.md && git add . && git -c user.email=t@t -c user.name=T commit -qm init",
     );
-    let script_path = root.join("stub-agent.sh");
+    if let Some(dir) = script_path.parent() {
+        std::fs::create_dir_all(dir).expect("create stub dir");
+    }
     std::fs::write(&script_path, stub).expect("write stub script");
 
     let mut config = overmind_server::Config {
@@ -1267,4 +1282,373 @@ async fn a_run_that_hands_off_in_time_goes_back_to_the_queue_with_its_handoff() 
         documents, 0,
         "the handoff must not be filed as a deliverable"
     );
+}
+
+// --- a run owns a clone (ADR-0052) ------------------------------------------
+
+/// Where a planted command would leave its mark. Under `target/`, outside
+/// every path the cage grants -- temp is granted, so a marker there could be
+/// written by a caged command and would prove nothing about the server.
+fn marker_outside_the_cage() -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("om-pwned-{}", uuid::Uuid::now_v7()))
+}
+
+/// An environment whose repository and data dir are outside every path the
+/// cage grants, so that what the cage refuses is visible. The stub stays in
+/// temp: the cage has to be able to read it.
+async fn build_env_outside_the_cage(
+    stub: &str,
+    tweak: impl FnOnce(&mut overmind_server::Config),
+) -> Env {
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("om-root-{}", uuid::Uuid::now_v7()));
+    let script_path = unique_root().join("stub-agent.sh");
+    build_env_in(root, script_path, stub, None, tweak).await
+}
+
+/// Is anything holding agents on this machine? What these tests prove is what
+/// a cage refuses; where there is none they have nothing to say.
+fn no_cage_here(env: &Env) -> bool {
+    let said = overmind_server::sandbox::announce(&env.state.config);
+    if said.contains("read-only") {
+        eprintln!("skipped: no cage on this machine ({said})");
+        return true;
+    }
+    false
+}
+
+fn refs_of(repo: &std::path::Path) -> String {
+    sh(repo, "git for-each-ref --format='%(refname) %(objectname)'")
+}
+
+/// The operator's repository is not in the cage (ADR-0052). With the
+/// repositories dir set, as it always is in the image, the agent could write
+/// `<repo>/.git`: a hook planted there ran as the server at the next run's
+/// checkout -- and as the owner, on the host, the next time they used git.
+#[tokio::test]
+async fn a_hook_planted_in_the_operators_repository_is_impossible() {
+    let marker = marker_outside_the_cage();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("om-root-{}", uuid::Uuid::now_v7()));
+    let repo = root.join("repo");
+    let stub = format!(
+        r#"#!/bin/sh
+printf '#!/bin/sh\ntouch "{marker}"\n' > "{repo}/.git/hooks/post-checkout"
+chmod +x "{repo}/.git/hooks/post-checkout"
+printf '[alias]\n\tplanted = true\n' >> "{repo}/.git/config"
+echo planted
+"#,
+        marker = marker.display(),
+        repo = repo.display(),
+    );
+    let repos_dir = root.clone();
+    let env = build_env_in(
+        root,
+        unique_root().join("stub-agent.sh"),
+        &stub,
+        None,
+        |c| c.repos_dir = Some(repos_dir),
+    )
+    .await;
+    if no_cage_here(&env) {
+        return;
+    }
+    let agent_id = hire(&env, "Hostile", "builder").await;
+    let first = make_todo_task(&env, "Plants a hook").await;
+    attempt(&env, &first, &agent_id).await;
+    // A second run on the same repository: its checkout is where a planted
+    // hook would have run.
+    let second = make_todo_task(&env, "Runs after it").await;
+    attempt(&env, &second, &agent_id).await;
+
+    assert!(
+        !repo.join(".git/hooks/post-checkout").exists(),
+        "the agent wrote a hook into the operator's repository"
+    );
+    let config = std::fs::read_to_string(repo.join(".git/config")).expect("config");
+    assert!(
+        !config.contains("planted"),
+        "the agent wrote the operator's git config:\n{config}"
+    );
+    assert!(!marker.exists(), "a planted hook ran outside the cage");
+}
+
+/// What a run committed reaches the operator's repository as its branch, and
+/// nothing else of the run does.
+#[tokio::test]
+async fn the_runs_commits_come_back_as_its_branch() {
+    let stub = r#"#!/bin/sh
+echo work > work.txt
+git add work.txt
+git commit -qm "the agent's work"
+echo '{"model":"stub","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
+"#;
+    let env = build_env(stub, None, |_| {}).await;
+    let agent_id = hire(&env, "Committer", "builder").await;
+    let task_id = make_todo_task(&env, "Commits its work").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "completed", "{session}");
+    let branch = session["branch"].as_str().expect("branch");
+    let run_dir = PathBuf::from(session["workspace_path"].as_str().expect("run dir"));
+
+    let repo = env.root.join("repo");
+    let tip = sh(&run_dir, &format!("git rev-parse refs/heads/{branch}"));
+    let back = sh(&repo, &format!("git rev-parse refs/heads/{branch}"));
+    assert_eq!(back, tip, "the branch is not at the run's commit");
+    assert_eq!(sh(&repo, &format!("git show {branch}:work.txt")), "work");
+}
+
+/// The bundle is the agent's, so it can name any ref it likes. Only the run's
+/// own branch, under `overmind/`, is taken from it.
+#[tokio::test]
+async fn a_bundle_cannot_move_a_ref_outside_overmind() {
+    let stub = r#"#!/bin/sh
+echo evil > evil.txt
+git add evil.txt
+git commit -qm evil
+git update-ref refs/heads/main HEAD
+git tag planted HEAD
+git branch -f overmind/elsewhere HEAD
+"#;
+    let env = build_env(stub, None, |_| {}).await;
+    let repo = env.root.join("repo");
+    let main_before = sh(&repo, "git rev-parse refs/heads/main");
+    let agent_id = hire(&env, "Reacher", "builder").await;
+    let task_id = make_todo_task(&env, "Reaches for main").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let branch = session["branch"].as_str().expect("branch");
+
+    assert_eq!(sh(&repo, "git rev-parse refs/heads/main"), main_before);
+    let refs = refs_of(&repo);
+    let names: Vec<&str> = refs
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "refs/heads/main".to_string(),
+            format!("refs/heads/{branch}")
+        ],
+        "{refs}"
+    );
+}
+
+/// An agent that repoints its clone's `.git` at a git dir of its own, whose
+/// config names `key = value`, then makes one real change. `marker` is where
+/// the planted command would write if the server ran it.
+fn planting_stub(marker: &std::path::Path, key: &str, extra: &str) -> String {
+    format!(
+        r#"#!/bin/sh
+echo change > changed.txt
+printf '#!/bin/sh\ntouch "{marker}"\ncat "$@"\n' > planted.sh
+chmod +x planted.sh
+git init -q --bare evil.git
+git --git-dir=evil.git fetch -q "$PWD" '+refs/heads/*:refs/heads/*'
+git --git-dir=evil.git config core.bare false
+git --git-dir=evil.git config {key} "$PWD/planted.sh"
+{extra}
+rm -rf .git
+printf 'gitdir: %s/evil.git\n' "$PWD" > .git
+"#,
+        marker = marker.display()
+    )
+}
+
+/// Run `stub` as a code task, then ask for its diff as a person opening it
+/// would.
+async fn diff_after(stub: &str) -> (Value, String) {
+    let env = build_env(stub, None, |_| {}).await;
+    let agent_id = hire(&env, "Hostile", "builder").await;
+    let task_id = make_todo_task(&env, "Plants a git command").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let diff = overmind_server::runner::session_diff(&env.state, session_id)
+        .await
+        .unwrap_or_else(|e| format!("diff refused: {e}"));
+    (session, diff)
+}
+
+/// The clone's `.git` is in the run dir, which the agent owns: pointed at a
+/// git dir it made, its config would make the server's own git run a command.
+#[tokio::test]
+async fn a_planted_gitdir_does_not_run_as_the_server() {
+    let marker = marker_outside_the_cage();
+    let (_, diff) = diff_after(&planting_stub(&marker, "core.fsmonitor", "")).await;
+    assert!(!marker.exists(), "the planted fsmonitor ran as the server");
+    assert!(diff.contains("changed.txt"), "{diff}");
+}
+
+/// The same door through `git diff`: a textconv driver named in the planted
+/// config and switched on by a `.gitattributes` the agent wrote.
+#[tokio::test]
+async fn a_textconv_driver_in_the_clone_does_not_run() {
+    let marker = marker_outside_the_cage();
+    let (_, diff) = diff_after(&planting_stub(
+        &marker,
+        "diff.planted.textconv",
+        "echo '* diff=planted' > .gitattributes",
+    ))
+    .await;
+    assert!(!marker.exists(), "the planted textconv ran as the server");
+    assert!(diff.contains("changed.txt"), "{diff}");
+}
+
+/// No pointer needed: the clone's own config is the agent's, and a clean
+/// filter there runs whenever git reads the working tree. No list of keys
+/// closes this. It runs -- in the cage, with the agent's reach and no more.
+#[tokio::test]
+async fn a_clean_filter_in_the_clones_config_runs_only_in_the_cage() {
+    let marker = marker_outside_the_cage();
+    let stub = format!(
+        r#"#!/bin/sh
+echo change > changed.txt
+printf '#!/bin/sh\ntouch "{marker}"\ntouch "%s/ran-in-the-cage"\ncat\n' "$(git rev-parse --absolute-git-dir)" > planted.sh
+chmod +x planted.sh
+git config filter.planted.clean "$PWD/planted.sh"
+echo '* filter=planted' > .gitattributes
+"#,
+        marker = marker.display()
+    );
+    let (session, diff) = diff_after(&stub).await;
+    assert!(
+        !marker.exists(),
+        "the planted clean filter ran as the server"
+    );
+    assert!(diff.contains("changed.txt"), "{diff}");
+    let run_dir = PathBuf::from(session["workspace_path"].as_str().expect("run dir"));
+    assert!(
+        run_dir.join(".git/ran-in-the-cage").exists(),
+        "the filter never ran at all, so this proved nothing"
+    );
+}
+
+/// A session from before the clone is a worktree of the operator's repository,
+/// whose git dir lives there -- outside the cage now. Its diff still opens.
+#[tokio::test]
+async fn a_session_from_before_the_clone_still_diffs() {
+    let env = build_env_outside_the_cage(HAPPY_STUB, |_| {}).await;
+    if no_cage_here(&env) {
+        return;
+    }
+    let agent_id = hire(&env, "Old", "builder").await;
+    let task_id = make_todo_task(&env, "Recorded before").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let run_dir = PathBuf::from(session["workspace_path"].as_str().expect("run dir"));
+    let (base,): (Option<String>,) =
+        sqlx::query_as("SELECT base_sha FROM agent_task_sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("base");
+    let base = base.expect("started");
+
+    // Make it what a session from before was: a worktree of the operator's
+    // repository, registered there under the session's own id.
+    let repo = env.root.join("repo");
+    std::fs::remove_dir_all(&run_dir).expect("drop the run dir");
+    sh(
+        &repo,
+        &format!(
+            "git worktree prune && git worktree add -q --detach '{}' {base}",
+            run_dir.display()
+        ),
+    );
+    std::fs::write(run_dir.join("result.txt"), "done by agent\n").expect("a change");
+
+    let diff = overmind_server::runner::session_diff(&env.state, session_id)
+        .await
+        .expect("a session from before still diffs");
+    assert!(diff.contains("result.txt"), "{diff}");
+}
+
+/// A run stopped at its deadline gets a handoff, and the handoff's `git
+/// status` reads the clone the agent configured: it runs in the cage too.
+#[tokio::test]
+async fn the_handoff_status_runs_in_the_cage() {
+    let marker = marker_outside_the_cage();
+    let stub = format!(
+        r#"#!/bin/sh
+printf '#!/bin/sh\ntouch "{marker}"\n' > planted.sh
+chmod +x planted.sh
+git config core.fsmonitor "$PWD/planted.sh"
+echo draft > notes.md
+sleep 30
+"#,
+        marker = marker.display()
+    );
+    let env = build_env(&stub, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Never finishes").await;
+    attempt(&env, &task_id, &agent_id).await;
+
+    assert!(!marker.exists(), "the planted fsmonitor ran as the server");
+    let handoff = handoffs(&env, &task_id).await;
+    assert_eq!(handoff.len(), 1, "{handoff:?}");
+    assert!(handoff[0].contains("notes.md"), "{}", handoff[0]);
+}
+
+/// Where the run itself had no cage, the agent already worked with the
+/// server's reach, and the server's git over its files reaches no further: the
+/// diff opens and the branch comes back.
+#[tokio::test]
+async fn a_run_without_a_cage_still_diffs_and_brings_its_branch_back() {
+    let stub = r#"#!/bin/sh
+echo work > work.txt
+git add work.txt
+git commit -qm "the agent's work"
+echo more > more.txt
+"#;
+    let env = build_env(stub, None, |c| c.sandbox = false).await;
+    let agent_id = hire(&env, "Uncaged", "builder").await;
+    let task_id = make_todo_task(&env, "Works without a cage").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let session_id = session["id"].as_str().expect("session id");
+    let branch = session["branch"].as_str().expect("branch");
+
+    let diff = overmind_server::runner::session_diff(&env.state, session_id)
+        .await
+        .expect("the diff of an uncaged run opens");
+    assert!(diff.contains("more.txt"), "{diff}");
+    assert_eq!(
+        sh(
+            &env.root.join("repo"),
+            &format!("git show {branch}:work.txt")
+        ),
+        "work"
+    );
+}
+
+/// A run that was caged is not read uncaged because the cage was turned off
+/// afterwards: its clone was the agent's, and whatever it planted would run
+/// as the server.
+#[tokio::test]
+async fn a_caged_runs_files_are_not_read_once_the_cage_is_off() {
+    let db = unique_root();
+    std::fs::create_dir_all(&db).expect("db dir");
+    let url = format!("sqlite://{}?mode=rwc", db.join("overmind.sqlite").display());
+    let env = build_env(HAPPY_STUB, Some(url.clone()), |_| {}).await;
+    if no_cage_here(&env) {
+        return;
+    }
+    let agent_id = hire(&env, "Caged", "builder").await;
+    let task_id = make_todo_task(&env, "Caged work").await;
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let session_id = session["id"].as_str().expect("session id");
+
+    let uncaged = overmind_server::init_with(
+        &url,
+        overmind_server::Config {
+            sandbox: false,
+            data_dir: env.root.join("data"),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("the same database, the cage off");
+    let refused = overmind_server::runner::session_diff(&uncaged, session_id)
+        .await
+        .expect_err("a caged run's diff is refused without a cage");
+    assert!(refused.to_string().contains("no cage"), "{refused}");
 }

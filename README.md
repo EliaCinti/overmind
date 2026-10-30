@@ -37,7 +37,7 @@ What makes it different: Overmind is **memory-native**, and its brain is **[Wada
 | ------ | ---------------------- | --------------------------------------------------------------------------------------------------------- |
 | **01** | Found a company        | Name it, pick its working language. It is born with a CEO and a brain that already knows who it is.        |
 | **02** | Tell the CEO the idea  | It drafts the team — who to hire, with what role, who reports to whom — and you approve the org in a click. |
-| **03** | Hand over the work     | Chat, or file a task: _code_ (an isolated git worktree, a diff to review) or a _document_ (artifacts).      |
+| **03** | Hand over the work     | Chat, or file a task: _code_ (a clone of its own, a diff to review) or a _document_ (artifacts).      |
 | **04** | Decide                 | Approvals, meetings, budgets — in one inbox. Every decision carries the name of the person who made it.     |
 | **05** | Bring people in        | Invite a colleague, add them to the company, work side by side from two machines over Tailscale.           |
 
@@ -57,7 +57,7 @@ Everyone runs agents. Overmind can **prove what every agent — and every person
 
 - ✅ You want a **company of agents you can talk to** — a CEO that decomposes what you ask into tasks and puts a team on it — not ten terminals and a prompt file
 - ✅ You want agents that **learn from the org's past** instead of starting cold every session
-- ✅ You want every `code` run in an **isolated git worktree inside an OS-level cage**, with the diff in front of you before anything merges — and `document` work (research, plans, comparisons) that needs no repo at all
+- ✅ You want every `code` run in **a clone of its own inside an OS-level cage**, with the diff in front of you before anything merges — and `document` work (research, plans, comparisons) that needs no repo at all
 - ✅ You want **budgets enforced server-side**, in real money or under a subscription, with the next run priced from the agent's own history
 - ✅ You want **governance**: approve a start, convene or decline a meeting, pause or terminate an agent, roll back a config change — and know _who_ decided
 - ✅ You want to **work with someone else** — two people, two machines, one company — without a cloud account in between
@@ -81,7 +81,7 @@ A **harness** is the scaffolding *outside* the model that answers that wall: it 
 
 | The agent needs | Overmind gives it | Which means |
 | --- | --- | --- |
-| a **body** | an isolated git worktree and branch for code runs; a scratch directory of its own for documents | two agents cannot overwrite each other's work |
+| a **body** | a clone of the repository and a branch for code runs; a scratch directory of its own for documents | two agents cannot overwrite each other's work |
 | a **cage** | OS-level sandboxing, one confinement per run | it reaches what the task needs and nothing else |
 | **hands** | tools over MCP | it can read a repo, browse, call your services |
 | a **wallet** | budgets reserved at checkout, in one transaction | it cannot spend money the company does not have |
@@ -158,7 +158,7 @@ First run claims the instance (argon2id, hashed sessions). Then <strong>invites<
 </td>
 <td align="center">
 <h3>📎 Universal I/O</h3>
-Attach files to chat and tasks; agents produce <strong>artifacts</strong> you download from the task; meeting transcripts are kept. <code>knowledge</code> tasks need no repository; <code>code</code> tasks get a worktree and a diff.
+Attach files to chat and tasks; agents produce <strong>artifacts</strong> you download from the task; meeting transcripts are kept. <code>knowledge</code> tasks need no repository; <code>code</code> tasks get a clone and a diff.
 </td>
 <td align="center">
 <h3>🔌 Bring Your Own Agent — and MCP in every direction</h3>
@@ -171,15 +171,15 @@ Any agent CLI via <code>OVERMIND_AGENT_CMD</code> (Claude Code by default). <str
 
 ## How it works
 
-The control plane, drawn to scale: one server runs your company, every action passes a server-enforced budget gate, every `code` task runs in an isolated git worktree, and every agent reads and writes organizational memory over MCP.
+The control plane, drawn to scale: one server runs your company, every action passes a server-enforced budget gate, every `code` task runs in a clone of its own, and every agent reads and writes organizational memory over MCP.
 
 <p align="center">
-  <img src=".github/assets/architecture.svg" alt="Overmind's control plane: a company node passes a server-enforced budget gate to three agents in isolated git worktrees, each reading and writing Wadachi memory over MCP." width="860">
+  <img src=".github/assets/architecture.svg" alt="Overmind's control plane: a company node passes a server-enforced budget gate to three agents in isolated clones, each reading and writing Wadachi memory over MCP." width="860">
 </p>
 
 1. **Company** — one server runs your whole agent org. Companies scope everything — and since M25 they have **members**. Agents have archetypes, domains, titles and reporting lines; the reporting DAG is enforced server-side. Projects cascade into goals and tasks; the CEO proposes the team and decomposes what you ask.
 2. **Gate** — every action passes a server-enforced budget. Per-agent monthly caps are reserved atomically inside the checkout transaction — tasks and conversational turns alike — with an estimate learned from the agent's own ledger; an over-budget agent is stopped, and the incident is recorded.
-3. **Agents** — every run is a real agent CLI inside an OS-level cage: `code` tasks in their own git worktree and branch, `knowledge` tasks in a scratch directory with no repository at all. Output, cost and artifacts are captured, sessions resume across restarts, and you review each diff or document before it lands.
+3. **Agents** — every run is a real agent CLI inside an OS-level cage: `code` tasks in a clone of their own, whose branch comes back to your repository when the run ends, `knowledge` tasks in a scratch directory with no repository at all. Output, cost and artifacts are captured, sessions resume across restarts, and you review each diff or document before it lands.
 4. **Memory and proof** — every agent reads and writes **Wadachi** over MCP, so the org remembers; Overmind also exposes itself over MCP so outside callers can file and read tasks. And every mutation appends an immutable, hash-chained audit event that names its actor.
 
 <br/>
@@ -220,7 +220,7 @@ What is **honest to say**: billing is the owner's (a member cannot change how th
 | ❌ Ten agent terminals open; on reboot you lose which did what.                                    | ✅ Work is task-based, sessions persist and resume across restarts, every step is on the board.                  |
 | ❌ Every session your agent starts cold — you re-paste the same context and it repeats old mistakes. | ✅ The org remembers: agents load past decisions and patterns before they start.                                 |
 | ❌ You orchestrate by hand: which agent, which prompt, in which order.                              | ✅ You tell the CEO; it drafts the team and decomposes the work, and you approve in one click.                   |
-| ❌ Agents edit the same tree and clobber each other.                                                | ✅ One isolated git worktree per run, inside a cage; concurrent agents never interfere; you review each diff.     |
+| ❌ Agents edit the same tree and clobber each other.                                                | ✅ One clone per run, inside a cage; concurrent agents never interfere; you review each diff.     |
 | ❌ A runaway loop burns hundreds of dollars before you notice.                                      | ✅ Budgets are enforced atomically at checkout, the next run is priced from the ledger, and the adapter has a brake. |
 | ❌ "Did the agent really do what it claimed?" — you can't prove it.                                 | ✅ An append-only hash chain with the actor inside: tamper-evident, verifiable end to end.                        |
 | ❌ Two people on one project means two setups and a shared password.                                | ✅ One server, an owner, invites, members — and a name on every decision.                                        |
@@ -357,7 +357,7 @@ Overmind binds to loopback by default, on purpose. To share it, bind to a **Tail
 
 ### Back up and restore
 
-The data has a way out. **Archive** in the top bar (owner only) exports the whole instance as one `tar.gz` — the database and every company's brain taken as consistent snapshots, your attachments and artifacts, and the subscription sign-in **sealed** under a passphrase the server never keeps (at least twelve characters; the field appears only when there is a sign-in to seal). No credential is readable in the bytes: a run's MCP bearer and the editor's integration tokens are scrubbed from the snapshot. Scratch — sessions, chat copies, worktrees, meeting rooms — stays out; a meeting's transcript is in the database and comes back with it.
+The data has a way out. **Archive** in the top bar (owner only) exports the whole instance as one `tar.gz` — the database and every company's brain taken as consistent snapshots, your attachments and artifacts, and the subscription sign-in **sealed** under a passphrase the server never keeps (at least twelve characters; the field appears only when there is a sign-in to seal). No credential is readable in the bytes: a run's MCP bearer and the editor's integration tokens are scrubbed from the snapshot. Scratch — sessions, chat copies, run clones, meeting rooms — stays out; a meeting's transcript is in the database and comes back with it.
 
 One thing an archive deliberately does not carry: the agent CLI's **own** login, in `./agent`. It does not need to when you signed in **from the product** — that token is Overmind's, kept under `/data` and handed to every agent it spawns, so a restore with the passphrase pays again. If instead you signed in from the shell with `claude setup-token`, that credential is the CLI's and lives in `./agent` beside the compose file: copy that folder too.
 
@@ -454,7 +454,7 @@ Every setting is optional; the defaults are the working path.
 |---|---|
 | `OVERMIND_ADDR` | Listen address (default `127.0.0.1:7070`; the image binds `0.0.0.0:7070` inside the container and compose publishes it on loopback) |
 | `OVERMIND_DB` | SQLite URL (default `sqlite://overmind.sqlite`) |
-| `OVERMIND_DATA_DIR` | Worktrees, brains, artifacts, attachments (default `./overmind-data`) |
+| `OVERMIND_DATA_DIR` | Run clones, brains, artifacts, attachments (default `./overmind-data`) |
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: the Claude Code CLI, `claude -p … --output-format stream-json --verbose`). A custom adapter is never interrogated for how it pays |
 | `OVERMIND_BACKUP_DIR` | Where `POST /api/backup` writes its archives (and `POST /api/restore` reads one back, on an empty instance) (default `<data>/backups/`, created `0700`; a folder that holds the data directory is refused, since forcing it `0700` would take away the path a caged agent walks). The archive is the whole instance; the subscription token in it is sealed under the passphrase you give at export ([ADR-0044](docs/adr/0044-the-archive-is-the-instance.md)) |
 | `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory; the image sets `wadachi`; empty = off deliberately) |

@@ -1518,7 +1518,7 @@ async fn spawn_adapter(
     // work too, and the scratch dir is all it needs. A turn writes files too —
     // M17 collects whatever the agent leaves in the scratch dir — so it needs
     // the same permission answer a task run gets.
-    let cage = crate::sandbox::Cage { run_dir: cwd };
+    let cage = crate::sandbox::Cage::new(cwd);
     // The scratch dir is the server's until it is the agent's (ADR-0029). A
     // turn writes files too, so this is not only a task-run concern.
     crate::sandbox::hand_over(&state.config, cwd)

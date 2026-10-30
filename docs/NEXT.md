@@ -215,6 +215,14 @@ Found by the review of M36a slice 1; older than it, written down here rather tha
 
 - **A run that ends overwrites a task a person cancelled while it ran.** `in_progress → cancelled` is a person's transition, but every `UPDATE tasks` in `runner::finalize` (to `in_review`, `blocked`, `todo`, and now `stalled`) matches on the id alone, and its audit row always says `from: in_progress`. Cancel a task mid-run and the run's end brings it back — and the chain records a move from a state the task was not in. The fix is `AND status = 'in_progress'` on each, and an audit row only when a row moved; it touches every outcome, so it wants its own test per outcome.
 
+## Debts from the clone (30 Oct 2026)
+
+What [ADR-0052](adr/0052-a-run-owns-its-repository.md) left for later, written down rather than widening the fix:
+
+- **Run dirs are never cleaned up, and a clone is bigger than a worktree was.** A worktree shared the operator's objects; a clone made `--no-hardlinks` copies them. Every `code` run now costs the size of the repository's `.git` plus its checkout, in `data/worktrees/<session>`, for good: 4.4 MB a run on Overmind's own repository, a hundred runs on a 200 MB repository is 20 GB. Worktrees were never removed either (ADR-0008, "not done yet"), so this was a debt before; now it grows faster. The policy wants a decision first — after the task lands? after N days? keep the last attempt only? — and the diff of a session whose clone is gone has to say so rather than fail.
+- **`transfer.fsckObjects` on a bundle is measured only on git 2.54.** On the development Mac a malformed commit in a bundle is refused by the fetch (`fsck error in packed object`) and accepted without the option. The image installs Debian bookworm's git (2.39), and whether that version checks objects fetched from a bundle has not been verified. If it does not, run `index-pack --strict` over the bundle's pack first, or install a newer git in the image.
+- **A worktree session still running at the upgrade cannot finish its work.** The cage no longer grants the operator's repository, and a worktree's git dir lives there: resumed after the restart, the agent's own git cannot read or commit, and the handoff's `git status` reports the changes as unreadable. Its diff still opens (read-only grant). Rare — a run in flight across an upgrade — and it ends as a failed or empty attempt, not as damage; draining runs before an upgrade avoids it.
+
 ## Frictions from the two-machine walk (27 Aug 2026, in the order they bit)
 
 The owner and a friend ran the walk: a fresh install on the friend's machine, shared over the tailnet. What bit, ranked:
