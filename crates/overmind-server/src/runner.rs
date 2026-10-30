@@ -1867,6 +1867,21 @@ impl Drop for AgentMcpConfig {
 
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let cage = crate::sandbox::Cage::new(&ctx.worktree_dir);
+    // One confinement for the whole run, read twice: how much rope the adapter
+    // gets and what actually confines it must be the same answer, and asking
+    // twice let them differ (ADR-0023).
+    let held = crate::sandbox::confinement(&ctx.state.config, &cage);
+    // Once caged, always caged: a resume without a cage does not make what an
+    // earlier run planted safe to read uncaged (ADR-0052). A failed write
+    // leaves it unknown, which reads as caged. Written first, so a run that
+    // fails at the hand-over below is not left unknown either.
+    let _ = sqlx::query(
+        "UPDATE agent_task_sessions SET caged = MAX(COALESCE(caged, 0), ?) WHERE id = ?",
+    )
+    .bind(i64::from(held.is_real()))
+    .bind(&ctx.session_id)
+    .execute(&ctx.state.pool)
+    .await;
     // The agent's own door to memory (ADR-0027). Held for the whole run: when
     // this binding drops, the file goes and the token stops working.
     let mcp = AgentMcpConfig::write(&ctx.state, &ctx.session_id, &trait_tools(&ctx.agent_traits));
@@ -1919,20 +1934,6 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             Err(_) => None,
         }
     };
-    // One confinement for the whole run, read twice: how much rope the adapter
-    // gets and what actually confines it must be the same answer, and asking
-    // twice let them differ (ADR-0023).
-    let held = crate::sandbox::confinement(&ctx.state.config, &cage);
-    // Once caged, always caged: a resume without a cage does not make what an
-    // earlier run planted safe to read uncaged (ADR-0052). A failed write
-    // leaves it unknown, which reads as caged.
-    let _ = sqlx::query(
-        "UPDATE agent_task_sessions SET caged = MAX(COALESCE(caged, 0), ?) WHERE id = ?",
-    )
-    .bind(i64::from(held.is_real()))
-    .bind(&ctx.session_id)
-    .execute(&ctx.state.pool)
-    .await;
     let agent_cmd = agent_command(
         &ctx.state,
         held.is_real(),
