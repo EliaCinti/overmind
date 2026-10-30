@@ -1225,8 +1225,8 @@ pub async fn start_task(
         return Err(RunnerError::Conflict);
     }
     sqlx::query(
-        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, brain_watermark, created_at)
-         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, brain_watermark, caged, created_at)
+         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?, 0, ?)",
     )
     .bind(&session_id)
     .bind(task_id)
@@ -1873,10 +1873,11 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let held = crate::sandbox::confinement(&ctx.state.config, &cage);
     // Once caged, always caged: a resume without a cage does not make what an
     // earlier run planted safe to read uncaged (ADR-0052). A failed write
-    // leaves it unknown, which reads as caged. Written first, so a run that
+    // leaves it unknown, which reads as caged. A session starts at 0, so NULL
+    // means only "from before the column" -- and stays caged on a resume. Written first, so a run that
     // fails at the hand-over below is not left unknown either.
     let _ = sqlx::query(
-        "UPDATE agent_task_sessions SET caged = MAX(COALESCE(caged, 0), ?) WHERE id = ?",
+        "UPDATE agent_task_sessions SET caged = MAX(COALESCE(caged, 1), ?) WHERE id = ?",
     )
     .bind(i64::from(held.is_real()))
     .bind(&ctx.session_id)
