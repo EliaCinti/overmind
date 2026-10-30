@@ -153,15 +153,13 @@ pub fn meeting_request_summary(code: &str, convener: &str, topic: &str) -> Strin
 
 /// The line a `code` run carries when what it committed could not reach the
 /// operator's repository (ADR-0052). The run is not failed for it: the commits
-/// are still in its clone, and the line says where.
-pub fn branch_not_returned(code: &str, reason: &str) -> String {
+/// are still in its clone, and the line says where. The reason is git's own
+/// words, in English whatever the company speaks, so it stays on the chain
+/// (`session.branch_not_returned`) rather than inside this sentence.
+pub fn branch_not_returned(code: &str) -> String {
     match code {
-        "it" => format!(
-            "I commit di questa esecuzione non sono arrivati nel tuo repository: {reason}. Restano nel suo clone."
-        ),
-        _ => format!(
-            "This run's commits did not reach your repository: {reason}. They are still in its clone."
-        ),
+        "it" => "I commit di questa esecuzione non sono arrivati nel tuo repository: restano nel suo clone. Il motivo è nel registro di audit.".to_string(),
+        _ => "This run's commits did not reach your repository: they are still in its clone. The reason is in the audit log.".to_string(),
     }
 }
 

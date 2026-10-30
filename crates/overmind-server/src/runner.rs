@@ -2248,9 +2248,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         ExecutionKind::Knowledge => None,
     };
     let not_returned = match &returned {
-        Some(Err(reason)) => Some(crate::i18n::branch_not_returned(
+        Some(Err(_)) => Some(crate::i18n::branch_not_returned(
             &crate::i18n::company_language(&ctx.state, &ctx.company_id).await,
-            reason,
         )),
         _ => None,
     };
