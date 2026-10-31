@@ -545,28 +545,36 @@ async fn handoff_text(ctx: &SessionContext, stop: &crate::i18n::Stop, output: &s
         None
     } else {
         match ctx.exec_kind {
+            // The clone is the agent's, so this git runs in its cage
+            // (ADR-0052). A failure must not read as "nothing changed".
             ExecutionKind::Code => {
-                // safe.directory as the `git()` helper passes it: in the
-                // uid-split image the run dir belongs to the agent, and git
-                // would refuse -- and an empty answer must not read as "nothing".
-                let mut git = tokio::process::Command::new("git");
-                git.arg("-c")
-                    .arg(format!("safe.directory={}", ctx.worktree_dir.display()))
-                    .args(["status", "--porcelain"])
-                    .current_dir(&ctx.worktree_dir)
-                    .stdin(Stdio::null());
-                for (k, v) in crate::sandbox::git_isolation() {
-                    git.env(k, v);
-                }
-                match git.output().await {
-                    Ok(out) if out.status.success() => Some(
-                        String::from_utf8_lossy(&out.stdout)
-                            .lines()
-                            .filter_map(|l| l.get(3..).map(str::to_string))
-                            .collect(),
-                    ),
-                    _ => None,
-                }
+                // A worktree from before, resumed across the upgrade, reads
+                // its git dir as its diff does.
+                let readable: Vec<PathBuf> = git_dir_from_before(
+                    &ctx.state,
+                    &ctx.task_id,
+                    &ctx.session_id,
+                    &ctx.worktree_dir,
+                )
+                .await
+                .into_iter()
+                .collect();
+                git_in_run(
+                    &ctx.state,
+                    &crate::sandbox::Cage {
+                        run_dir: &ctx.worktree_dir,
+                        readable: &readable,
+                    },
+                    run_was_caged(&ctx.state, &ctx.session_id).await,
+                    &["status", "--porcelain"],
+                )
+                .await
+                .ok()
+                .map(|out| {
+                    out.lines()
+                        .filter_map(|l| l.get(3..).map(str::to_string))
+                        .collect()
+                })
             }
             ExecutionKind::Knowledge => Some(
                 files::collect_files(&ctx.worktree_dir, MAX_ARTIFACTS)
@@ -619,23 +627,140 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
     // git questions as root, and git refuses a repository owned by another
     // user -- "dubious ownership" -- which broke every code task's diff in
     // the image. The declaration is exact, not `*`: the server only ever
-    // points git at a worktree it created or a workspace the operator
+    // points git at a clone it created or a workspace the operator
     // mounted, and this narrows the exception to precisely that path.
-    let safe = format!("safe.directory={}", cwd.display());
-    let out = Command::new("git")
-        .arg("-c")
-        .arg(&safe)
+    //
+    // Only over state that is the server's: the operator's repository, which
+    // no cage grants (ADR-0052), and a run's clone before the agent has had
+    // it. Anything after the agent goes through [`git_in_run`].
+    let mut cmd = Command::new("git");
+    cmd.arg("-c")
+        .arg(format!("safe.directory={}", cwd.display()))
         .args(args)
-        .current_dir(cwd)
-        .output()
-        .await
+        .current_dir(cwd);
+    // No time limit: nothing here is the agent's, and cloning a large
+    // repository from a slow disk is allowed to be slow.
+    Ok(run_git(cmd, None).await?.trim().to_string())
+}
+
+/// How long git over a run's files may take ([`caged_git`]). A diff someone
+/// opened must not hold forever on a command an agent planted.
+const CAGED_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Run a git command to its end, or to `limit`, and return what it printed --
+/// untrimmed, since `status --porcelain` starts with a space.
+async fn run_git(
+    mut cmd: Command,
+    limit: Option<std::time::Duration>,
+) -> Result<String, RunnerError> {
+    cmd.stdout(Stdio::piped());
+    run_spawned(cmd, limit).await
+}
+
+/// [`run_git`] for a command whose stdout the caller has already pointed
+/// somewhere. Not `output()`, which would quietly put it back on a pipe.
+async fn run_spawned(
+    mut cmd: Command,
+    limit: Option<std::time::Duration>,
+) -> Result<String, RunnerError> {
+    cmd.stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let child = cmd
+        .spawn()
         .map_err(|e| RunnerError::Git(format!("failed to run git: {e}")))?;
+    let waited = child.wait_with_output();
+    let out = match limit {
+        Some(limit) => tokio::time::timeout(limit, waited)
+            .await
+            .map_err(|_| RunnerError::Git(format!("git did not finish in {}s", limit.as_secs())))?,
+        None => waited.await,
+    }
+    .map_err(|e| RunnerError::Git(format!("failed to run git: {e}")))?;
     if !out.status.success() {
         return Err(RunnerError::Git(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Git over a run's files once the agent has had them, run in the run's own
+/// cage (ADR-0052).
+///
+/// The clone is the agent's: its config can name a `core.fsmonitor`, a clean
+/// filter, a `textconv` driver, and that list has no end, so no key is trusted
+/// to be absent. This git runs with the run's confinement and without the
+/// adapter's credentials, and a planted command runs with the agent's reach --
+/// nothing it could not do in its own run.
+///
+/// Where this machine has no cage, the answer is the run's own: a run that was
+/// never caged already worked with the server's reach, and this git has no
+/// more; a run that was caged is refused, never read uncaged
+/// (`agent_task_sessions.caged`).
+///
+/// `core.fsmonitor=false` and `core.hooksPath=/dev/null` stay because they cost
+/// nothing. They are not the boundary.
+fn caged_git(
+    state: &AppState,
+    cage: &crate::sandbox::Cage<'_>,
+    run_was_caged: bool,
+    args: &[&str],
+) -> Result<Command, RunnerError> {
+    let held = crate::sandbox::confinement(&state.config, cage);
+    if !held.is_real() && run_was_caged {
+        return Err(RunnerError::Invalid(
+            "this run was caged and there is no cage on this machine to read \
+             its git in: a caged run's files are not read by the server uncaged"
+                .into(),
+        ));
+    }
+    // The arguments ride after the script as `$@`, so no path is ever quoted
+    // into shell text.
+    let mut cmd =
+        crate::sandbox::command_without_credentials(&state.config, &held, r#"exec git "$@""#);
+    cmd.arg("git")
+        .arg("-c")
+        .arg(format!("safe.directory={}", cage.run_dir.display()))
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .current_dir(cage.run_dir);
+    // The cage denies `~/.gitconfig`, and git reads it before anything else.
+    for (k, v) in crate::sandbox::git_isolation() {
+        cmd.env(k, v);
+    }
+    Ok(cmd)
+}
+
+async fn git_in_run(
+    state: &AppState,
+    cage: &crate::sandbox::Cage<'_>,
+    run_was_caged: bool,
+    args: &[&str],
+) -> Result<String, RunnerError> {
+    run_git(
+        caged_git(state, cage, run_was_caged, args)?,
+        Some(CAGED_GIT_TIMEOUT),
+    )
+    .await
+}
+
+/// Was any run of this session caged? Unknown -- a session from before the
+/// column, or a write that failed -- reads as yes: nobody can say it was not.
+async fn run_was_caged(state: &AppState, session_id: &str) -> bool {
+    let caged: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT caged FROM agent_task_sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&state.pool)
+            .await
+            .ok()
+            .flatten();
+    !matches!(caged, Some((Some(0),)))
 }
 
 /// Check a task out for an agent and launch the session.
@@ -1016,50 +1141,7 @@ pub async fn start_task(
     // A `code` run needs a git repo to branch a worktree from; a `knowledge`
     // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
     let workspace: Option<(String, Option<String>)> = match exec_kind {
-        ExecutionKind::Code => {
-            let ws: Option<(String, Option<String>)> = match &goal_id {
-                Some(goal_id) => {
-                    sqlx::query_as(
-                        "SELECT w.cwd, w.default_ref FROM project_workspaces w
-                         JOIN goals g ON g.project_id = w.project_id
-                         WHERE g.id = ? AND w.is_primary = 1",
-                    )
-                    .bind(goal_id)
-                    .fetch_optional(&state.pool)
-                    .await?
-                }
-                // An orphan — opened before a repo was connected, or by a build
-                // that did not attach it. When the company has exactly one
-                // repository there is nothing to decide, so decide it; when it
-                // has several, the choice is genuinely the user's and guessing
-                // would run an agent against the wrong codebase.
-                None => {
-                    let repos: Vec<(String, Option<String>)> = sqlx::query_as(
-                        "SELECT w.cwd, w.default_ref FROM project_workspaces w
-                         JOIN projects p ON p.id = w.project_id
-                         WHERE p.company_id = ? AND w.is_primary = 1
-                         ORDER BY w.cwd",
-                    )
-                    .bind(&company_id)
-                    .fetch_all(&state.pool)
-                    .await?;
-                    if repos.len() > 1 {
-                        return Err(RunnerError::Invalid(
-                            "this task is not attached to a project, and the company has more \
-                             than one repository: attach it to a goal first"
-                                .into(),
-                        ));
-                    }
-                    repos.into_iter().next()
-                }
-            };
-            let Some(ws) = ws else {
-                return Err(RunnerError::Invalid(
-                    "no repository to work in: connect one to this company first".into(),
-                ));
-            };
-            Some(ws)
-        }
+        ExecutionKind::Code => Some(code_workspace(state, &company_id, goal_id.as_deref()).await?),
         ExecutionKind::Knowledge => None,
     };
 
@@ -1143,8 +1225,8 @@ pub async fn start_task(
         return Err(RunnerError::Conflict);
     }
     sqlx::query(
-        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, brain_watermark, created_at)
-         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_task_sessions (id, task_id, agent_id, adapter_type, status, branch, workspace_path, reserved_cents, brain_watermark, caged, created_at)
+         VALUES (?, ?, ?, 'claude_code', 'queued', ?, ?, ?, ?, 0, ?)",
     )
     .bind(&session_id)
     .bind(task_id)
@@ -1192,7 +1274,7 @@ pub async fn start_task(
         ExecutionKind::Code => {
             let (repo_cwd, default_ref) =
                 workspace.expect("a code run resolved a primary workspace above");
-            FreshSpec::Code(WorktreeSpec {
+            FreshSpec::Code(CloneSpec {
                 repo_cwd: PathBuf::from(repo_cwd),
                 default_ref,
                 branch: branch.clone(),
@@ -1210,6 +1292,71 @@ pub async fn start_task(
         branch,
         workspace_path: work_dir_str,
     }))
+}
+
+/// The repository a `code` task works in, and the ref it starts from: its
+/// goal's primary workspace.
+async fn code_workspace(
+    state: &AppState,
+    company_id: &str,
+    goal_id: Option<&str>,
+) -> Result<(String, Option<String>), RunnerError> {
+    let ws: Option<(String, Option<String>)> = match goal_id {
+        Some(goal_id) => {
+            sqlx::query_as(
+                "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                 JOIN goals g ON g.project_id = w.project_id
+                 WHERE g.id = ? AND w.is_primary = 1",
+            )
+            .bind(goal_id)
+            .fetch_optional(&state.pool)
+            .await?
+        }
+        // An orphan — opened before a repo was connected, or by a build
+        // that did not attach it. When the company has exactly one
+        // repository there is nothing to decide, so decide it; when it
+        // has several, the choice is genuinely the user's and guessing
+        // would run an agent against the wrong codebase.
+        None => {
+            let repos: Vec<(String, Option<String>)> = sqlx::query_as(
+                "SELECT w.cwd, w.default_ref FROM project_workspaces w
+                 JOIN projects p ON p.id = w.project_id
+                 WHERE p.company_id = ? AND w.is_primary = 1
+                 ORDER BY w.cwd",
+            )
+            .bind(company_id)
+            .fetch_all(&state.pool)
+            .await?;
+            if repos.len() > 1 {
+                return Err(RunnerError::Invalid(
+                    "this task is not attached to a project, and the company has more \
+                     than one repository: attach it to a goal first"
+                        .into(),
+                ));
+            }
+            repos.into_iter().next()
+        }
+    };
+    ws.ok_or_else(|| {
+        RunnerError::Invalid("no repository to work in: connect one to this company first".into())
+    })
+}
+
+/// [`code_workspace`] for a task already under way: where its run's branch
+/// goes back to, and where a session from before ADR-0052 kept its git dir.
+async fn task_workspace(
+    state: &AppState,
+    task_id: &str,
+) -> Result<(String, Option<String>), RunnerError> {
+    let task: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT company_id, goal_id FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((company_id, goal_id)) = task else {
+        return Err(RunnerError::NotFound("task"));
+    };
+    code_workspace(state, &company_id, goal_id.as_deref()).await
 }
 
 /// The monthly budget cap from an agent's serialized traits (0 = uncapped).
@@ -1430,16 +1577,16 @@ pub(crate) struct SessionContext {
     exec_kind: ExecutionKind,
 }
 
-pub(crate) struct WorktreeSpec {
+pub(crate) struct CloneSpec {
     repo_cwd: PathBuf,
     default_ref: Option<String>,
     branch: String,
 }
 
-/// How a fresh run is prepared: `code` needs a git worktree from a repo;
+/// How a fresh run is prepared: `code` needs a clone of a repo (ADR-0052);
 /// `knowledge` just needs an empty scratch dir (ADR-0017).
 pub(crate) enum FreshSpec {
-    Code(WorktreeSpec),
+    Code(CloneSpec),
     Knowledge,
 }
 
@@ -1501,7 +1648,7 @@ async fn execute(ctx: &SessionContext, mode: Mode) -> Outcome {
     let resume = matches!(mode, Mode::Resume);
     if let Mode::Fresh(fresh) = &mode {
         let prep = match fresh {
-            FreshSpec::Code(spec) => prepare_worktree(ctx, spec).await,
+            FreshSpec::Code(spec) => prepare_clone(ctx, spec).await,
             FreshSpec::Knowledge => prepare_scratch(ctx).await,
         };
         if let Err(e) = prep {
@@ -1531,11 +1678,10 @@ async fn prepare_scratch(ctx: &SessionContext) -> Result<(), RunnerError> {
 
 /// Keep Overmind's own directories out of the run's diff.
 ///
-/// The path matters: in a worktree `.git` is a *file* pointing at
-/// `<repo>/.git/worktrees/<name>`, so `<worktree>/.git/info/exclude` does not
-/// exist and writing to it silently does nothing — which is exactly what
-/// happened until a test caught it. `git rev-parse --git-path` resolves the
-/// per-worktree location, so the user's own repo is never touched.
+/// The clone's own `info/exclude` (ADR-0052), asked of git rather than
+/// spelled: in the worktrees runs used before, `.git` was a *file*, and writing
+/// to `<worktree>/.git/info/exclude` silently did nothing until a test caught
+/// it. Run before the agent has the clone, so the path is still the server's.
 ///
 /// Best-effort: without it the worst case is a report showing up in a diff.
 async fn exclude_from_git(worktree: &Path) {
@@ -1554,47 +1700,57 @@ async fn exclude_from_git(worktree: &Path) {
     let _ = tokio::fs::write(&path, format!("/{DELIVERABLES_DIR}/\n/{INPUTS_DIR}/\n")).await;
 }
 
-/// One `git worktree add` at a time per repository. Two concurrent adds on
-/// the same repo race inside `.git/worktrees/` -- measured on CI (M27):
-/// *"failed to read .git/worktrees/<other session>/commondir"*, the second
-/// add reading the first's half-written entry -- and git offers no lock of
-/// its own for it. Process-wide, keyed by the repository path: runs on
-/// different repositories never wait on each other.
-static WORKTREE_LOCKS: std::sync::Mutex<
-    Option<std::collections::HashMap<PathBuf, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-> = std::sync::Mutex::new(None);
-
-fn worktree_lock(repo: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    let mut guard = match WORKTREE_LOCKS.lock() {
-        Ok(g) => g,
-        // A poisoned registry costs a fresh lock, not a failed checkout --
-        // the same trade the runner makes everywhere.
-        Err(e) => e.into_inner(),
-    };
-    guard
-        .get_or_insert_with(Default::default)
-        .entry(repo.to_path_buf())
-        .or_default()
-        .clone()
-}
-
-async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(), RunnerError> {
+/// A `code` run's own repository (ADR-0052): a clone of the operator's, with
+/// the run's branch checked out where the workspace says work starts.
+///
+/// Every git here runs as the server over state that is still the server's:
+/// the operator's repository, which no cage grants, and a run dir made a
+/// moment ago, before the agent has had it. Clones of one repository do not
+/// race each other the way `git worktree add` did inside `.git/worktrees/`,
+/// so nothing here takes a lock.
+async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), RunnerError> {
     if let Some(parent) = ctx.worktree_dir.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| RunnerError::Git(format!("cannot create worktree dir: {e}")))?;
+            .map_err(|e| RunnerError::Git(format!("cannot create the run dir: {e}")))?;
     }
-    let worktree = ctx.worktree_dir.to_string_lossy().into_owned();
-    let mut args = vec!["worktree", "add", worktree.as_str(), "-b", &spec.branch];
-    if let Some(r) = &spec.default_ref {
-        args.push(r.as_str());
-    }
-    let base_sha = {
-        let lock = worktree_lock(&spec.repo_cwd);
-        let _held = lock.lock().await;
-        git(&spec.repo_cwd, &args).await?;
-        git(&ctx.worktree_dir, &["rev-parse", "HEAD"]).await?
-    };
+    let repo = &spec.repo_cwd;
+    // Resolved in the operator's repository, where every ref the workspace
+    // can name exists; a clone's own branches are not the same set.
+    let start = format!(
+        "{}^{{commit}}",
+        spec.default_ref.as_deref().unwrap_or("HEAD")
+    );
+    let base_sha = git(repo, &["rev-parse", "--verify", "--end-of-options", &start]).await?;
+    let common = operator_git_dir(repo).await?;
+    let run_dir = ctx.worktree_dir.to_string_lossy().into_owned();
+    // In the image the server is root and the repository is the owner's, so
+    // git wants it declared safe -- and a local clone asks in an `upload-pack`
+    // whose environment git clears of every `-c`. Only global config reaches
+    // it (measured on the image's git 2.39), so the clone gets a global config
+    // of its own that says this one thing.
+    let safe = SafeDirectoryConfig::write(&ctx.state.config, &ctx.session_id, &common)?;
+    // No hardlinks: an object shared by inode is the operator's file, and in
+    // the agent's hands it could be rewritten (ADR-0052, rejected options).
+    let mut clone = Command::new("git");
+    clone
+        .arg("-c")
+        .arg(format!("safe.directory={}", repo.display()))
+        .args(["clone", "--quiet", "--no-hardlinks", "--no-checkout"])
+        .arg(&common)
+        .arg(&run_dir)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", &safe.path);
+    let cloned = run_git(clone, None).await;
+    drop(safe);
+    cloned?;
+    git(
+        &ctx.worktree_dir,
+        &["checkout", "--quiet", "-b", &spec.branch, &base_sha],
+    )
+    .await?;
+    // Nothing in the run dir names the operator's path.
+    git(&ctx.worktree_dir, &["remote", "remove", "origin"]).await?;
     // A code run can also hand back documents (M17): `deliverables/` is
     // collected as artifacts and kept out of git, so one run can produce a
     // diff *and* a report without either polluting the other. Same for the
@@ -1603,14 +1759,72 @@ async fn prepare_worktree(ctx: &SessionContext, spec: &WorktreeSpec) -> Result<(
     exclude_from_git(&ctx.worktree_dir).await;
     place_inputs(ctx).await;
     sqlx::query(
-        "UPDATE agent_task_sessions SET status = 'running', base_sha = ?, started_at = ? WHERE id = ?",
+        "UPDATE agent_task_sessions SET status = 'running', base_sha = ?, repo_git_dir = ?, started_at = ? WHERE id = ?",
     )
     .bind(&base_sha)
+    .bind(&common)
     .bind(now())
     .bind(&ctx.session_id)
     .execute(&ctx.state.pool)
     .await?;
     Ok(())
+}
+
+/// A git config file declaring one directory safe, gone when this drops.
+///
+/// The server's own, under the data dir at `0700`/`0600`: no cage reaches it,
+/// so no agent can add a line between its writing and the clone that reads it.
+struct SafeDirectoryConfig {
+    path: PathBuf,
+}
+
+impl SafeDirectoryConfig {
+    fn write(config: &crate::db::Config, session_id: &str, dir: &str) -> Result<Self, RunnerError> {
+        // A quoted git config value: backslash and quote escaped. A newline
+        // cannot be written as one value at all, so that path is refused.
+        if dir.contains('\n') {
+            return Err(RunnerError::Git(
+                "the repository's path contains a newline".into(),
+            ));
+        }
+        let value = dir.replace('\\', "\\\\").replace('"', "\\\"");
+        let shelf = config.data_dir.join("git");
+        crate::sandbox::mkdir_mode(&shelf, 0o700)
+            .map_err(|e| RunnerError::Git(format!("cannot make the git config dir: {e}")))?;
+        let path = shelf.join(format!("safe-{session_id}.gitconfig"));
+        let _ = std::fs::remove_file(&path);
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| RunnerError::Git(format!("cannot write a git config: {e}")))?
+        };
+        use std::io::Write;
+        file.write_all(format!("[safe]\n\tdirectory = \"{value}\"\n").as_bytes())
+            .map_err(|e| RunnerError::Git(format!("cannot write a git config: {e}")))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for SafeDirectoryConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// The operator's repository's git dir: what a run is cloned from, and where
+/// a session from before ADR-0052 kept its worktree. The git dir, not the
+/// working tree: a workspace may be a subdirectory of its repository, or a
+/// linked worktree, and `clone` takes neither.
+async fn operator_git_dir(repo: &Path) -> Result<String, RunnerError> {
+    git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .await
 }
 
 /// A per-run MCP config file, and the token it carries, both gone when this
@@ -1701,9 +1915,23 @@ impl Drop for AgentMcpConfig {
 }
 
 async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
-    let cage = crate::sandbox::Cage {
-        run_dir: &ctx.worktree_dir,
-    };
+    let cage = crate::sandbox::Cage::new(&ctx.worktree_dir);
+    // One confinement for the whole run, read twice: how much rope the adapter
+    // gets and what actually confines it must be the same answer, and asking
+    // twice let them differ (ADR-0023).
+    let held = crate::sandbox::confinement(&ctx.state.config, &cage);
+    // Once caged, always caged: a resume without a cage does not make what an
+    // earlier run planted safe to read uncaged (ADR-0052). A failed write
+    // leaves it unknown, which reads as caged. A session starts at 0, so NULL
+    // means only "from before the column" -- and stays caged on a resume. Written first, so a run that
+    // fails at the hand-over below is not left unknown either.
+    let _ = sqlx::query(
+        "UPDATE agent_task_sessions SET caged = MAX(COALESCE(caged, 1), ?) WHERE id = ?",
+    )
+    .bind(i64::from(held.is_real()))
+    .bind(&ctx.session_id)
+    .execute(&ctx.state.pool)
+    .await;
     // The agent's own door to memory (ADR-0027). Held for the whole run: when
     // this binding drops, the file goes and the token stops working.
     let mcp = AgentMcpConfig::write(&ctx.state, &ctx.session_id, &trait_tools(&ctx.agent_traits));
@@ -1756,10 +1984,6 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
             Err(_) => None,
         }
     };
-    // One confinement for the whole run, read twice: how much rope the adapter
-    // gets and what actually confines it must be the same answer, and asking
-    // twice let them differ (ADR-0023).
-    let held = crate::sandbox::confinement(&ctx.state.config, &cage);
     let agent_cmd = agent_command(
         &ctx.state,
         held.is_real(),
@@ -2058,6 +2282,27 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         Some(stop) => Some(handoff_text(ctx, stop, &f.output).await),
         None => None,
     };
+    // What the run committed goes back to the operator's repository, also
+    // before the lock (ADR-0052). Whatever the outcome: a failed run's commits
+    // are its work too. Never a failed run for it -- a failure is a line on the
+    // session and an event on the chain.
+    let returned: Option<Result<String, String>> = match ctx.exec_kind {
+        ExecutionKind::Code => match bring_back(ctx).await {
+            Ok(Some(tip)) => Some(Ok(tip)),
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("session {}: branch not brought back: {e}", ctx.session_id);
+                Some(Err(e.to_string()))
+            }
+        },
+        ExecutionKind::Knowledge => None,
+    };
+    let not_returned = match &returned {
+        Some(Err(_)) => Some(crate::i18n::branch_not_returned(
+            &crate::i18n::company_language(&ctx.state, &ctx.company_id).await,
+        )),
+        _ => None,
+    };
 
     let mut tx = ctx.state.write_tx().await?;
 
@@ -2239,6 +2484,11 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     } else {
         f.last_error.clone()
     };
+    // On the session only: the stall and release reasons are about the run.
+    let session_error = match (&last_error, not_returned) {
+        (Some(e), Some(line)) => Some(format!("{e}\n{line}")),
+        (e, line) => e.clone().or(line),
+    };
     let cause = if empty_handed {
         Some("empty_handed")
     } else {
@@ -2253,7 +2503,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     .bind(session_status)
     .bind(&f.output)
     .bind(f.exit_code)
-    .bind(&last_error)
+    .bind(&session_error)
     .bind(cause)
     .bind(now())
     .bind(&ctx.session_id)
@@ -2371,6 +2621,29 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         }),
     )
     .await?;
+    match &returned {
+        Some(Ok(tip)) => {
+            audit::append(
+                &mut tx,
+                Some(&ctx.company_id),
+                Some(&ctx.task_id),
+                event_kind::BRANCH_RETURNED,
+                &json!({ "session_id": ctx.session_id, "commit": tip }),
+            )
+            .await?;
+        }
+        Some(Err(reason)) => {
+            audit::append(
+                &mut tx,
+                Some(&ctx.company_id),
+                Some(&ctx.task_id),
+                event_kind::BRANCH_NOT_RETURNED,
+                &json!({ "session_id": ctx.session_id, "error": reason }),
+            )
+            .await?;
+        }
+        None => {}
+    }
 
     // Cost capture: the Claude Code CLI (and our stubs) print a final JSON
     // object with total_cost_usd and usage. Missing/unparseable cost is not
@@ -2566,24 +2839,229 @@ async fn report_collisions(ctx: &SessionContext, collisions: &[crate::mcp::Colli
 }
 
 /// Diff of everything the session changed (committed or not) against the
-/// commit its worktree started from.
+/// commit its clone started from. Run in the run's cage (ADR-0052).
 pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, RunnerError> {
-    let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT workspace_path, base_sha FROM agent_task_sessions WHERE id = ?")
-            .bind(session_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((workspace_path, base_sha)) = row else {
+    let row: Option<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT workspace_path, base_sha, task_id FROM agent_task_sessions WHERE id = ?",
+    )
+    .bind(session_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((workspace_path, base_sha, task_id)) = row else {
         return Err(RunnerError::NotFound("session"));
     };
     let Some(base_sha) = base_sha else {
         return Err(RunnerError::Invalid("session has not started yet".into()));
     };
-    let worktree = Path::new(&workspace_path);
-    // `git diff` ignores untracked files; intent-to-add makes new files
-    // created by the agent show up in the diff without staging content.
-    git(worktree, &["add", "--intent-to-add", "--all"]).await?;
-    git(worktree, &["diff", &base_sha]).await
+    let run_dir = Path::new(&workspace_path);
+    let from_before = git_dir_from_before(state, &task_id, session_id, run_dir).await;
+    let readable: Vec<PathBuf> = from_before.iter().cloned().collect();
+    let cage = crate::sandbox::Cage {
+        run_dir,
+        readable: &readable,
+    };
+    // A throwaway index, built from the base. The run's own is the agent's to
+    // leave as it likes, and a session from before keeps its index in the
+    // operator's repository, which is read-only now.
+    let index = std::env::temp_dir().join(format!("overmind-index-{}", uuid::Uuid::new_v4()));
+    // And for a session from before, a throwaway object dir with the
+    // repository's own behind it: intent-to-add records an empty blob, and
+    // the repository's object store is not written either.
+    let objects = match &from_before {
+        Some(_) => {
+            let dir =
+                std::env::temp_dir().join(format!("overmind-objects-{}", uuid::Uuid::new_v4()));
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| RunnerError::Git(format!("cannot make an object dir: {e}")))?;
+            crate::sandbox::hand_over(&state.config, &dir)
+                .await
+                .map_err(|e| RunnerError::Git(format!("cannot hand over an object dir: {e}")))?;
+            Some(dir)
+        }
+        None => None,
+    };
+    let was_caged = run_was_caged(state, session_id).await;
+    let caged = |args: &[&str]| -> Result<Command, RunnerError> {
+        let mut cmd = caged_git(state, &cage, was_caged, args)?;
+        cmd.env("GIT_INDEX_FILE", &index);
+        if let (Some(objects), Some(common)) = (&objects, &from_before) {
+            cmd.env("GIT_OBJECT_DIRECTORY", objects)
+                .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", common.join("objects"));
+        }
+        Ok(cmd)
+    };
+    let diff = async {
+        run_git(caged(&["read-tree", &base_sha])?, Some(CAGED_GIT_TIMEOUT)).await?;
+        // `git diff` ignores untracked files; intent-to-add makes new files
+        // created by the agent show up in the diff without staging content.
+        run_git(
+            caged(&["add", "--intent-to-add", "--all"])?,
+            Some(CAGED_GIT_TIMEOUT),
+        )
+        .await?;
+        // What a person reviews is the bytes, not what a driver the agent
+        // configured says they are.
+        run_git(
+            caged(&["diff", "--no-ext-diff", "--no-textconv", &base_sha])?,
+            Some(CAGED_GIT_TIMEOUT),
+        )
+        .await
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&index).await;
+    if let Some(objects) = &objects {
+        let _ = tokio::fs::remove_dir_all(objects).await;
+    }
+    Ok(diff?.trim_end().to_string())
+}
+
+/// The git dir a session from before ADR-0052 needs read for its diff: its
+/// repository's, when -- and only when -- the server itself registered a
+/// worktree there under this session's id.
+///
+/// Decided from the server's own state, never from the run dir. The agent can
+/// leave a `.git` file pointing anywhere, and whatever it pointed at would be
+/// granted; session ids are not guessable, and the operator's repository is no
+/// longer the agent's to write.
+async fn git_dir_from_before(
+    state: &AppState,
+    task_id: &str,
+    session_id: &str,
+    run_dir: &Path,
+) -> Option<PathBuf> {
+    // A clone has a `.git` directory, a worktree a file: a cheap gate, not the
+    // decision.
+    if !tokio::fs::symlink_metadata(run_dir.join(".git"))
+        .await
+        .ok()?
+        .is_file()
+    {
+        return None;
+    }
+    let (repo, _) = task_workspace(state, task_id).await.ok()?;
+    let common = PathBuf::from(operator_git_dir(Path::new(&repo)).await.ok()?);
+    tokio::fs::metadata(common.join("worktrees").join(session_id))
+        .await
+        .ok()?
+        .is_dir()
+        .then_some(common)
+}
+
+/// What a `code` run committed, brought back to the operator's repository as
+/// its branch (ADR-0052 §3). `Ok(None)`: nothing was committed to bring.
+///
+/// The bundle is made in the cage, from the clone the agent had, and written
+/// to a file of the server's through the one descriptor it is handed -- no
+/// path the cage can reach. The server then reads that file with the
+/// operator's config alone, and takes from it the one ref this run owns,
+/// under `overmind/`, whatever else the bundle names.
+async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT branch, base_sha, repo_git_dir FROM agent_task_sessions WHERE id = ?",
+    )
+    .bind(&ctx.session_id)
+    .fetch_optional(&ctx.state.pool)
+    .await?;
+    // Never started, or nothing left of it: there is no clone to read. And a
+    // session without a recorded git dir is a worktree from before ADR-0052,
+    // whose commits are in the operator's repository already.
+    let Some((branch, Some(base_sha), Some(repo))) = row else {
+        return Ok(None);
+    };
+    if !ctx.worktree_dir.is_dir() {
+        return Ok(None);
+    }
+    let dst = format!("refs/heads/{branch}");
+    if !branch.starts_with("overmind/") || branch.contains("..") {
+        return Err(RunnerError::Invalid(format!(
+            "{dst} is not a branch of Overmind's"
+        )));
+    }
+    let cage = crate::sandbox::Cage::new(&ctx.worktree_dir);
+    let was_caged = run_was_caged(&ctx.state, &ctx.session_id).await;
+    let tip = git_in_run(
+        &ctx.state,
+        &cage,
+        was_caged,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{dst}^{{commit}}"),
+        ],
+    )
+    .await
+    .map_err(|e| match e {
+        RunnerError::Git(_) => RunnerError::Git("the branch is gone from the clone".into()),
+        other => other,
+    })?
+    .trim()
+    .to_string();
+    if tip == base_sha {
+        return Ok(None);
+    }
+    let dir = ctx.state.config.data_dir.join("bundles");
+    crate::sandbox::mkdir_mode(&dir, 0o700)
+        .map_err(|e| RunnerError::Git(format!("cannot make the bundles dir: {e}")))?;
+    let path = dir.join(format!("{}.bundle", ctx.session_id));
+    let _ = std::fs::remove_file(&path);
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| RunnerError::Git(format!("cannot make the bundle file: {e}")))?
+    };
+    let fetched = async {
+        let mut bundle = caged_git(
+            &ctx.state,
+            &cage,
+            was_caged,
+            &["bundle", "create", "-", &dst, &format!("^{base_sha}")],
+        )?;
+        bundle.stdout(Stdio::from(file));
+        run_spawned(bundle, Some(CAGED_GIT_TIMEOUT)).await?;
+        let bundle_path = path.to_string_lossy();
+        git(
+            Path::new(&repo),
+            &[
+                "-c",
+                "transfer.fsckObjects=true",
+                "-c",
+                "core.hooksPath=/dev/null",
+                // The owner's repository is repacked by the owner, never by
+                // a server that is root in the image.
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--no-recurse-submodules",
+                &bundle_path,
+                &format!("+{dst}:{dst}"),
+            ],
+        )
+        .await
+    }
+    .await;
+    let _ = std::fs::remove_file(&path);
+    fetched?;
+    // What the chain records is what the operator's repository now holds,
+    // read there: anything the agent left running could have moved the ref
+    // in the clone between the first read and the bundle.
+    let landed = git(
+        Path::new(&repo),
+        &["rev-parse", "--verify", "--end-of-options", &dst],
+    )
+    .await?;
+    Ok(Some(landed))
 }
 
 #[cfg(test)]

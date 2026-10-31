@@ -22,13 +22,13 @@
 │  ┌────────────────────────┐  ┌────────────────────────────┐ │
 │  │     agent runners      │  │       MCP layer            │ │
 │  │ spawn CLIs in isolated │  │ client: tools + memory     │ │
-│  │ git worktrees          │  │ server: expose Overmind    │ │
+│  │ clones of the repo     │  │ server: expose Overmind    │ │
 │  └───────────┬────────────┘  └──────────┬─────────────────┘ │
 └──────────────│──────────────────────────│───────────────────┘
                ▼                          ▼
    Claude Code / Gemini CLI /     MemoryProvider (MCP) — OPTIONAL
    other agent CLIs, one          Wadachi first-party: managed
-   worktree + branch each         per-org instance (ADR-0004)
+   clone + branch each            per-org instance (ADR-0004)
 ```
 
 ## The harness and the loop
@@ -38,7 +38,7 @@ The vocabulary the field settled on in 2026 — **prompt → context → harness
 | Harness concern | Component |
 |---|---|
 | Isolation | the cage — `sandbox.rs`, `landlock.rs`, one `Confinement` per run |
-| Execution environment | agent runners — a git worktree and a branch per session |
+| Execution environment | agent runners — a clone of the repository and a branch per session ([ADR-0052](adr/0052-a-run-owns-its-repository.md)) |
 | Tools | the MCP layer, client side |
 | Memory | the `MemoryProvider` contract (below) — optional, never vendored |
 | Permissions | typed agent traits, server-enforced |
@@ -57,7 +57,7 @@ Two prohibitions hold the boundary with the memory provider, and both are testab
 - **Tasks & audit** — `Task` is the unit of assigned work; every state change, tool call and decision appends an `Event` to an **append-only audit log**. Events are never updated or deleted.
 - **Scheduler** — heartbeat wake-ups per agent; an agent resumes its checked-out task with persisted context rather than restarting.
 - **Governance & budgets** — per-agent monthly budgets. **Invariant: task checkout and budget reservation are a single atomic transaction** (this is the hard problem Paperclip solved; we adopt the same guarantee). Approval gates (hiring, spend over threshold, protected actions) are enforced server-side.
-- **Agent runners** — spawn external agent CLIs as child processes, each in **its own git worktree on its own branch** (Vibe Kanban's model). Runner captures stdout/stderr, streams progress, enforces timeouts, and reports cost.
+- **Agent runners** — spawn external agent CLIs as child processes, each in **a clone of its own on its own branch** ([ADR-0052](adr/0052-a-run-owns-its-repository.md)); what the run committed comes back to the operator's repository as that branch, as a bundle. Runner captures stdout/stderr, streams progress, enforces timeouts, and reports cost.
 - **MCP layer** —
   - *client*: connects to configured MCP servers and exposes them to agents; the `MemoryProvider` is just a distinguished MCP connection.
   - *server*: exposes Overmind itself over MCP (create task, read board, query audit), so external agents can participate.

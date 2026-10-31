@@ -151,6 +151,18 @@ pub fn meeting_request_summary(code: &str, convener: &str, topic: &str) -> Strin
     }
 }
 
+/// The line a `code` run carries when what it committed could not reach the
+/// operator's repository (ADR-0052). The run is not failed for it: the commits
+/// are still in its clone, and the line says where. The reason is git's own
+/// words, in English whatever the company speaks, so it stays on the chain
+/// (`session.branch_not_returned`) rather than inside this sentence.
+pub fn branch_not_returned(code: &str) -> String {
+    match code {
+        "it" => "I commit di questa esecuzione non sono arrivati nel tuo repository: restano nel suo clone. Il motivo è nel registro di audit.".to_string(),
+        _ => "This run's commits did not reach your repository: they are still in its clone. The reason is in the audit log.".to_string(),
+    }
+}
+
 /// Why a run stopped short of done, for its handoff (ADR-0050 §4).
 pub enum Stop {
     TimedOut(u64),
@@ -162,7 +174,7 @@ pub enum Stop {
 /// The handoff a run stopped short hands on, shown to the person on the task
 /// and to the next attempt. `own` is the run's own file when it wrote one;
 /// otherwise `changed` and `said` are what Overmind read from what it left.
-/// `code` says whether the changes stay behind in a worktree the next attempt
+/// `code` says whether the changes stay behind in a clone the next attempt
 /// will not have -- said plainly, so it does not look for them.
 pub struct Handoff<'a> {
     pub stop: &'a Stop,
@@ -202,10 +214,10 @@ pub fn handoff(code: &str, h: &Handoff) -> String {
     };
     let kept = match (h.code_run, it) {
         (true, true) => {
-            "\n\nQuesti cambi erano nella sua worktree e non sono in quella del prossimo tentativo, che riparte dal repository."
+            "\n\nQuesti cambi erano nel suo clone e non sono in quello del prossimo tentativo, che riparte dal repository."
         }
         (true, false) => {
-            "\n\nThese changes were in its worktree and are not in the next attempt's, which starts from the repository again."
+            "\n\nThese changes were in its clone and are not in the next attempt's, which starts from the repository again."
         }
         (false, _) => "",
     };
