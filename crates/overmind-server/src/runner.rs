@@ -1724,22 +1724,26 @@ async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), Run
     let base_sha = git(repo, &["rev-parse", "--verify", "--end-of-options", &start]).await?;
     let common = operator_git_dir(repo).await?;
     let run_dir = ctx.worktree_dir.to_string_lossy().into_owned();
+    // In the image the server is root and the repository is the owner's, so
+    // git wants it declared safe -- and a local clone asks in an `upload-pack`
+    // whose environment git clears of every `-c`. Only global config reaches
+    // it (measured on the image's git 2.39), so the clone gets a global config
+    // of its own that says this one thing.
+    let safe = SafeDirectoryConfig::write(&ctx.state.config, &ctx.session_id, &common)?;
     // No hardlinks: an object shared by inode is the operator's file, and in
     // the agent's hands it could be rewritten (ADR-0052, rejected options).
-    git(
-        repo,
-        &[
-            "-c",
-            &format!("safe.directory={common}"),
-            "clone",
-            "--quiet",
-            "--no-hardlinks",
-            "--no-checkout",
-            &common,
-            &run_dir,
-        ],
-    )
-    .await?;
+    let mut clone = Command::new("git");
+    clone
+        .arg("-c")
+        .arg(format!("safe.directory={}", repo.display()))
+        .args(["clone", "--quiet", "--no-hardlinks", "--no-checkout"])
+        .arg(&common)
+        .arg(&run_dir)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", &safe.path);
+    let cloned = run_git(clone, None).await;
+    drop(safe);
+    cloned?;
     git(
         &ctx.worktree_dir,
         &["checkout", "--quiet", "-b", &spec.branch, &base_sha],
@@ -1764,6 +1768,51 @@ async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), Run
     .execute(&ctx.state.pool)
     .await?;
     Ok(())
+}
+
+/// A git config file declaring one directory safe, gone when this drops.
+///
+/// The server's own, under the data dir at `0700`/`0600`: no cage reaches it,
+/// so no agent can add a line between its writing and the clone that reads it.
+struct SafeDirectoryConfig {
+    path: PathBuf,
+}
+
+impl SafeDirectoryConfig {
+    fn write(config: &crate::db::Config, session_id: &str, dir: &str) -> Result<Self, RunnerError> {
+        // A quoted git config value: backslash and quote escaped. A newline
+        // cannot be written as one value at all, so that path is refused.
+        if dir.contains('\n') {
+            return Err(RunnerError::Git(
+                "the repository's path contains a newline".into(),
+            ));
+        }
+        let value = dir.replace('\\', "\\\\").replace('"', "\\\"");
+        let shelf = config.data_dir.join("git");
+        crate::sandbox::mkdir_mode(&shelf, 0o700)
+            .map_err(|e| RunnerError::Git(format!("cannot make the git config dir: {e}")))?;
+        let path = shelf.join(format!("safe-{session_id}.gitconfig"));
+        let _ = std::fs::remove_file(&path);
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| RunnerError::Git(format!("cannot write a git config: {e}")))?
+        };
+        use std::io::Write;
+        file.write_all(format!("[safe]\n\tdirectory = \"{value}\"\n").as_bytes())
+            .map_err(|e| RunnerError::Git(format!("cannot write a git config: {e}")))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for SafeDirectoryConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// The operator's repository's git dir: what a run is cloned from, and where

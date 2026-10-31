@@ -246,6 +246,11 @@ CHECK
         sleep 1
     done
     echo "[$label] code session: ${code_status}"
+    # Say why, when it failed: a refused diff alone sent the clone's first CI
+    # run hunting for a cause the session had already written down.
+    if [ "$code_status" = "failed" ]; then
+        echo "  last_error: $(api GET "/sessions/${code_session}" | json '.get("last_error")')"
+    fi
     api GET "/sessions/${code_session}/diff" > "$WORK/diff-${label}.txt" \
         || { echo "FAIL: the diff endpoint refused — a person cannot review the code task"; exit 1; }
     grep -q "ARTIFACT.md" "$WORK/diff-${label}.txt" \
