@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::{ExecutionKind, event_kind};
+use crate::domain::{ExecutionKind, TaskStatus, event_kind};
 use crate::files;
 use crate::governance;
 
@@ -2518,11 +2518,30 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .await?;
     }
 
+    // A run moves its task only while the task is still its own: still in
+    // progress, and not checked out again by a later session. A person may
+    // have cancelled it, blocked it or put it back in the queue meanwhile;
+    // that decision stands, and the outcome stays on the session.
+    let task_now: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+        .bind(&ctx.task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let applied = task_now == TaskStatus::InProgress.as_str()
+        && !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM agent_task_sessions
+                 WHERE task_id = ?
+                   AND created_at > (SELECT created_at FROM agent_task_sessions WHERE id = ?))",
+        )
+        .bind(&ctx.task_id)
+        .bind(&ctx.session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
     // The attempts cap (ADR-0050 §1): the same failure, the cap-th time since
     // a person last put the task back, is no longer bad luck. Counted on the
     // sessions themselves, never on what the agent said about them.
     let stalled = match cause {
-        Some(cause) => {
+        Some(cause) if applied => {
             let sessions: Vec<(String,)> = sqlx::query_as(
                 "SELECT s.id FROM agent_task_sessions s JOIN tasks t ON t.id = s.task_id
                  WHERE s.task_id = ? AND s.failure_cause = ?
@@ -2548,10 +2567,12 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                 })
             })
         }
-        None => None,
+        _ => None,
     };
 
-    if let Some(packet) = &stalled {
+    if !applied {
+        // Nothing moves: `session.finished` below says why.
+    } else if let Some(packet) = &stalled {
         // Out of the queue: the scheduler never picks a stalled task, so the
         // next wakeup takes the one behind it. The assignee stays — the task
         // is stopped, not unowned (ADR-0046: no report of "nobody on it").
@@ -2618,6 +2639,8 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             "status": session_status,
             "exit_code": f.exit_code,
             "error": last_error,
+            "applied": applied,
+            "task_status": (!applied).then_some(&task_now),
         }),
     )
     .await?;
@@ -2698,8 +2721,9 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // The floor moves on its own (M30, ADR-0042): a completed run releases
     // the tasks that were waiting on this one — each inherits the
     // deliverables as inputs and is offered to start by its agent's
-    // autonomy. Best-effort: the session is already recorded.
-    if f.session_status == "completed" {
+    // autonomy. Best-effort: the session is already recorded. Not when the
+    // task was moved under the run: a cancelled task releases nothing.
+    if f.session_status == "completed" && applied {
         // Spawned, not awaited: releasing a dependent starts a new session,
         // and a future that awaits its own descendants is a cycle the
         // compiler rightly refuses.
