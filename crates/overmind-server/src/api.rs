@@ -2210,7 +2210,9 @@ async fn transition_task(
         (None, _) => current_assignee,
     };
 
-    sqlx::query("UPDATE tasks SET status = ?, assignee_agent_id = ?, updated_at = ? WHERE id = ?")
+    // A move by hand takes the task from whichever run held it: that run's
+    // end no longer moves it (plan 2026-11-01, the task knows its run).
+    sqlx::query("UPDATE tasks SET status = ?, assignee_agent_id = ?, run_session_id = NULL, updated_at = ? WHERE id = ?")
         .bind(to.as_str())
         .bind(&assignee)
         .bind(now())

@@ -14,7 +14,7 @@ use tokio::process::Command;
 
 use crate::audit;
 use crate::db::AppState;
-use crate::domain::{ExecutionKind, TaskStatus, event_kind};
+use crate::domain::{ExecutionKind, event_kind};
 use crate::files;
 use crate::governance;
 
@@ -1213,10 +1213,12 @@ pub async fn start_task(
         });
     }
 
-    // Atomic checkout: exactly one concurrent caller wins this UPDATE.
+    // Atomic checkout: exactly one concurrent caller wins this UPDATE, and the
+    // task records that this run holds it (see `owns`).
     let checked_out =
-        sqlx::query("UPDATE tasks SET status = 'in_progress', assignee_agent_id = ?, updated_at = ? WHERE id = ? AND status = 'todo'")
+        sqlx::query("UPDATE tasks SET status = 'in_progress', assignee_agent_id = ?, run_session_id = ?, updated_at = ? WHERE id = ? AND status = 'todo'")
             .bind(agent_id)
+            .bind(&session_id)
             .bind(now())
             .bind(task_id)
             .execute(&mut *tx)
@@ -1481,13 +1483,13 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     let Some((task_id, agent_id, workspace_path)) = session else {
         return Err(RunnerError::NotFound("session"));
     };
-    let task: Option<(String, String, String, String, String)> = sqlx::query_as(
-        "SELECT company_id, title, description, status, execution_kind FROM tasks WHERE id = ?",
+    let task: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT company_id, title, description, execution_kind FROM tasks WHERE id = ?",
     )
     .bind(&task_id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((company_id, title, description, task_status, exec_kind_str)) = task else {
+    let Some((company_id, title, description, exec_kind_str)) = task else {
         return Err(RunnerError::NotFound("task"));
     };
     let exec_kind = ExecutionKind::parse(&exec_kind_str).unwrap_or_default();
@@ -1511,15 +1513,20 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         exec_kind,
     };
 
-    // A session whose task is no longer in progress, or whose worktree is
-    // gone, cannot be resumed: fail it and release the task.
-    if task_status != "in_progress" || !ctx.worktree_dir.is_dir() {
+    // A session that no longer holds its task, or whose worktree is gone,
+    // cannot be resumed: fail it, and release the task only if it was its own.
+    // A task started again holds a newer run, which is the one to resume.
+    let (owned, task_status) =
+        owns(&mut *state.pool.acquire().await?, &task_id, session_id).await?;
+    if !owned || !ctx.worktree_dir.is_dir() {
         let error = if task_status != "in_progress" {
             format!("cannot resume: task is '{task_status}'")
+        } else if !owned {
+            "cannot resume: the task is no longer this run's".to_string()
         } else {
             "cannot resume: worktree is missing".to_string()
         };
-        let release = task_status == "in_progress";
+        let release = owned;
         finalize(&ctx, Outcome::Infra { error, release }).await?;
         return Ok(());
     }
@@ -2190,6 +2197,27 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     }
 }
 
+/// Whether the run `session_id` still holds its task, with the status it
+/// found. The checkout records the run on the task; a move by hand, and the
+/// run's own applied end, let go of it. Status and timestamps alone cannot
+/// say it: a task blocked and put back in progress by hand is `in_progress`
+/// again with no new session (plan 2026-11-01, the task knows its run).
+/// The one place the rule is written: `finalize` and `resume_session` ask it.
+async fn owns(
+    conn: &mut sqlx::sqlite::SqliteConnection,
+    task_id: &str,
+    session_id: &str,
+) -> Result<(bool, String), sqlx::Error> {
+    let (owned, status): (bool, String) = sqlx::query_as(
+        "SELECT status = 'in_progress' AND run_session_id IS ?, status FROM tasks WHERE id = ?",
+    )
+    .bind(session_id)
+    .bind(task_id)
+    .fetch_one(conn)
+    .await?;
+    Ok((owned, status))
+}
+
 async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerError> {
     struct Final {
         session_status: &'static str,
@@ -2495,6 +2523,14 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         f.cause
     };
 
+    // A run moves its task only while the task is still its own. A person may
+    // have cancelled it, blocked it or put it back in the queue meanwhile;
+    // that decision stands, and the outcome stays on the session.
+    let (applied, task_now) = owns(&mut tx, &ctx.task_id, &ctx.session_id).await?;
+    // A run that did not hold its task failed on work that was no longer its
+    // own: it counts toward nobody's attempts cap.
+    let cause = cause.filter(|_| applied);
+
     // Releasing the reservation (→ 0): once the run is over, its actual cost
     // is a cost_event and counts as spent; the in-flight reservation is gone.
     sqlx::query(
@@ -2518,30 +2554,11 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .await?;
     }
 
-    // A run moves its task only while the task is still its own: still in
-    // progress, and not checked out again by a later session. A person may
-    // have cancelled it, blocked it or put it back in the queue meanwhile;
-    // that decision stands, and the outcome stays on the session.
-    let task_now: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
-        .bind(&ctx.task_id)
-        .fetch_one(&mut *tx)
-        .await?;
-    let applied = task_now == TaskStatus::InProgress.as_str()
-        && !sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM agent_task_sessions
-                 WHERE task_id = ?
-                   AND created_at > (SELECT created_at FROM agent_task_sessions WHERE id = ?))",
-        )
-        .bind(&ctx.task_id)
-        .bind(&ctx.session_id)
-        .fetch_one(&mut *tx)
-        .await?;
-
     // The attempts cap (ADR-0050 §1): the same failure, the cap-th time since
     // a person last put the task back, is no longer bad luck. Counted on the
     // sessions themselves, never on what the agent said about them.
     let stalled = match cause {
-        Some(cause) if applied => {
+        Some(cause) => {
             let sessions: Vec<(String,)> = sqlx::query_as(
                 "SELECT s.id FROM agent_task_sessions s JOIN tasks t ON t.id = s.task_id
                  WHERE s.task_id = ? AND s.failure_cause = ?
@@ -2576,11 +2593,13 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         // Out of the queue: the scheduler never picks a stalled task, so the
         // next wakeup takes the one behind it. The assignee stays — the task
         // is stopped, not unowned (ADR-0046: no report of "nobody on it").
-        sqlx::query("UPDATE tasks SET status = 'stalled', updated_at = ? WHERE id = ?")
-            .bind(now())
-            .bind(&ctx.task_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE tasks SET status = 'stalled', run_session_id = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(now())
+        .bind(&ctx.task_id)
+        .execute(&mut *tx)
+        .await?;
         audit::append(
             &mut tx,
             Some(&ctx.company_id),
@@ -2599,7 +2618,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         .await?;
     } else if f.release {
         sqlx::query(
-            "UPDATE tasks SET status = 'todo', assignee_agent_id = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE tasks SET status = 'todo', assignee_agent_id = NULL, run_session_id = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(now())
         .bind(&ctx.task_id)
@@ -2614,12 +2633,14 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         )
         .await?;
     } else {
-        sqlx::query("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(task_to)
-            .bind(now())
-            .bind(&ctx.task_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE tasks SET status = ?, run_session_id = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(task_to)
+        .bind(now())
+        .bind(&ctx.task_id)
+        .execute(&mut *tx)
+        .await?;
         audit::append(
             &mut tx,
             Some(&ctx.company_id),
@@ -2722,8 +2743,9 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // the tasks that were waiting on this one — each inherits the
     // deliverables as inputs and is offered to start by its agent's
     // autonomy. Best-effort: the session is already recorded. Not when the
-    // task was moved under the run: a cancelled task releases nothing.
-    if f.session_status == "completed" && applied {
+    // task was moved under the run: a cancelled task releases nothing. The
+    // status is the effective one: an empty-handed run is failed.
+    if session_status == "completed" && applied {
         // Spawned, not awaited: releasing a dependent starts a new session,
         // and a future that awaits its own descendants is a cycle the
         // compiler rightly refuses.
@@ -2741,34 +2763,41 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // should not make alone and left a MEETING_REQUEST.json behind. Raising it
     // notifies the human and waits for approval — nobody meets on their own.
     // Best-effort: a malformed request never fails an otherwise done session.
+    // A run that no longer held its task asks for nothing: the call it hit is
+    // about work the person took back.
     let request_path = ctx.worktree_dir.join(MEETING_REQUEST_FILE);
     if let Ok(text) = tokio::fs::read_to_string(&request_path).await {
         // Remove it first, so it never lands in the diff or a resumed run.
         let _ = tokio::fs::remove_file(&request_path).await;
-        match serde_json::from_str::<Value>(&text)
-            .ok()
-            .as_ref()
-            .and_then(crate::meeting::Request::from_json)
-        {
-            Some(req) => {
-                if let Err(e) =
-                    crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req).await
-                {
-                    eprintln!(
-                        "meeting requested by session {} refused: {e}",
-                        ctx.session_id
-                    );
+        if applied {
+            match serde_json::from_str::<Value>(&text)
+                .ok()
+                .as_ref()
+                .and_then(crate::meeting::Request::from_json)
+            {
+                Some(req) => {
+                    if let Err(e) =
+                        crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req)
+                            .await
+                    {
+                        eprintln!(
+                            "meeting requested by session {} refused: {e}",
+                            ctx.session_id
+                        );
+                    }
                 }
+                None => eprintln!(
+                    "session {} left an unreadable {MEETING_REQUEST_FILE}",
+                    ctx.session_id
+                ),
             }
-            None => eprintln!(
-                "session {} left an unreadable {MEETING_REQUEST_FILE}",
-                ctx.session_id
-            ),
         }
     }
 
     // Record what the organization just learned. Best-effort; never fatal.
-    if f.session_status == "completed" {
+    // Not from a run that no longer held its task: a memory of work the person
+    // threw away would report as done what is not.
+    if session_status == "completed" && applied {
         // The task is the memory's provenance (ADR-0015 decision 3, made real
         // in ADR-0025). The tag rides along so the brain still says where this
         // came from when read outside Overmind; the link row is what the UI
