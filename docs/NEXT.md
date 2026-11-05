@@ -213,7 +213,7 @@ Found by the review of the wakeup fix (a refusal is the wakeup's outcome, and th
 
 Found by the review of M36a slice 1; older than it, written down here rather than widening the slice:
 
-- **Moving a task does not stop its run.** A run's end no longer writes over a task a person moved while it worked (cancelled, blocked, back in *To do*, or taken again by a later session — fixed by [the plan of 1 Nov](plans/2026-11-01-a-run-ends-on-the-task-it-started.md)), but the run itself goes on: a cancelled task's run spends until its own end, and its session is recorded with `applied: false`. Stopping it means reaching the process from `transition_task` — the handle in `state.running` and the cage's process group — so it wants a change of its own. Until then, a cancel stops the task, not the bill.
+- **Moving a task does not stop its run.** A run's end no longer writes over a task a person moved while it worked (cancelled, blocked, back in *To do*, or taken again by a later session — fixed by [the task knows its run](plans/2026-11-01-the-task-knows-its-run.md)), but the run itself goes on: a cancelled task's run spends until its own end, and its session is recorded with `applied: false`. Stopping it means reaching the process from `transition_task` — the handle in `state.running` and the cage's process group — so it wants a change of its own. Until then, a cancel stops the task, not the bill.
 
 ## Debts from the clone (30 Oct 2026)
 
