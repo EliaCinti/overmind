@@ -60,6 +60,7 @@ case "$OVERMIND_TASK_PROMPT" in
     echo '{{"type":"result","result":"{{\"reply\":\"Apro il task.\",\"tasks\":[{{\"title\":\"Studia il progetto\",\"description\":\"Fallo.\",\"execution_kind\":\"knowledge\",\"assignee\":\"Tobia\"}}]}}","total_cost_usd":0.001}}'
     ;;
   *)
+    while [ -f "$(dirname "$0")/hold" ]; do sleep 0.05; done
     echo "Studio completo." > studio.md
     echo '{{"type":"result","result":"LAVORO-FATTO: ho studiato tutto.","total_cost_usd":0.001,"session_id":"s"}}'
     ;;
@@ -73,6 +74,7 @@ struct Env {
     state: overmind_server::AppState,
     company: String,
     ceo: String,
+    root: PathBuf,
 }
 
 async fn setup(digest_reply: &str) -> Env {
@@ -110,6 +112,7 @@ async fn setup(digest_reply: &str) -> Env {
         ceo: co["ceo"]["id"].as_str().expect("ceo").to_string(),
         app,
         state,
+        root,
     };
     // Tobia acts within budget, so the planned task runs at once.
     let (s, a) = send(
@@ -211,6 +214,76 @@ async fn a_finished_task_earns_one_unprompted_update() {
         messages(&env).await.len(),
         before,
         "the same completions are not re-announced"
+    );
+}
+
+/// A run that no longer held its task finished work the person threw away:
+/// the thread does not hear it was done (plan 2026-11-01, the task knows its
+/// run).
+#[tokio::test]
+async fn a_run_of_a_cancelled_task_earns_no_update() {
+    let env = setup("AGGIORNAMENTO: Tobia ha consegnato.").await;
+    let hold = env.root.join("hold");
+    std::fs::write(&hold, "").expect("hold the run");
+    let (s, v) = send(
+        &env.app,
+        "POST",
+        &format!(
+            "/api/companies/{}/agents/{}/conversation/messages",
+            env.company, env.ceo
+        ),
+        Some(json!({ "content": "Fate partire lo studio." })),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {v}");
+
+    let mut task_id = None;
+    for _ in 0..200 {
+        task_id = sqlx::query_scalar("SELECT id FROM tasks WHERE status = 'in_progress'")
+            .fetch_optional(&env.state.pool)
+            .await
+            .expect("query");
+        if task_id.is_some() && !env.state.is_answering_anywhere() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let task_id: String = task_id.expect("the planned task started");
+    let (s, moved) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": "cancelled" })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{moved}");
+    std::fs::remove_file(&hold).expect("let the run go");
+
+    let mut completed = 0;
+    for _ in 0..200 {
+        completed = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_task_sessions WHERE status = 'completed'",
+        )
+        .fetch_one(&env.state.pool)
+        .await
+        .expect("query");
+        if completed == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(completed, 1, "the run ended and is recorded");
+    let before = messages(&env).await.len();
+
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("beat");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        messages(&env).await.len(),
+        before,
+        "no update about thrown-away work: {:?}",
+        messages(&env).await
     );
 }
 

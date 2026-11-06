@@ -6,6 +6,12 @@
 -- and two checkouts can share an instant.
 ALTER TABLE tasks ADD COLUMN run_session_id TEXT;
 
+-- Whether the run still held its task when it ended. Its status says how the
+-- run went, this says whether that outcome counted: a run of a task the person
+-- took back is not reported as done, not counted toward the attempts cap, and
+-- not handed on to the next attempt. 1 until a run ends without holding it.
+ALTER TABLE agent_task_sessions ADD COLUMN applied INTEGER NOT NULL DEFAULT 1;
+
 -- Runs in flight across the upgrade keep their task: an `in_progress` task is
 -- held by its newest live session.
 UPDATE tasks SET run_session_id = (

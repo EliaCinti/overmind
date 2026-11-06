@@ -444,10 +444,12 @@ fn advertised_bounds(timeout_secs: u64, ceiling_cents: Option<i64>, kind: Execut
 
 /// The handoff the attempt just before this one left, as a prompt block --
 /// only that one: after a run that finished, or a person's reset, an older
-/// handoff describes work that is no longer where things stand.
+/// handoff describes work that is no longer where things stand. Nor from a run
+/// that no longer held the task: the person took that work back.
 async fn previous_handoff(state: &AppState, task_id: &str, session_id: &str) -> String {
     let last: Option<(Option<String>,)> = sqlx::query_as(
         "SELECT a.content FROM task_artifacts a
+         JOIN agent_task_sessions ended ON ended.id = a.session_id AND ended.applied = 1
          WHERE a.kind = 'handoff' AND a.session_id = (
            SELECT s.id FROM agent_task_sessions s
            WHERE s.task_id = ? AND s.id IS NOT ?
@@ -2527,20 +2529,18 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // have cancelled it, blocked it or put it back in the queue meanwhile;
     // that decision stands, and the outcome stays on the session.
     let (applied, task_now) = owns(&mut tx, &ctx.task_id, &ctx.session_id).await?;
-    // A run that did not hold its task failed on work that was no longer its
-    // own: it counts toward nobody's attempts cap.
-    let cause = cause.filter(|_| applied);
 
     // Releasing the reservation (→ 0): once the run is over, its actual cost
     // is a cost_event and counts as spent; the in-flight reservation is gone.
     sqlx::query(
-        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, failure_cause = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
+        "UPDATE agent_task_sessions SET status = ?, output = ?, exit_code = ?, last_error = ?, failure_cause = ?, applied = ?, reserved_cents = 0, finished_at = ? WHERE id = ?",
     )
     .bind(session_status)
     .bind(&f.output)
     .bind(f.exit_code)
     .bind(&session_error)
     .bind(cause)
+    .bind(applied)
     .bind(now())
     .bind(&ctx.session_id)
     .execute(&mut *tx)
@@ -2556,12 +2556,14 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
 
     // The attempts cap (ADR-0050 §1): the same failure, the cap-th time since
     // a person last put the task back, is no longer bad luck. Counted on the
-    // sessions themselves, never on what the agent said about them.
-    let stalled = match cause {
+    // sessions themselves, never on what the agent said about them. A run that
+    // did not hold its task failed on work that was no longer its own: it
+    // counts toward nobody's cap.
+    let stalled = match cause.filter(|_| applied) {
         Some(cause) => {
             let sessions: Vec<(String,)> = sqlx::query_as(
                 "SELECT s.id FROM agent_task_sessions s JOIN tasks t ON t.id = s.task_id
-                 WHERE s.task_id = ? AND s.failure_cause = ?
+                 WHERE s.task_id = ? AND s.failure_cause = ? AND s.applied = 1
                    AND s.created_at >= COALESCE(t.attempts_since, '')
                  ORDER BY s.created_at",
             )

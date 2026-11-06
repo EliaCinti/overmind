@@ -50,7 +50,7 @@ async fn process_digests(state: &AppState) -> Result<(), RunnerError> {
         "SELECT c.id, c.company_id, c.agent_id, MAX(s.finished_at), MAX(m.created_at)
          FROM conversations c
          JOIN tasks t ON t.conversation_id = c.id
-         JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed'
+         JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed' AND s.applied = 1
          JOIN messages m ON m.conversation_id = c.id
          WHERE s.finished_at IS NOT NULL
          GROUP BY c.id
@@ -80,7 +80,7 @@ async fn process_digests(state: &AppState) -> Result<(), RunnerError> {
         // own reports (clamped: a digest reads summaries, not transcripts).
         let finished: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
             "SELECT t.title, COALESCE(s.output, '') FROM tasks t
-             JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed'
+             JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed' AND s.applied = 1
              WHERE t.conversation_id = ? AND s.finished_at > ?
              ORDER BY s.finished_at DESC LIMIT 6",
         )

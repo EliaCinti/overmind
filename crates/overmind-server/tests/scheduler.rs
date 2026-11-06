@@ -2124,18 +2124,44 @@ async fn an_unapplied_failure_does_not_count_toward_the_cap() {
     let first = start(&env, &task_id, &agent_id).await;
     move_by_hand(&env, &task_id, "todo").await;
     wait_for_session(&env.app, &first).await;
-    let cause: Option<String> =
-        sqlx::query_scalar("SELECT failure_cause FROM agent_task_sessions WHERE id = ?")
+    // Why it failed stays true; that it was not the task's run is its own fact.
+    let (cause, applied): (Option<String>, bool) =
+        sqlx::query_as("SELECT failure_cause, applied FROM agent_task_sessions WHERE id = ?")
             .bind(&first)
             .fetch_one(&env.state.pool)
             .await
-            .expect("failure_cause");
-    assert_eq!(cause, None);
+            .expect("session");
+    assert_eq!(cause.as_deref(), Some("timed_out"));
+    assert!(!applied);
 
     // The one run that held it times out: one failure, under a cap of two.
     attempt(&env, &task_id, &agent_id).await;
     assert_eq!(task_status(&env, &task_id).await, "todo");
     assert!(stalled_payloads(&env, &task_id).await.is_empty());
+}
+
+/// A person put the task back in the queue because the run was going the wrong
+/// way: what that run hands on stays on the task for them to read, but the next
+/// attempt does not start from it.
+#[tokio::test]
+async fn the_next_attempt_does_not_read_the_handoff_of_a_run_that_lost_its_task() {
+    let env = build_env(TALKING_SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Requeued, wrong direction").await;
+
+    let first = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "todo").await;
+    wait_for_session(&env.app, &first).await;
+    assert_eq!(handoffs(&env, &task_id).await.len(), 1);
+
+    std::fs::write(env.root.join("stub-agent.sh"), PROMPT_STUB).expect("swap stub");
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let prompt = session["output"].as_str().unwrap_or("");
+    assert!(!prompt.contains("previous attempt"), "{prompt}");
+    assert!(
+        !prompt.contains("read the brief, drafted the outline"),
+        "{prompt}"
+    );
 }
 
 /// Writes no file: a knowledge run that delivers only its transcript.
