@@ -89,4 +89,6 @@ A Python that `uv` manages itself lives under the same directory, and installing
 
 `OVERMIND_SANDBOX_READ` stays. It is measured to read and not write, and the README keeps it as the way to fit a toolchain that only has to read.
 
+**The rule also has to hold after an agent has been there.** What an agent may write it may replace. Measured from inside the cage: `~/.claude.json`, `~/.claude` and the run directory all took a link to `~/.config`, and the next build, resolving it, granted `~/.config` to read and write. So those paths are never followed if they are links. A run directory that is a link gets no profile, and a resume refuses it. An operator whose `~/.claude` is a link of their own names the real place in `OVERMIND_SANDBOX_ALLOW`.
+
 **Decision 5 was also narrower than it read.** `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` do not cover `~/.config/git/ignore` and `attributes`, which git reads regardless. `core.excludesFile` and `core.attributesFile` now point at `/dev/null`, for the server's git and the agent's.
