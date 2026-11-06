@@ -453,10 +453,10 @@ fn allow_stanza(operation: &str, paths: &[PathBuf]) -> String {
 /// The profile text for one run.
 fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
-    // cage and no `--dangerously-skip-permissions` — the same safe direction
-    // an unquotable path takes below. Not so for a run directory an earlier run
-    // replaced with a link: that one keeps its cage, which grants it nothing,
-    // because no profile would mean an uncaged shell inside the link's target.
+    // cage and no `--dangerously-skip-permissions`. Not so for a run directory
+    // an earlier run replaced with a link: that one keeps its cage, which grants
+    // it nothing, because no profile would mean an uncaged shell inside the
+    // link's target.
     real_path(cage.run_dir)?;
     // One list, shared with Landlock: two would eventually disagree, and the
     // disagreement would be a cage that grants different things depending on
