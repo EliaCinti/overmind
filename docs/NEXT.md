@@ -215,6 +215,16 @@ Found by the review of M36a slice 1; older than it, written down here rather tha
 
 - **Moving a task does not stop its run.** A run's end no longer writes over a task a person moved while it worked (cancelled, blocked, back in *To do*, or taken again by a later session — fixed by [the task knows its run](plans/2026-11-01-the-task-knows-its-run.md)), but the run itself goes on: a cancelled task's run spends until its own end, and its session is recorded with `applied: false`. Stopping it means reaching the process from `transition_task` — the handle in `state.running` and the cage's process group — so it wants a change of its own. Until then, a cancel stops the task, not the bill.
 
+## Debts from a run that lost its task (6 Nov 2026)
+
+Found by the review of [the task knows its run](plans/2026-11-01-the-task-knows-its-run.md). The first two are older than it, and it added one more way into each; written down rather than widening the fix:
+
+- **A task finished by hand releases nothing.** `release_dependents` has one caller: the end of a run that held its task. A task taken to *Done* by hand keeps what waits on it waiting, forever and with no signal. Moved to *In review* under its run and then approved, a task now ends up there too; before the fix, the run's end released them. Releasing on the move to *Done* has to decide whose deliverables the dependents inherit, so it wants a change of its own.
+- **In progress with nothing running.** A move by hand to *In progress* — review rejected, or blocked and put back — starts no run, and nothing moves the task again. Asked to start it, `start_existing` and the CEO answer `AlreadyRunning`, the false report ADR-0046 removed. Blocked and put back under a live run, a task now stays there when the run ends. `tasks.run_session_id` being NULL now tells the two cases apart: the answer can stop being a guess.
+- **The drawer does not show `applied`.** A session of a cancelled task reads `completed`, with nothing saying the outcome was set aside. The column is there (migration 0035); neither the sessions API nor the drawer reads it.
+- **The CEO's digest reports a handoff as finished.** A run that hands off is `completed` with its task back in the queue, and the digest selects on `completed`. Dependents and memory were fixed in this change by reading the run's bound, which is not stored on the session.
+- **`MEETING_REQUEST.json` is read following links.** `finalize` reads it with `read_to_string` from a directory the agent owns, outside the cage, while `read_own_handoff` goes through `O_NOFOLLOW` for exactly that reason. The content has to parse as a meeting request and is not echoed, so what it can carry looks small, but that has not been assessed. Look at it with the security debts from #114.
+
 ## Debts from the clone (30 Oct 2026)
 
 What [ADR-0052](adr/0052-a-run-owns-its-repository.md) left for later, written down rather than widening the fix:
