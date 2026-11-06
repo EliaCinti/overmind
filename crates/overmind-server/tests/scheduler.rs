@@ -384,20 +384,7 @@ async fn restart_recovery_resumes_orphaned_session() {
 
     // "Second server run" over the same database: its registry is empty, so
     // the heartbeat must recover and resume the orphan.
-    let script_path = root.join("stub2.sh");
-    std::fs::write(&script_path, HAPPY_STUB).expect("write stub");
-    let config = overmind_server::Config {
-        agent_cmd: Some(format!("sh {}", script_path.display())),
-        data_dir: root.join("data"),
-        heartbeat_ms: 100,
-        ..overmind_server::Config::default()
-    };
-    let state2 = overmind_server::init_with(&db_url, config)
-        .await
-        .expect("reopen db");
-    // The same owner, entering a server that has already been claimed.
-    let app2 = common::claimed(overmind_server::app(state2.clone()), &root.join("data")).await;
-    let _scheduler = overmind_server::scheduler::spawn(state2.clone());
+    let (_state2, app2, _scheduler) = restart(&root, &db_url).await;
 
     let session = wait_for_session(&app2, "orphan-sess").await;
     assert_eq!(session["status"], "completed", "session: {session}");
@@ -2040,7 +2027,8 @@ async fn a_task_blocked_and_resumed_by_hand_is_not_the_old_runs_anymore() {
     assert_left_where_the_person_put_it(&env, &task_id, &session_id, "in_progress").await;
 }
 
-/// The server comes back on the same database, with an agent that just works.
+/// The server comes back on the same database, with an agent that just works,
+/// and the same owner enters it: it has already been claimed.
 async fn restart(
     root: &std::path::Path,
     db_url: &str,
