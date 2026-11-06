@@ -384,7 +384,7 @@ async fn restart_recovery_resumes_orphaned_session() {
 
     // "Second server run" over the same database: its registry is empty, so
     // the heartbeat must recover and resume the orphan.
-    let (_state2, app2, _scheduler) = restart(&root, &db_url).await;
+    let (state2, app2, _scheduler) = restart(&root, &db_url).await;
 
     let session = wait_for_session(&app2, "orphan-sess").await;
     assert_eq!(session["status"], "completed", "session: {session}");
