@@ -180,6 +180,12 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// A directory, and not a link to one. A run's directories are the agent's to
+/// replace, and the server that reads them is not in the cage.
+pub fn is_own_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
 /// Every file under `root`, depth-first, as paths relative to it.
 ///
 /// Recursive on purpose: a top-level-only scan silently dropped whatever an
@@ -187,8 +193,14 @@ pub fn human_size(bytes: u64) -> String {
 /// produces more than one thing. Hidden entries and `.git` are skipped — they
 /// are machinery, not deliverables. Bounded so a runaway run cannot fill the
 /// database with a million rows.
+///
+/// Links are not followed, the root included: a `deliverables` an agent replaced
+/// with a link to `~/.ssh` would otherwise be read by a server outside the cage.
 pub async fn collect_files(root: &Path, limit: usize) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
+    if !is_own_dir(root) {
+        return out;
+    }
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
@@ -230,6 +242,23 @@ pub async fn collect_files(root: &Path, limit: usize) -> Vec<(PathBuf, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Entries that are links were always skipped; the root was followed.
+    #[tokio::test]
+    async fn a_root_that_is_a_link_collects_nothing() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("om-root-{}", uuid::Uuid::now_v7()));
+        let real = root.join("real");
+        let link = root.join("link");
+        std::fs::create_dir_all(&real).expect("real dir");
+        std::fs::write(real.join("f.txt"), "x").expect("file");
+        symlink(&real, &link).expect("link");
+        assert_eq!(collect_files(&real, 10).await.len(), 1);
+        assert!(collect_files(&link, 10).await.is_empty());
+        assert!(!is_own_dir(&link));
+        assert!(is_own_dir(&real));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_relative_path_keeps_its_shape_but_cannot_escape() {

@@ -2358,7 +2358,9 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     //
     // Best-effort throughout: the session is already recorded, and a file that
     // cannot be read must not undo that.
-    let delivered: usize = if f.session_status == "completed" {
+    let delivered: usize = if f.session_status == "completed"
+        && files::is_own_dir(&ctx.worktree_dir)
+    {
         let (root, inline_root) = match ctx.exec_kind {
             ExecutionKind::Knowledge => (ctx.worktree_dir.clone(), true),
             ExecutionKind::Code => (ctx.worktree_dir.join(DELIVERABLES_DIR), false),
