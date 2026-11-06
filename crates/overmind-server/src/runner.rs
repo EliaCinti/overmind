@@ -675,7 +675,14 @@ fn server_git(global_config: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.env("GIT_CONFIG_GLOBAL", global_config)
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .args(GIT_RUNS_NOTHING);
+        .args(GIT_RUNS_NOTHING)
+        // Read from `~/.config/git` whatever the two variables above say.
+        .args([
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+        ]);
     cmd
 }
 
@@ -3120,6 +3127,9 @@ mod server_git_tests {
         )
         .expect("hook");
         crate::sandbox::set_mode(&hook, 0o755).expect("hook mode");
+        // Read beside any config file, whatever `GIT_CONFIG_GLOBAL` says.
+        std::fs::create_dir_all(home.join(".config/git")).expect("xdg dir");
+        std::fs::write(home.join(".config/git/ignore"), "*.planted\n").expect("xdg ignore");
         std::fs::write(
             home.join(".gitconfig"),
             format!(
@@ -3218,6 +3228,26 @@ mod server_git_tests {
             .env_remove("GIT_CONFIG_GLOBAL")
             .env_remove("XDG_CONFIG_HOME");
         run_git(checkout, None).await.expect("the plain checkout");
+        // The file of ignores in `~/.config/git`, asked about in each clone.
+        let ignored = |cmd: Command| async { run_git(cmd, None).await.is_ok() };
+        let mut asked = git_command(&served, &["check-ignore", "-q", "a.planted"]);
+        asked.env("HOME", &home);
+        assert!(
+            !ignored(asked).await,
+            "the host's ~/.config/git/ignore reached the server's git"
+        );
+        let mut asked = Command::new("git");
+        asked
+            .args(["check-ignore", "-q", "a.planted"])
+            .current_dir(&plain)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME");
+        assert!(
+            ignored(asked).await,
+            "the planted ignore is never read: a broken probe"
+        );
         assert!(
             marker.exists(),
             "the planted hook never runs: a broken probe"

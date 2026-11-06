@@ -847,6 +847,9 @@ pub(crate) fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 ///   configure its own helper in `.git/config`, and the run directory is
 ///   writable, so an agent could otherwise configure one for itself. An empty
 ///   value resets the list rather than adding to it.
+/// - `core.excludesFile` and `core.attributesFile` go to `/dev/null`: git reads
+///   them from `~/.config/git` whatever `GIT_CONFIG_GLOBAL` says, the cage
+///   denies them (ADR-0053), and every git would warn about the denial.
 /// - No prompt, no askpass, and no ssh transport at all.
 ///
 /// Measured, not assumed: outside any sandbox, the same push against a
@@ -871,13 +874,17 @@ pub fn git_isolation() -> Vec<(&'static str, String)> {
         // turns a confusing host-key error into a plain refusal.
         ("GIT_SSH_COMMAND", "/usr/bin/false".into()),
         // Command-line precedence, so a repository cannot out-configure it.
-        ("GIT_CONFIG_COUNT", "3".into()),
+        ("GIT_CONFIG_COUNT", "5".into()),
         ("GIT_CONFIG_KEY_0", "user.name".into()),
         ("GIT_CONFIG_VALUE_0", "Overmind agent".into()),
         ("GIT_CONFIG_KEY_1", "user.email".into()),
         ("GIT_CONFIG_VALUE_1", "agent@overmind.local".into()),
         ("GIT_CONFIG_KEY_2", "credential.helper".into()),
         ("GIT_CONFIG_VALUE_2", String::new()),
+        ("GIT_CONFIG_KEY_3", "core.excludesFile".into()),
+        ("GIT_CONFIG_VALUE_3", "/dev/null".into()),
+        ("GIT_CONFIG_KEY_4", "core.attributesFile".into()),
+        ("GIT_CONFIG_VALUE_4", "/dev/null".into()),
     ]
 }
 
@@ -1227,6 +1234,16 @@ probe write_cli_state write "$H/.claude/settings.json"
             Some("credential.helper")
         );
         assert_eq!(env.get("GIT_CONFIG_VALUE_2").map(String::as_str), Some(""));
+        // Read from `~/.config/git` whatever `GIT_CONFIG_GLOBAL` says, and the
+        // cage denies them: without these keys every git warns about the denial.
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_3").map(String::as_str),
+            Some("core.excludesFile")
+        );
+        assert_eq!(
+            env.get("GIT_CONFIG_KEY_4").map(String::as_str),
+            Some("core.attributesFile")
+        );
     }
 
     /// Root is not an unprivileged uid, whoever we are when we ask.
