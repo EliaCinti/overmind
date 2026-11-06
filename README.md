@@ -410,7 +410,7 @@ Agents can hold **MCP tools** beyond Overmind's own — the first was Blender, d
 
 - **The owner grants** per agent — a *Tools* field in the hire dialog, the same chips on the agent's card afterwards (`POST /api/agents/{id}/tools`). An agent holds exactly what it was granted, written into its run's own MCP config under `--strict-mcp-config`: never something it found. A tool in `"exclusive"` fits **one hand at a time** — granting it to a second agent is refused with the holder's name (Blender has one socket).
 
-The tool's *process* is spawned where the CLI runs; what it talks to must be up: for Blender, the application open with the BlenderMCP addon serving on its port, and `uv` installed (`brew install uv`) with its cache allowed through the cage (`OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv:$HOME/.local/share/uv"`).
+The tool's *process* is spawned where the CLI runs; what it talks to must be up: for Blender, the application open with the BlenderMCP addon serving on its port, and `uv` installed (`brew install uv`) with its cache allowed through the cage and its tool directory moved into that cache: `OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv"` and `UV_TOOL_DIR="$HOME/.cache/uv/overmind-tools"`. Do not grant `~/.local/share/uv`: the tools your host runs are installed there ([ADR-0053](docs/adr/0053-the-cage-grants-nothing-the-host-runs.md)).
 
 **In the image, that sentence becomes a boundary.** The CLI runs inside the container, so a tool that drives an application on *your desktop* belongs to a native install, not to the image — Blender is the case. The published image carries no `uv`, and the BlenderMCP addon binds its socket to loopback, where a connection from a container never arrives; opening that socket wider would publish arbitrary Python execution inside Blender to the network. Tools that are *themselves* processes — a filesystem, a database, a headless browser — travel into the image with none of this. The reasoning in full, and what it would take to change it, is in [`docs/TOOLS.md`](docs/TOOLS.md#blender-needs-the-native-install-not-the-image).
 
@@ -466,6 +466,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |
 | `OVERMIND_SANDBOX` | `off` empties the whole set of cage mechanisms — agents become read-only (default on) |
 | `OVERMIND_SANDBOX_ALLOW` | Colon-separated extra writable paths, to fit a toolchain without turning the cage off |
+| `OVERMIND_SANDBOX_READ` | Colon-separated extra paths the cage may read and never write. Since [ADR-0053](docs/adr/0053-the-cage-grants-nothing-the-host-runs.md) the cage grants nothing under `~/.config` and only the CLI's own install under `~/.local`: a toolchain that needs more names it here, or in `OVERMIND_SANDBOX_ALLOW` if it has to write |
 | `OVERMIND_AGENT_UID` / `OVERMIND_AGENT_GID` | Unprivileged uid/gid agent work runs as (the image uses `10001`; on Linux set your own `id -u` so `code` tasks can write mounted repos) |
 | `OVERMIND_AGENT_HOME` | The agent's own writable `HOME` (the image: `/home/agent`) |
 | `OVERMIND_REPOS_DIR` | Where mounted repositories live, so a wrong workspace path gets an answer naming what is visible (the image: `/repos`) |

@@ -126,7 +126,7 @@ impl Confinement {
 /// Shared by both mechanisms that need the answer, because two lists would
 /// eventually disagree and the disagreement would be a cage that grants
 /// different things depending on which kernel you are on.
-fn writable_paths(config: &Config, cage: &Cage<'_>) -> Vec<PathBuf> {
+fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut writable: Vec<PathBuf> = Vec::new();
     writable.extend(real_path(cage.run_dir));
     writable.extend(real_path(&std::env::temp_dir()));
@@ -138,9 +138,20 @@ fn writable_paths(config: &Config, cage: &Cage<'_>) -> Vec<PathBuf> {
     // whose whole `.git` is in its run directory; granting the operator's
     // repository let an agent plant hooks and config there, which then ran as
     // the server at the next checkout and as the owner on the host.
-    writable.extend(adapter_paths().iter().filter_map(|p| real_path(p)));
+    writable.extend(adapter_paths(home).iter().filter_map(|p| real_path(p)));
     writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
     writable
+}
+
+/// What a run may read and never write, beyond the system paths. One list for
+/// both mechanisms, for the reason [`writable_paths`] is one.
+fn readable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<PathBuf> {
+    adapter_read_paths(home)
+        .iter()
+        .chain(cage.readable)
+        .chain(&config.sandbox_read)
+        .filter_map(|p| real_path(p))
+        .collect()
 }
 
 /// What agent runs will get, for the line the server prints at startup.
@@ -175,7 +186,17 @@ pub fn announce(config: &Config) -> String {
             None => "none on this platform — agents are read-only".to_string(),
         };
     }
-    held.join(" + ")
+    let held = held.join(" + ");
+    // The image's agent has a home of its own and the uid is the boundary. On a
+    // host the home is the owner's, and the line says what that leaves open.
+    if agent_user(config).is_some() {
+        return held;
+    }
+    format!(
+        "{held} — not a boundary against a hostile agent: ~/.claude stays writable, and a hook \
+         planted there runs as you (ADR-0053). A toolchain the cage refuses is fitted with \
+         OVERMIND_SANDBOX_READ or OVERMIND_SANDBOX_ALLOW"
+    )
 }
 
 /// Is the macOS mechanism available? Used by its own tests, which have nothing
@@ -225,18 +246,25 @@ fn agent_user(config: &Config) -> Option<AgentUser> {
 
 /// Which mechanisms hold this run.
 pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    confinement_in(config, cage, home.as_deref())
+}
+
+/// [`confinement`] with the host's home as an argument, so what it grants there
+/// can be tested without changing `HOME` for a whole test process.
+fn confinement_in(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Confinement {
     if !config.sandbox {
         return Confinement::default();
     }
     Confinement {
         profile: if profile_available() {
-            profile(config, cage)
+            profile(config, cage, home)
         } else {
             None
         },
         agent_user: agent_user(config),
         #[cfg(target_os = "linux")]
-        landlock: build_landlock(config, cage),
+        landlock: build_landlock(config, cage, home),
     }
 }
 
@@ -251,6 +279,7 @@ pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
 fn build_landlock(
     config: &Config,
     cage: &Cage<'_>,
+    home: Option<&Path>,
 ) -> Option<std::sync::Arc<crate::landlock::Ruleset>> {
     crate::landlock::abi()?;
     // Enough of the system to exist: the loader, the shells, the toolchain —
@@ -263,8 +292,9 @@ fn build_landlock(
     .iter()
     .map(Path::new)
     .collect();
-    readable.extend(cage.readable.iter().map(PathBuf::as_path));
-    let mut writable = writable_paths(config, cage);
+    let granted = readable_paths(config, cage, home);
+    readable.extend(granted.iter().map(PathBuf::as_path));
+    let mut writable = writable_paths(config, cage, home);
     writable.push(PathBuf::from("/dev"));
 
     match crate::landlock::build(&writable, &readable) {
@@ -290,26 +320,28 @@ fn quote(path: &Path) -> Option<String> {
     Some(s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Paths the adapter itself needs, which are an installation fact rather than
+/// Paths the adapter has to *write*, which are an installation fact rather than
 /// something we get to decide. Defaults suit a standard Claude Code install;
-/// `OVERMIND_SANDBOX_ALLOW` covers anything else.
-fn adapter_paths() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+/// `OVERMIND_SANDBOX_ALLOW` and `OVERMIND_SANDBOX_READ` cover anything else.
+///
+/// The rule is ADR-0053's: a path enters only if the run needs it, with the
+/// least access the run needs, and a path the host executes or reads as
+/// configuration does not enter writable.
+///
+/// These two break that rule and the break is stated, not fixed here: the CLI
+/// writes them on every run while it runs on the host's login, and a hook
+/// planted in them runs as the owner at their next Claude Code session. It
+/// closes with the agent's own home on the native instance (M34 step 4).
+fn adapter_paths(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else {
         return Vec::new();
     };
-    vec![
-        // Where the binary lives (a symlink into `.local/share` on a current
-        // install, so the whole tree is granted rather than the link alone).
-        home.join(".local"),
-        // Where it keeps credentials, sessions and settings.
-        home.join(".claude"),
-        home.join(".claude.json"),
-        // Shared tool configuration a coding task legitimately reads.
-        home.join(".config"),
-    ]
+    // Where it keeps credentials, sessions and settings.
+    vec![home.join(".claude"), home.join(".claude.json")]
 }
 
-/// Paths the adapter needs to *read* for its own sign-in, never to write (M23).
+/// Paths the adapter needs to *read*, never to write: its own sign-in (M23) and
+/// its own install (ADR-0053).
 ///
 /// A subscription's OAuth token lives in the login Keychain on macOS --
 /// `~/Library/Keychains` -- not under `~/.claude`, which is why the cage
@@ -318,13 +350,19 @@ fn adapter_paths() -> Vec<PathBuf> {
 /// live the day the owner asked whether his plan works. Keychain items stay
 /// encrypted and per-item ACLs are enforced by securityd either way; this
 /// grants the file, not the secrets.
-fn adapter_read_paths() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+fn adapter_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else {
         return Vec::new();
     };
     vec![
         home.join("Library/Keychains"),
         home.join("Library/Preferences"),
+        // Where the binary lives: a symlink in `bin` into `share/claude`. The
+        // agent runs it and never replaces it, since the host runs it too. So
+        // the CLI cannot update itself from inside a run, which is the host's
+        // job (ADR-0053).
+        home.join(".local/bin"),
+        home.join(".local/share/claude"),
     ]
 }
 
@@ -354,7 +392,7 @@ fn real_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// The profile text for one run.
-fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
+fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
     // cage and no `--dangerously-skip-permissions` — the same safe direction
     // an unquotable path takes below.
@@ -362,7 +400,7 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     // One list, shared with Landlock: two would eventually disagree, and the
     // disagreement would be a cage that grants different things depending on
     // which kernel you happen to be on.
-    let mut writable = writable_paths(config, cage);
+    let mut writable = writable_paths(config, cage, home);
     // Temp: compilers, package managers and the test stubs all expect it. This
     // session's TMPDIR is already in the shared list, resolved through the
     // /var -> /private symlink because sandbox rules match the real path —
@@ -372,13 +410,8 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
     writable.push(PathBuf::from("/private/tmp"));
 
     let mut allow_read = String::new();
-    for p in adapter_read_paths()
-        .into_iter()
-        .chain(cage.readable.iter().cloned())
-    {
-        if let Some(rp) = real_path(&p)
-            && let Some(q) = quote(&rp)
-        {
+    for p in readable_paths(config, cage, home) {
+        if let Some(q) = quote(&p) {
             allow_read.push_str(&format!("  (subpath \"{q}\")\n"));
         }
     }
@@ -407,12 +440,13 @@ fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
 
 ; The adapter's own sign-in, readable and never writable: a subscription's
 ; token lives in the login Keychain, and a cage that starves the adapter of
-; its credential kills the run before the first word (M23). Also the cage's
-; read-only paths: a git dir from before ADR-0052, for its diff.
+; its credential kills the run before the first word (M23). Also its install,
+; which the host runs (ADR-0053), a git dir from before ADR-0052, for its diff,
+; and what the operator named in OVERMIND_SANDBOX_READ.
 (allow file-read*
 {allow_read})
 
-; The run's own directory, temp, and whatever the adapter needs to exist.
+; The run's own directory, temp, and whatever the adapter has to write.
 (allow file*
 {allow_write})
 
@@ -857,6 +891,200 @@ mod tests {
         }
     }
 
+    /// The profile on this machine's own home, which is what most tests ask.
+    fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        super::profile(config, cage, home.as_deref())
+    }
+
+    /// A home nobody has, so its name appears in a profile only if granted.
+    const NO_ONES_HOME: &str = "/no-ones-home";
+
+    /// The profile's read-only stanza and its writable one.
+    fn stanzas(text: &str) -> (&str, &str) {
+        let (reads, write) = text.split_once("(allow file*\n").expect("write stanza");
+        let read = reads
+            .split("(allow file-read*\n")
+            .nth(2)
+            .expect("read stanza");
+        (read, write)
+    }
+
+    /// The owner's keys live under `~/.config`, and what an agent can read it
+    /// can send (ADR-0053). Neither to read nor to write.
+    #[test]
+    fn the_cage_grants_nothing_under_config() {
+        let home = Path::new(NO_ONES_HOME);
+        let cfg = config(Vec::new());
+        let cage = Cage::new(Path::new("/tmp/x"));
+        let text = super::profile(&cfg, &cage, Some(home)).expect("profile");
+        assert!(!text.contains("/no-ones-home/.config"), "{text}");
+        let config_dir = home.join(".config");
+        assert!(!writable_paths(&cfg, &cage, Some(home)).contains(&config_dir));
+        assert!(!readable_paths(&cfg, &cage, Some(home)).contains(&config_dir));
+    }
+
+    /// The host runs `~/.local/bin`, so the agent may run it too and never
+    /// replace it. And only the adapter's corner of `~/.local/share`, where
+    /// every other tool's data is. `~/.claude` stays writable, which is the
+    /// hole ADR-0053 states rather than closes.
+    #[test]
+    fn the_adapters_install_is_readable_and_never_writable() {
+        let home = Path::new(NO_ONES_HOME);
+        let cfg = config(Vec::new());
+        let cage = Cage::new(Path::new("/tmp/x"));
+        let text = super::profile(&cfg, &cage, Some(home)).expect("profile");
+        let (read, write) = stanzas(&text);
+        assert!(
+            read.contains("(subpath \"/no-ones-home/.local/bin\")"),
+            "{text}"
+        );
+        assert!(
+            read.contains("(subpath \"/no-ones-home/.local/share/claude\")"),
+            "{text}"
+        );
+        assert!(
+            !read.contains("(subpath \"/no-ones-home/.local\")"),
+            "{text}"
+        );
+        assert!(!write.contains("/no-ones-home/.local"), "{text}");
+        assert!(
+            write.contains("(subpath \"/no-ones-home/.claude\")"),
+            "{text}"
+        );
+
+        // The same answer from the lists Landlock is built from.
+        let writable = writable_paths(&cfg, &cage, Some(home));
+        let readable = readable_paths(&cfg, &cage, Some(home));
+        assert!(!writable.iter().any(|p| p.starts_with(home.join(".local"))));
+        assert!(readable.contains(&home.join(".local/bin")));
+        assert!(readable.contains(&home.join(".local/share/claude")));
+    }
+
+    /// `OVERMIND_SANDBOX_READ`: a toolchain the agent has to read no longer has
+    /// to be granted writable (ADR-0053).
+    #[test]
+    fn a_read_only_allow_is_never_writable() {
+        let tool = PathBuf::from("/srv/a-readable-tool");
+        let cfg = Config {
+            sandbox_read: vec![tool.clone()],
+            ..config(Vec::new())
+        };
+        let cage = Cage::new(Path::new("/tmp/x"));
+        let text = super::profile(&cfg, &cage, None).expect("profile");
+        let (read, write) = stanzas(&text);
+        assert!(
+            read.contains("(subpath \"/srv/a-readable-tool\")"),
+            "{text}"
+        );
+        assert!(!write.contains("a-readable-tool"), "{text}");
+        assert!(readable_paths(&cfg, &cage, None).contains(&tool));
+        assert!(!writable_paths(&cfg, &cage, None).contains(&tool));
+    }
+
+    /// What a script reaches in a home laid out like a real one.
+    ///
+    /// Each answer is one line, `name=REACHABLE` or `name=DENIED`.
+    const HOME_PROBE: &str = r#"
+probe() { name=$1; shift; if "$@" >/dev/null 2>&1; then echo "$name=REACHABLE"; else echo "$name=DENIED"; fi; }
+write() { echo planted > "$1"; }
+probe read_keys cat "$H/.config/keys.env"
+probe plant_git_config write "$H/.config/git/config"
+probe run_cli "$H/.local/bin/cli"
+probe plant_cli write "$H/.local/bin/planted"
+probe read_cli_install cat "$H/.local/share/claude/version"
+probe plant_cli_install write "$H/.local/share/claude/planted"
+probe read_other_tool cat "$H/.local/share/other/secret"
+probe write_cli_state write "$H/.claude/settings.json"
+"#;
+
+    /// Run [`HOME_PROBE`] under `held`, from `run_dir`, and read its answers.
+    async fn probe_home(
+        cfg: &Config,
+        held: &Confinement,
+        home: &Path,
+        run_dir: &Path,
+    ) -> std::collections::HashMap<String, String> {
+        let out = caged_shell(cfg, held, HOME_PROBE)
+            .env("H", home)
+            .current_dir(run_dir)
+            .output()
+            .await
+            .expect("run the probe");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// ADR-0053 through a real cage, paired against the same script uncaged.
+    ///
+    /// The home and the run are **outside temp**, which the cage grants
+    /// outright: a home under it would answer REACHABLE through that grant, and
+    /// nothing here would be about the home.
+    #[tokio::test]
+    async fn an_agent_cannot_read_or_plant_in_the_hosts_config() {
+        let root = std::path::absolute(format!(
+            "target/overmind-home-{}",
+            uuid::Uuid::now_v7().simple()
+        ))
+        .expect("absolute root");
+        let home = root.join("home");
+        let run_dir = root.join("run");
+        for dir in [
+            ".config/git",
+            ".local/bin",
+            ".local/share/claude",
+            ".local/share/other",
+            ".claude",
+        ] {
+            std::fs::create_dir_all(home.join(dir)).expect("home dir");
+        }
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(home.join(".config/keys.env"), "KEY=x\n").expect("keys");
+        std::fs::write(home.join(".local/share/claude/version"), "1\n").expect("install");
+        std::fs::write(home.join(".local/share/other/secret"), "x\n").expect("other");
+        let cli = home.join(".local/bin/cli");
+        std::fs::write(&cli, "#!/bin/sh\nexit 0\n").expect("cli");
+        set_mode(&cli, 0o755).expect("cli mode");
+
+        let cfg = config(Vec::new());
+        let held = confinement_in(&cfg, &Cage::new(&run_dir), Some(&home));
+        if !held.is_real() {
+            eprintln!("no cage on this platform — skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let caged = probe_home(&cfg, &held, &home, &run_dir).await;
+        let open = probe_home(&cfg, &Confinement::default(), &home, &run_dir).await;
+        let _ = std::fs::remove_dir_all(&root);
+
+        for (name, expected) in [
+            ("read_keys", "DENIED"),
+            ("plant_git_config", "DENIED"),
+            ("plant_cli", "DENIED"),
+            ("plant_cli_install", "DENIED"),
+            ("read_other_tool", "DENIED"),
+            // The adapter still works, and the hole ADR-0053 states is there.
+            ("run_cli", "REACHABLE"),
+            ("read_cli_install", "REACHABLE"),
+            ("write_cli_state", "REACHABLE"),
+        ] {
+            assert_eq!(
+                caged.get(name).map(String::as_str),
+                Some(expected),
+                "{name}: {caged:?}"
+            );
+            // Without which a denial is a broken probe, not a boundary.
+            assert_eq!(
+                open.get(name).map(String::as_str),
+                Some("REACHABLE"),
+                "{name}, uncaged: {open:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_run_directory_is_writable_and_nothing_else_is_named() {
         let cfg = config(Vec::new());
@@ -1058,6 +1286,20 @@ mod tests {
         if profile_available() {
             assert!(said.contains("sandbox-exec"), "{said}");
         }
+    }
+
+    /// ADR-0053 decision 6: on a host, the line says what the cage leaves open
+    /// and how a toolchain it refuses is fitted.
+    #[test]
+    fn the_startup_line_states_what_the_cage_leaves_open_on_a_host() {
+        let said = announce(&Config::default());
+        if said.contains("read-only") {
+            eprintln!("no cage on this platform — skipping");
+            return;
+        }
+        assert!(said.contains("~/.claude"), "{said}");
+        assert!(said.contains("OVERMIND_SANDBOX_READ"), "{said}");
+        assert!(said.contains("OVERMIND_SANDBOX_ALLOW"), "{said}");
     }
 
     #[test]
