@@ -61,6 +61,7 @@ case "$OVERMIND_TASK_PROMPT" in
     ;;
   *)
     while [ -f "$(dirname "$0")/hold" ]; do sleep 0.05; done
+    [ -f "$(dirname "$0")/hand_off" ] && echo "Manca la seconda parte." > HANDOFF.md
     echo "Studio completo." > studio.md
     echo '{{"type":"result","result":"LAVORO-FATTO: ho studiato tutto.","total_cost_usd":0.001,"session_id":"s"}}'
     ;;
@@ -283,6 +284,33 @@ async fn a_run_of_a_cancelled_task_earns_no_update() {
         messages(&env).await.len(),
         before,
         "no update about thrown-away work: {:?}",
+        messages(&env).await
+    );
+}
+
+/// A run that hands off is `completed` with its task back in the queue: the
+/// work is not finished, and the thread does not hear that it is.
+#[tokio::test]
+async fn a_run_that_hands_off_earns_no_update() {
+    let env = setup("AGGIORNAMENTO: Tobia ha consegnato.").await;
+    std::fs::write(env.root.join("hand_off"), "").expect("make the run hand off");
+    brief_and_finish(&env).await;
+    let handoffs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM task_artifacts WHERE kind = 'handoff'")
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("query");
+    assert!(handoffs >= 1, "the run handed off");
+    let before = messages(&env).await.len();
+
+    overmind_server::scheduler::beat(&env.state)
+        .await
+        .expect("beat");
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        messages(&env).await.len(),
+        before,
+        "no update about unfinished work: {:?}",
         messages(&env).await
     );
 }
