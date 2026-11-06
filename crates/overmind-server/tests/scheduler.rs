@@ -1988,6 +1988,11 @@ async fn a_session_of_a_cancelled_task_is_not_resumed_after_a_restart() {
     .await
     .expect("mark task in progress");
     move_by_hand(&env, &task_id, "cancelled").await;
+    sqlx::query("UPDATE companies SET language = 'it' WHERE id = ?")
+        .bind(&env.company_id)
+        .execute(&env.state.pool)
+        .await
+        .expect("an Italian company");
     env.state.pool.close().await;
 
     let script_path = root.join("stub2.sh");
@@ -2006,6 +2011,14 @@ async fn a_session_of_a_cancelled_task_is_not_resumed_after_a_restart() {
 
     let session = wait_for_session(&app2, "orphan-sess").await;
     assert_eq!(session["status"], "failed", "{session}");
+    // The person reads why, in the company's language.
+    assert!(
+        session["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("non è stata ripresa"),
+        "{session}"
+    );
     assert!(
         !orphan_wt.join("result.txt").exists(),
         "the agent did not run again"

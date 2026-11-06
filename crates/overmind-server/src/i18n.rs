@@ -163,6 +163,15 @@ pub fn branch_not_returned(code: &str) -> String {
     }
 }
 
+/// The line a session carries when a restart found its task no longer its own.
+/// Where the task stands is on the chain (`session.finished`), and on the board.
+pub fn run_not_resumed(code: &str) -> String {
+    match code {
+        "it" => "Questa esecuzione non è stata ripresa dopo il riavvio: il suo task è stato spostato nel frattempo.".to_string(),
+        _ => "This run was not resumed after the restart: its task was moved in the meantime.".to_string(),
+    }
+}
+
 /// Why a run stopped short of done, for its handoff (ADR-0050 §4).
 pub enum Stop {
     TimedOut(u64),

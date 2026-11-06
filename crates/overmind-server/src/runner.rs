@@ -1518,13 +1518,10 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     // A session that no longer holds its task, or whose worktree is gone,
     // cannot be resumed: fail it, and release the task only if it was its own.
     // A task started again holds a newer run, which is the one to resume.
-    let (owned, task_status) =
-        owns(&mut *state.pool.acquire().await?, &task_id, session_id).await?;
+    let (owned, _) = owns(&mut *state.pool.acquire().await?, &task_id, session_id).await?;
     if !owned || !ctx.worktree_dir.is_dir() {
-        let error = if task_status != "in_progress" {
-            format!("cannot resume: task is '{task_status}'")
-        } else if !owned {
-            "cannot resume: the task is no longer this run's".to_string()
+        let error = if !owned {
+            crate::i18n::run_not_resumed(&crate::i18n::company_language(state, &company_id).await)
         } else {
             "cannot resume: worktree is missing".to_string()
         };
