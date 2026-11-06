@@ -465,7 +465,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_MEMORY_POOL` | Concurrent memory connections (default `4`) |
 | `OVERMIND_MANAGED_BRAIN` | `off` = one shared brain instead of one per company (default on) |
 | `OVERMIND_SANDBOX` | `off` empties the whole set of cage mechanisms — agents become read-only (default on) |
-| `OVERMIND_SANDBOX_ALLOW` | Colon-separated extra writable paths, to fit a toolchain without turning the cage off |
+| `OVERMIND_SANDBOX_ALLOW` | Colon-separated extra writable paths, to fit a toolchain without turning the cage off. A path that is a link is not granted: name the real place |
 | `OVERMIND_SANDBOX_READ` | Colon-separated extra paths the cage may read and never write. Since [ADR-0053](docs/adr/0053-the-cage-grants-nothing-the-host-runs.md) the cage grants nothing under `~/.config` and only the CLI's own install under `~/.local`: a toolchain that needs more names it here, or in `OVERMIND_SANDBOX_ALLOW` if it has to write. A path under a writable grant stays writable |
 | `OVERMIND_AGENT_UID` / `OVERMIND_AGENT_GID` | Unprivileged uid/gid agent work runs as (the image uses `10001`; on Linux set your own `id -u` so `code` tasks can write mounted repos) |
 | `OVERMIND_AGENT_HOME` | The agent's own writable `HOME` (the image: `/home/agent`) |
