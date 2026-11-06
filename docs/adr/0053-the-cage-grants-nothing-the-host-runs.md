@@ -3,7 +3,7 @@
 - **Date:** 2026-11-06
 - **Status:** accepted (2026-11-06), with the owner's approval of the plan that implements it
 - **Corrects:** `adapter_paths` in `sandbox.rs`, in force since [ADR-0023](0023-os-level-sandboxing.md)
-- **Builds on:** [ADR-0023](0023-os-level-sandboxing.md) (deny by default), [ADR-0029](0029-the-cage-inside-the-container.md) (the cage is a set of mechanisms), [ADR-0052](0052-a-run-owns-its-repository.md) (the same hole, in the operator's repository), [ADR-0051](0051-an-account-is-connected-not-configured.md) (the host's login is never used implicitly)
+- **Builds on:** [ADR-0023](0023-os-level-sandboxing.md) (deny by default), [ADR-0029](0029-the-cage-inside-the-container.md) (the cage is a set of mechanisms), [ADR-0052](0052-a-run-owns-its-repository.md) (the same hole, in the operator's repository), ADR-0051, in a later docs PR (the host's login is never used implicitly)
 - **Plan:** [what the cage grants on the host](../plans/2026-11-06-what-the-cage-grants-on-the-host.md)
 - **Amended by:** the [addendum](#addendum--uvx-needs-no-grant-on-localshareuv-2026-11-06) below, on what `uvx` needs
 
@@ -83,6 +83,10 @@ The live check of this ADR's plan found two things wrong in decision 4 and in th
 
 With the third row and `OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv"`, the real CLI reports the tool `connected`, through the real cage.
 
-**Decision.** `~/.local/share/uv` is not granted at all. A `uvx` tool runs with `UV_TOOL_DIR` under `~/.cache/uv`, set in the server's environment, and that is what the native instance's `start.sh`, the README and `docs/TOOLS.md` say. This narrows the risk this ADR already states for `~/.cache/uv` no further: a poisoned cache can still reach the host's `uv`.
+A Python that `uv` manages itself lives under the same directory, and installing one there is refused too. Measured with `UV_PYTHON_PREFERENCE=only-managed`: `failed to create directory ~/.local/share/uv/python`, and it runs with `UV_PYTHON_INSTALL_DIR` moved.
 
-`OVERMIND_SANDBOX_READ` stays. It is measured to read and not write, and the README keeps it as the way to fit a toolchain that only has to read. One case is **not measured**: on this machine `uv` uses Homebrew's Python, so a Python that `uv` itself manages under `~/.local/share/uv/python` may need a read grant there.
+**Decision.** `~/.local/share/uv` is not granted at all. A `uvx` tool runs with `UV_TOOL_DIR` and `UV_PYTHON_INSTALL_DIR` under `~/.cache/uv`, set in the server's environment, and that is what the native instance's `start.sh`, the README and `docs/TOOLS.md` say. It does not reduce the risk this ADR states for `~/.cache/uv`, and it widens where that risk reaches: anything the host or the server launches through `uv` with these variables runs what an agent could have planted there. The documented memory server is plain `wadachi`, which does not.
+
+`OVERMIND_SANDBOX_READ` stays. It is measured to read and not write, and the README keeps it as the way to fit a toolchain that only has to read.
+
+**Decision 5 was also narrower than it read.** `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` do not cover `~/.config/git/ignore` and `attributes`, which git reads regardless. `core.excludesFile` and `core.attributesFile` now point at `/dev/null`, for the server's git and the agent's.

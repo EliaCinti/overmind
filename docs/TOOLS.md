@@ -119,8 +119,9 @@ made *with* the tools instead of around them.
   the tool needs paths the cage denies (a package cache, a socket file), open
   exactly those with `OVERMIND_SANDBOX_ALLOW`, or `OVERMIND_SANDBOX_READ` if it
   only has to read — colon-separated paths — rather than turning the cage off.
-  For `uvx`-launched tools: `OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv"` and
-  `UV_TOOL_DIR="$HOME/.cache/uv/overmind-tools"`. Do not grant
+  For `uvx`-launched tools: `OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv"`,
+  `UV_TOOL_DIR="$HOME/.cache/uv/overmind-tools"` and
+  `UV_PYTHON_INSTALL_DIR="$HOME/.cache/uv/overmind-python"`. Do not grant
   `~/.local/share/uv`: the tools your host runs are installed there
   ([ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md)).
 - **What the tool talks to is a door you opened.** BlenderMCP reaches your
@@ -147,12 +148,13 @@ made *with* the tools instead of around them.
 3. Declare it — [`docs/examples/agent-tools.blender.json`](examples/agent-tools.blender.json)
    is ready: `blender` via `uvx blender-mcp`, marked `exclusive`.
 4. Start Overmind with the registry, the uv cache allowed through the cage and
-   uv's tool directory moved into that cache:
+   uv's tool and Python directories moved into that cache:
 
    ```sh
    OVERMIND_AGENT_TOOLS=docs/examples/agent-tools.blender.json \
    OVERMIND_SANDBOX_ALLOW="$HOME/.cache/uv" \
    UV_TOOL_DIR="$HOME/.cache/uv/overmind-tools" \
+   UV_PYTHON_INSTALL_DIR="$HOME/.cache/uv/overmind-python" \
    cargo run
    ```
 5. Grant `blender` to **one** modeler agent. Give tasks through the CEO;
@@ -222,7 +224,7 @@ want Blender, run Overmind natively.
 | Grant refused naming another agent | The tool is in `exclusive` | Take it out of that agent's hand first (Org → Edit), then grant. |
 | The agent reports the tool "could not connect" | The tool's target is not up (Blender closed, addon not serving, DB down) | Start the target, re-run the task. Overmind cannot start GUI applications for you. |
 | A desktop tool never connects, and Overmind runs in Docker | The application is on the host, the CLI is in the container | Expected, not a fault: see [Blender needs the native install](#blender-needs-the-native-install-not-the-image). Run natively for tools that drive a desktop app. |
-| `uvx`/`npx` "not found" or dies instantly in a run | The launcher is not installed, or its cache is denied by the cage | Install it (`brew install uv` / Node), and allow its cache: `OVERMIND_SANDBOX_ALLOW`. For `uvx`, `Could not create temporary file` under `~/.local/share/uv` means `UV_TOOL_DIR` is not set. |
+| `uvx`/`npx` "not found" or dies instantly in a run | The launcher is not installed, or its cache is denied by the cage | Install it (`brew install uv` / Node), and allow its cache: `OVERMIND_SANDBOX_ALLOW`. For `uvx`, `Could not create temporary file` or `failed to create directory` under `~/.local/share/uv` means `UV_TOOL_DIR` or `UV_PYTHON_INSTALL_DIR` is not set. |
 | Tool works in a task but not in chat | You are on a pre-M28 build | Update: since ADR-0036 conversational turns carry the granted servers too. |
 | Registry edited but nothing changed | The file is read at startup | Restart Overmind. |
 
