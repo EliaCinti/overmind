@@ -1551,11 +1551,14 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
 
     // A session whose task is no longer in progress, or whose worktree is
     // gone, cannot be resumed: fail it and release the task.
-    if task_status != "in_progress" || !ctx.worktree_dir.is_dir() {
+    //
+    // A link is gone too: the cage does not follow one (ADR-0053), so a resume
+    // there would run with no cage, in whatever the link points at.
+    if task_status != "in_progress" || !files::is_own_dir(&ctx.worktree_dir) {
         let error = if task_status != "in_progress" {
             format!("cannot resume: task is '{task_status}'")
         } else {
-            "cannot resume: worktree is missing".to_string()
+            "cannot resume: worktree is missing or has been replaced".to_string()
         };
         let release = task_status == "in_progress";
         finalize(&ctx, Outcome::Infra { error, release }).await?;

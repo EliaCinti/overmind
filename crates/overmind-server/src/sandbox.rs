@@ -128,7 +128,7 @@ impl Confinement {
 /// different things depending on which kernel you are on.
 fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut writable: Vec<PathBuf> = Vec::new();
-    writable.extend(real_path(cage.run_dir));
+    writable.extend(path_the_agent_owns(cage.run_dir));
     writable.extend(real_path(&std::env::temp_dir()));
     // Where the adapter keeps credentials and state. In the image this is the
     // agent's own home; on a machine it is the user's, and the run would fail
@@ -138,7 +138,11 @@ fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<
     // whose whole `.git` is in its run directory; granting the operator's
     // repository let an agent plant hooks and config there, which then ran as
     // the server at the next checkout and as the owner on the host.
-    writable.extend(adapter_paths(home).iter().filter_map(|p| real_path(p)));
+    writable.extend(
+        adapter_paths(home)
+            .iter()
+            .filter_map(|p| path_the_agent_owns(p)),
+    );
     writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
     writable
 }
@@ -391,6 +395,29 @@ fn real_path(path: &Path) -> Option<PathBuf> {
     Some(abs.canonicalize().unwrap_or(abs))
 }
 
+/// [`real_path`] for a path an earlier run could have replaced, which is never
+/// followed if it is a link.
+///
+/// An agent may write these, so it may replace them, and a sandbox rule on a
+/// path lets it do that. Resolving the link at the next build would then grant
+/// whatever the agent pointed it at. Measured: `~/.claude.json` replaced from
+/// inside the cage by a link to `~/.config`, and the next run read the keys
+/// there and planted beside them. Only the last component: the directories
+/// above these are not the agent's to change.
+///
+/// Refusing costs an operator whose `~/.claude` is a link of their own one
+/// `OVERMIND_SANDBOX_ALLOW` naming the real place.
+fn path_the_agent_owns(path: &Path) -> Option<PathBuf> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        eprintln!(
+            "the cage does not follow a link at {} (not granted)",
+            path.display()
+        );
+        return None;
+    }
+    real_path(path)
+}
+
 /// One `allow` rule over these paths, or nothing when there are none.
 ///
 /// Never a rule with an empty list: a rule with no filter matches everything,
@@ -414,8 +441,9 @@ fn allow_stanza(operation: &str, paths: &[PathBuf]) -> String {
 fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
     // cage and no `--dangerously-skip-permissions` — the same safe direction
-    // an unquotable path takes below.
-    real_path(cage.run_dir)?;
+    // an unquotable path takes below. A run directory that is now a link is
+    // the same case: an earlier run replaced it.
+    path_the_agent_owns(cage.run_dir)?;
     // One list, shared with Landlock: two would eventually disagree, and the
     // disagreement would be a cage that grants different things depending on
     // which kernel you happen to be on.
@@ -1036,6 +1064,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(caged, "REFUSED");
         assert_eq!(open, "OPENED", "uncaged, the same read has to work");
+    }
+
+    /// An agent can replace what it may write: `~/.claude.json`, `~/.claude`,
+    /// its own run directory. Measured: a link planted there from inside the
+    /// cage made the next build grant `~/.config`, to read and to write.
+    #[tokio::test]
+    async fn a_link_planted_in_place_of_a_grant_does_not_carry_it() {
+        use std::os::unix::fs::symlink;
+        let root = std::path::absolute(format!(
+            "target/overmind-link-{}",
+            uuid::Uuid::now_v7().simple()
+        ))
+        .expect("absolute root");
+        let home = root.join("home");
+        let run_dir = root.join("run");
+        let planted_run = root.join("planted-run");
+        let config_dir = home.join(".config");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        let keys = config_dir.join("keys.env");
+        std::fs::write(&keys, "KEY=x\n").expect("keys");
+        symlink(&config_dir, home.join(".claude.json")).expect("plant over the file");
+        symlink(&config_dir, home.join(".claude")).expect("plant over the directory");
+        symlink(&config_dir, &planted_run).expect("plant over the run dir");
+        let real_config = config_dir.canonicalize().expect("real config dir");
+
+        let cfg = config(Vec::new());
+        let writable = writable_paths(&cfg, &Cage::new(&run_dir), Some(&home));
+        assert!(
+            !writable.iter().any(|p| p.starts_with(&real_config)),
+            "a planted link carried the grant: {writable:?}"
+        );
+        // A run dir that is a link is no cage at all, never a cage over its target.
+        let replaced = writable_paths(&cfg, &Cage::new(&planted_run), Some(&home));
+        assert!(
+            !replaced.iter().any(|p| p.starts_with(&real_config)),
+            "a planted run dir carried the grant: {replaced:?}"
+        );
+        assert!(super::profile(&cfg, &Cage::new(&planted_run), Some(&home)).is_none());
+
+        let held = confinement_in(&cfg, &Cage::new(&run_dir), Some(&home));
+        if held.is_real() {
+            let read = async |held: &Confinement| {
+                let script = r#"cat "$F" >/dev/null 2>&1 && echo OPENED || echo REFUSED"#;
+                let out = caged_shell(&cfg, held, script)
+                    .env("F", &keys)
+                    .current_dir(&run_dir)
+                    .output()
+                    .await
+                    .expect("run the read");
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            };
+            assert_eq!(read(&held).await, "REFUSED");
+            assert_eq!(read(&Confinement::default()).await, "OPENED");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// What a script reaches in a home laid out like a real one.
