@@ -622,6 +622,16 @@ fn tag(id: &str) -> &str {
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
+    // No time limit: nothing here is the agent's, and cloning a large
+    // repository from a slow disk is allowed to be slow.
+    Ok(run_git(git_command(cwd, args), None)
+        .await?
+        .trim()
+        .to_string())
+}
+
+/// The command [`git`] runs.
+fn git_command(cwd: &Path, args: &[&str]) -> Command {
     // The path is declared safe for this one invocation (M23). Since the uid
     // split of ADR-0029 the agent commits as uid 10001 while the server asks
     // git questions as root, and git refuses a repository owned by another
@@ -638,10 +648,17 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
         .arg(format!("safe.directory={}", cwd.display()))
         .args(args)
         .current_dir(cwd);
-    // No time limit: nothing here is the agent's, and cloning a large
-    // repository from a slow disk is allowed to be slow.
-    Ok(run_git(cmd, None).await?.trim().to_string())
+    cmd
 }
+
+/// What git never runs, over anything. They cost nothing, and over a run's files
+/// they are not the boundary ([`caged_git`]).
+const GIT_RUNS_NOTHING: [&str; 4] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+];
 
 /// Git as the server runs it: on none of the host's configuration (ADR-0053).
 ///
@@ -658,12 +675,7 @@ fn server_git(global_config: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.env("GIT_CONFIG_GLOBAL", global_config)
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-        ]);
+        .args(GIT_RUNS_NOTHING);
     cmd
 }
 
@@ -746,12 +758,7 @@ fn caged_git(
     cmd.arg("git")
         .arg("-c")
         .arg(format!("safe.directory={}", cage.run_dir.display()))
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ])
+        .args(GIT_RUNS_NOTHING)
         .args(args)
         .current_dir(cage.run_dir);
     // The cage denies `~/.gitconfig`, and git reads it before anything else.
@@ -3093,7 +3100,7 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
 
 #[cfg(test)]
 mod server_git_tests {
-    use super::{Path, clone_command, run_git, server_git};
+    use super::{Path, clone_command, git_command, run_git};
     use tokio::process::Command;
 
     /// A home whose `.gitconfig` plants a hook and a template, as anything that
@@ -3179,11 +3186,8 @@ mod server_git_tests {
         );
         clone.env("HOME", &home);
         run_git(clone, None).await.expect("the server's clone");
-        let mut checkout = server_git(Path::new("/dev/null"));
-        checkout
-            .args(["checkout", "--quiet", "-b", "run"])
-            .current_dir(&served)
-            .env("HOME", &home);
+        let mut checkout = git_command(&served, &["checkout", "--quiet", "-b", "run"]);
+        checkout.env("HOME", &home);
         run_git(checkout, None)
             .await
             .expect("the server's checkout");
@@ -3201,14 +3205,18 @@ mod server_git_tests {
             .arg(&*common)
             .arg(&plain)
             .env("HOME", &home)
-            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME");
         run_git(clone, None).await.expect("the plain clone");
         let mut checkout = Command::new("git");
         checkout
             .args(["checkout", "--quiet", "-b", "run"])
             .current_dir(&plain)
             .env("HOME", &home)
-            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME");
         run_git(checkout, None).await.expect("the plain checkout");
         assert!(
             marker.exists(),
