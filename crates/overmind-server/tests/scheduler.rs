@@ -1995,19 +1995,7 @@ async fn a_session_of_a_cancelled_task_is_not_resumed_after_a_restart() {
         .expect("an Italian company");
     env.state.pool.close().await;
 
-    let script_path = root.join("stub2.sh");
-    std::fs::write(&script_path, HAPPY_STUB).expect("write stub");
-    let config = overmind_server::Config {
-        agent_cmd: Some(format!("sh {}", script_path.display())),
-        data_dir: root.join("data"),
-        heartbeat_ms: 100,
-        ..overmind_server::Config::default()
-    };
-    let state2 = overmind_server::init_with(&db_url, config)
-        .await
-        .expect("reopen db");
-    let app2 = common::claimed(overmind_server::app(state2.clone()), &root.join("data")).await;
-    let _scheduler = overmind_server::scheduler::spawn(state2.clone());
+    let (state2, app2, _scheduler) = restart(&root, &db_url).await;
 
     let session = wait_for_session(&app2, "orphan-sess").await;
     assert_eq!(session["status"], "failed", "{session}");
@@ -2023,12 +2011,7 @@ async fn a_session_of_a_cancelled_task_is_not_resumed_after_a_restart() {
         !orphan_wt.join("result.txt").exists(),
         "the agent did not run again"
     );
-    let (resumed_count,): (i64,) =
-        sqlx::query_as("SELECT resumed_count FROM agent_task_sessions WHERE id = 'orphan-sess'")
-            .fetch_one(&state2.pool)
-            .await
-            .expect("resumed_count");
-    assert_eq!(resumed_count, 0);
+    assert_eq!(resumed_count(&state2.pool, "orphan-sess").await, 0);
     let (status,): (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = ?")
         .bind(&task_id)
         .fetch_one(&state2.pool)
@@ -2057,6 +2040,45 @@ async fn a_task_blocked_and_resumed_by_hand_is_not_the_old_runs_anymore() {
     assert_left_where_the_person_put_it(&env, &task_id, &session_id, "in_progress").await;
 }
 
+/// The server comes back on the same database, with an agent that just works.
+async fn restart(
+    root: &std::path::Path,
+    db_url: &str,
+) -> (overmind_server::AppState, axum::Router, impl Sized) {
+    let script_path = root.join("stub2.sh");
+    std::fs::write(&script_path, HAPPY_STUB).expect("write stub");
+    let config = overmind_server::Config {
+        agent_cmd: Some(format!("sh {}", script_path.display())),
+        data_dir: root.join("data"),
+        heartbeat_ms: 100,
+        ..overmind_server::Config::default()
+    };
+    let state = overmind_server::init_with(db_url, config)
+        .await
+        .expect("reopen db");
+    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
+    let scheduler = overmind_server::scheduler::spawn(state.clone());
+    (state, app, scheduler)
+}
+
+/// A session is `running` once its clone is ready: only then does a restart
+/// find a run it can bring back.
+async fn wait_until_running(env: &Env, session_id: &str) {
+    for _ in 0..200 {
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM agent_task_sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_one(&env.state.pool)
+                .await
+                .expect("session status");
+        if status == "running" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("session {session_id} never got its clone");
+}
+
 async fn resumed_count(pool: &sqlx::SqlitePool, session_id: &str) -> i64 {
     sqlx::query_scalar("SELECT resumed_count FROM agent_task_sessions WHERE id = ?")
         .bind(session_id)
@@ -2083,21 +2105,11 @@ async fn a_stale_run_is_not_resumed_when_its_task_was_started_again() {
     let first = start(&env, &task_id, &first_agent).await;
     move_by_hand(&env, &task_id, "todo").await;
     let second = start(&env, &task_id, &second_agent).await;
+    wait_until_running(&env, &first).await;
+    wait_until_running(&env, &second).await;
     env.state.pool.close().await;
 
-    let script_path = root.join("stub2.sh");
-    std::fs::write(&script_path, HAPPY_STUB).expect("write stub");
-    let config = overmind_server::Config {
-        agent_cmd: Some(format!("sh {}", script_path.display())),
-        data_dir: root.join("data"),
-        heartbeat_ms: 100,
-        ..overmind_server::Config::default()
-    };
-    let state2 = overmind_server::init_with(&db_url, config)
-        .await
-        .expect("reopen db");
-    let app2 = common::claimed(overmind_server::app(state2.clone()), &root.join("data")).await;
-    let _scheduler = overmind_server::scheduler::spawn(state2.clone());
+    let (state2, app2, _scheduler) = restart(&root, &db_url).await;
 
     let stale = wait_for_session(&app2, &first).await;
     assert_eq!(resumed_count(&state2.pool, &first).await, 0, "{stale}");
