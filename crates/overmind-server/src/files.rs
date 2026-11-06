@@ -196,9 +196,15 @@ pub fn is_own_dir(path: &Path) -> bool {
 ///
 /// Links are not followed, the root included: a `deliverables` an agent replaced
 /// with a link to `~/.ssh` would otherwise be read by a server outside the cage.
+/// Checked here and not held across the reads that follow, so a process the
+/// agent left running can still race them (docs/NEXT.md).
 pub async fn collect_files(root: &Path, limit: usize) -> Vec<(PathBuf, u64)> {
     let mut out = Vec::new();
     if !is_own_dir(root) {
+        // Absent is ordinary: most code runs deliver no folder. A link is not.
+        if std::fs::symlink_metadata(root).is_ok() {
+            eprintln!("not collecting from {}: not a directory", root.display());
+        }
         return out;
     }
     let mut stack = vec![root.to_path_buf()];

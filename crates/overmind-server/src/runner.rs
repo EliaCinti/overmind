@@ -2361,9 +2361,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     //
     // Best-effort throughout: the session is already recorded, and a file that
     // cannot be read must not undo that.
-    let delivered: usize = if f.session_status == "completed"
-        && files::is_own_dir(&ctx.worktree_dir)
-    {
+    let delivered: usize = if f.session_status == "completed" {
         let (root, inline_root) = match ctx.exec_kind {
             ExecutionKind::Knowledge => (ctx.worktree_dir.clone(), true),
             ExecutionKind::Code => (ctx.worktree_dir.join(DELIVERABLES_DIR), false),
@@ -2375,7 +2373,14 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .join("artifacts")
             .join(&ctx.session_id);
         let mut n = 0usize;
-        for (rel, size) in files::collect_files(&root, MAX_ARTIFACTS).await {
+        // A run dir that is a link delivers nothing of its own. What the run
+        // said still reaches the drawer, below.
+        let collected = if files::is_own_dir(&ctx.worktree_dir) {
+            files::collect_files(&root, MAX_ARTIFACTS).await
+        } else {
+            Vec::new()
+        };
+        for (rel, size) in collected {
             let rel_str = files::safe_relative(&rel);
             // Control files and the inputs we placed are not deliverables.
             if rel_str.is_empty()

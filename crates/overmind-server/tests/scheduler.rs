@@ -1265,7 +1265,10 @@ async fn a_deliverables_folder_planted_as_a_symlink_is_not_followed() {
     let agent_id = hire(&env, "Sly", "builder").await;
     let task_id = make_todo_task(&env, "Innocent work").await;
 
-    attempt(&env, &task_id, &agent_id).await;
+    // Only a completed run collects: anything else would pass this for nothing.
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "completed", "{session}");
+    let _ = std::fs::remove_dir_all(&secret_dir);
     let (leaked,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM task_artifacts WHERE task_id = ? AND title = 'id_rsa'",
     )
