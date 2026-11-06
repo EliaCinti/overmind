@@ -1355,3 +1355,41 @@ echo '{{"total_cost_usd":0.01,"session_id":"s"}}'
         "a memory of cancelled work: {stored}"
     );
 }
+
+/// A run that hands off is recorded `completed`, but its task goes back to the
+/// queue: no memory says the task was completed.
+#[tokio::test]
+async fn a_run_that_hands_off_writes_no_memory() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    // Where the file goes depends on the run's kind: this one covers both.
+    let agent = r#"#!/bin/sh
+mkdir -p deliverables
+echo 'pending: the second half' > deliverables/HANDOFF.md
+echo 'pending: the second half' > HANDOFF.md
+echo '{"total_cost_usd":0.01,"session_id":"s"}'
+"#;
+    let env = setup_full(true, true, "", agent).await;
+    let (company, goal) = found_company(&env, "Halfway").await;
+    let session = start_task(&env, &company, &goal, "HALF_DONE_work").await;
+    await_session(&env, &session).await;
+    // The memory is written after the session is recorded: give it the time.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/tasks"),
+        None,
+    )
+    .await;
+    assert_eq!(tasks["tasks"][0]["status"], "todo", "{tasks}");
+    let stored =
+        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).unwrap_or_default();
+    assert!(
+        !stored.contains("HALF_DONE_work"),
+        "a memory of unfinished work: {stored}"
+    );
+}

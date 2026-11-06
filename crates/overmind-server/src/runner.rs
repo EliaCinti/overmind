@@ -2746,8 +2746,11 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // deliverables as inputs and is offered to start by its agent's
     // autonomy. Best-effort: the session is already recorded. Not when the
     // task was moved under the run: a cancelled task releases nothing. The
-    // status is the effective one: an empty-handed run is failed.
-    if session_status == "completed" && applied {
+    // status is the effective one: an empty-handed run is failed. And a run
+    // that handed off is `completed` with its task back in the queue: the work
+    // is not finished.
+    let finished_the_task = session_status == "completed" && f.bound.is_none() && applied;
+    if finished_the_task {
         // Spawned, not awaited: releasing a dependent starts a new session,
         // and a future that awaits its own descendants is a cycle the
         // compiler rightly refuses.
@@ -2799,7 +2802,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // Record what the organization just learned. Best-effort; never fatal.
     // Not from a run that no longer held its task: a memory of work the person
     // threw away would report as done what is not.
-    if session_status == "completed" && applied {
+    if finished_the_task {
         // The task is the memory's provenance (ADR-0015 decision 3, made real
         // in ADR-0025). The tag rides along so the brain still says where this
         // came from when read outside Overmind; the link row is what the UI

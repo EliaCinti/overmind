@@ -2199,6 +2199,38 @@ async fn an_empty_handed_run_releases_no_dependents() {
     assert_eq!(depends_on.as_deref(), Some(task_id.as_str()));
 }
 
+/// A run that hands off is recorded `completed`, but its task goes back to the
+/// queue: nothing was finished, so what waits on it keeps waiting.
+#[tokio::test]
+async fn a_run_that_hands_off_releases_no_dependents() {
+    let env = build_env(HANDING_OFF_STUB, None, |_| {}).await;
+    let agent_id = hire(&env, "Careful", "builder").await;
+    let task_id = make_todo_task(&env, "Half a day of work").await;
+    let dependent = make_todo_knowledge_task(&env, "Waits on it").await;
+    sqlx::query("UPDATE tasks SET depends_on = ? WHERE id = ?")
+        .bind(&task_id)
+        .bind(&dependent)
+        .execute(&env.state.pool)
+        .await
+        .expect("make it wait");
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    let session = wait_for_session(&env.app, &session_id).await;
+    assert_eq!(session["status"], "completed", "{session}");
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    // release_dependents is spawned after the commit: give it the time it
+    // would take.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let depends_on: Option<String> =
+        sqlx::query_scalar("SELECT depends_on FROM tasks WHERE id = ?")
+            .bind(&dependent)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("dependent");
+    assert_eq!(depends_on.as_deref(), Some(task_id.as_str()));
+}
+
 /// A run in flight across the upgrade holds its task: the backfill gives each
 /// `in_progress` task its newest live session.
 #[tokio::test]
