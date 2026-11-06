@@ -391,6 +391,25 @@ fn real_path(path: &Path) -> Option<PathBuf> {
     Some(abs.canonicalize().unwrap_or(abs))
 }
 
+/// One `allow` rule over these paths, or nothing when there are none.
+///
+/// Never a rule with an empty list: a rule with no filter matches everything,
+/// so `(allow file-read*)` with no path in it grants the whole disk. Measured:
+/// `HOME` unset, nothing else to read, and the agent opened `~/.zshrc`.
+fn allow_stanza(operation: &str, paths: &[PathBuf]) -> String {
+    // A path we cannot express is a path we do not grant. The run may fail for
+    // lack of it, which is the loud failure this design prefers.
+    let rules: String = paths
+        .iter()
+        .filter_map(|p| quote(p))
+        .map(|q| format!("  (subpath \"{q}\")\n"))
+        .collect();
+    if rules.is_empty() {
+        return String::new();
+    }
+    format!("(allow {operation}\n{rules})\n")
+}
+
 /// The profile text for one run.
 fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
@@ -409,21 +428,8 @@ fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<Stri
     // spelling of the other one, and belongs only here.
     writable.push(PathBuf::from("/private/tmp"));
 
-    let mut allow_read = String::new();
-    for p in readable_paths(config, cage, home) {
-        if let Some(q) = quote(&p) {
-            allow_read.push_str(&format!("  (subpath \"{q}\")\n"));
-        }
-    }
-
-    let mut allow_write = String::new();
-    for p in &writable {
-        // A path we cannot express is a path we do not grant. The run may fail
-        // for lack of it, which is the loud failure this design prefers.
-        if let Some(q) = quote(p) {
-            allow_write.push_str(&format!("  (subpath \"{q}\")\n"));
-        }
-    }
+    let allow_read = allow_stanza("file-read*", &readable_paths(config, cage, home));
+    let allow_write = allow_stanza("file*", &writable);
 
     Some(format!(
         r#"(version 1)
@@ -443,13 +449,9 @@ fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<Stri
 ; its credential kills the run before the first word (M23). Also its install,
 ; which the host runs (ADR-0053), a git dir from before ADR-0052, for its diff,
 ; and what the operator named in OVERMIND_SANDBOX_READ.
-(allow file-read*
-{allow_read})
-
+{allow_read}
 ; The run's own directory, temp, and whatever the adapter has to write.
-(allow file*
-{allow_write})
-
+{allow_write}
 ; The network stays open: reaching the API is the job. This is the boundary
 ; this profile explicitly does not draw (ADR-0023).
 (allow network* system-socket)
@@ -980,6 +982,53 @@ mod tests {
         assert!(!write.contains("a-readable-tool"), "{text}");
         assert!(readable_paths(&cfg, &cage, None).contains(&tool));
         assert!(!writable_paths(&cfg, &cage, None).contains(&tool));
+    }
+
+    /// A rule with no filter matches everything, so an empty list rendered as
+    /// a stanza grants the whole disk. `HOME` unset with nothing else to read
+    /// is how a list gets there. Paired against the same read uncaged.
+    #[tokio::test]
+    async fn a_cage_with_nothing_to_read_still_refuses_reads() {
+        let cfg = config(Vec::new());
+        let cage = Cage::new(Path::new("/tmp/x"));
+        let text = super::profile(&cfg, &cage, None).expect("profile");
+        assert!(!text.contains("(allow file-read*\n)"), "{text}");
+
+        // Outside temp, which the cage grants outright.
+        let root = std::path::absolute(format!(
+            "target/overmind-noread-{}",
+            uuid::Uuid::now_v7().simple()
+        ))
+        .expect("absolute root");
+        let run_dir = root.join("run");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        let secret = root.join("secret");
+        std::fs::write(&secret, "x\n").expect("secret");
+
+        let held = confinement_in(&cfg, &Cage::new(&run_dir), None);
+        if !held.is_real() {
+            eprintln!("no cage on this platform — skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let read = async |held: &Confinement| {
+            let out = caged_shell(
+                &cfg,
+                held,
+                r#"cat "$F" >/dev/null 2>&1 && echo OPENED || echo REFUSED"#,
+            )
+            .env("F", &secret)
+            .current_dir(&run_dir)
+            .output()
+            .await
+            .expect("run the read");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let caged = read(&held).await;
+        let open = read(&Confinement::default()).await;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(caged, "REFUSED");
+        assert_eq!(open, "OPENED", "uncaged, the same read has to work");
     }
 
     /// What a script reaches in a home laid out like a real one.
