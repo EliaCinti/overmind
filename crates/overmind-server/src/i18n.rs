@@ -163,12 +163,14 @@ pub fn branch_not_returned(code: &str) -> String {
     }
 }
 
-/// The line a session carries when a restart found its task no longer its own.
-/// Where the task stands is on the chain (`session.finished`), and on the board.
+/// The line a session carries when recovery found its task no longer its own.
+/// Recovery runs at every beat, not only after a restart, so the line names no
+/// restart. Where the task stands is on the chain (`session.finished`), and on
+/// the board.
 pub fn run_not_resumed(code: &str) -> String {
     match code {
-        "it" => "Questa esecuzione non è stata ripresa dopo il riavvio: il suo task è stato spostato nel frattempo.".to_string(),
-        _ => "This run was not resumed after the restart: its task was moved in the meantime.".to_string(),
+        "it" => "Questa esecuzione si era interrotta e non è stata ripresa: il suo task è stato spostato nel frattempo.".to_string(),
+        _ => "This run was interrupted and not resumed: its task was moved in the meantime.".to_string(),
     }
 }
 
