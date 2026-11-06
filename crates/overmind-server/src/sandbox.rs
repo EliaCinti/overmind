@@ -129,11 +129,16 @@ impl Confinement {
 fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<PathBuf> {
     let mut writable: Vec<PathBuf> = Vec::new();
     writable.extend(path_the_agent_owns(cage.run_dir));
-    writable.extend(real_path(&std::env::temp_dir()));
+    writable.extend(path_the_agent_owns(&std::env::temp_dir()));
     // Where the adapter keeps credentials and state. In the image this is the
     // agent's own home; on a machine it is the user's, and the run would fail
     // without it long before it failed usefully.
-    writable.extend(config.agent_home.iter().filter_map(|p| real_path(p)));
+    writable.extend(
+        config
+            .agent_home
+            .iter()
+            .filter_map(|p| path_the_agent_owns(p)),
+    );
     // Not the mounted repositories (ADR-0052). A `code` run works in a clone
     // whose whole `.git` is in its run directory; granting the operator's
     // repository let an agent plant hooks and config there, which then ran as
@@ -143,7 +148,12 @@ fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<
             .iter()
             .filter_map(|p| path_the_agent_owns(p)),
     );
-    writable.extend(config.sandbox_allow.iter().filter_map(|p| real_path(p)));
+    writable.extend(
+        config
+            .sandbox_allow
+            .iter()
+            .filter_map(|p| path_the_agent_owns(p)),
+    );
     writable
 }
 
@@ -395,19 +405,22 @@ fn real_path(path: &Path) -> Option<PathBuf> {
     Some(abs.canonicalize().unwrap_or(abs))
 }
 
-/// [`real_path`] for a path an earlier run could have replaced, which is never
-/// followed if it is a link.
+/// [`real_path`] for a path the agent may write, which is never followed if it
+/// is a link. That is every writable grant.
 ///
 /// An agent may write these, so it may replace them, and a sandbox rule on a
 /// path lets it do that. Resolving the link at the next build would then grant
 /// whatever the agent pointed it at. Measured: `~/.claude.json` replaced from
 /// inside the cage by a link to `~/.config`, and the next run read the keys
-/// there and planted beside them. Only the last component: the directories
-/// above these are not the agent's to change.
+/// there and planted beside them. Only the last component: an agent's grant on
+/// a path does not reach the directories above it.
 ///
-/// Refusing costs an operator whose `~/.claude` is a link of their own one
+/// Refusing costs an operator whose grant is a link of their own one
 /// `OVERMIND_SANDBOX_ALLOW` naming the real place.
 fn path_the_agent_owns(path: &Path) -> Option<PathBuf> {
+    // Without a trailing slash, which would make `lstat` follow the link.
+    let path: PathBuf = path.components().collect();
+    let path = path.as_path();
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         eprintln!(
             "the cage does not follow a link at {} (not granted)",
@@ -441,9 +454,10 @@ fn allow_stanza(operation: &str, paths: &[PathBuf]) -> String {
 fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
     // cage and no `--dangerously-skip-permissions` — the same safe direction
-    // an unquotable path takes below. A run directory that is now a link is
-    // the same case: an earlier run replaced it.
-    path_the_agent_owns(cage.run_dir)?;
+    // an unquotable path takes below. Not so for a run directory an earlier run
+    // replaced with a link: that one keeps its cage, which grants it nothing,
+    // because no profile would mean an uncaged shell inside the link's target.
+    real_path(cage.run_dir)?;
     // One list, shared with Landlock: two would eventually disagree, and the
     // disagreement would be a cage that grants different things depending on
     // which kernel you happen to be on.
@@ -1096,13 +1110,30 @@ mod tests {
             !writable.iter().any(|p| p.starts_with(&real_config)),
             "a planted link carried the grant: {writable:?}"
         );
-        // A run dir that is a link is no cage at all, never a cage over its target.
         let replaced = writable_paths(&cfg, &Cage::new(&planted_run), Some(&home));
         assert!(
             !replaced.iter().any(|p| p.starts_with(&real_config)),
             "a planted run dir carried the grant: {replaced:?}"
         );
-        assert!(super::profile(&cfg, &Cage::new(&planted_run), Some(&home)).is_none());
+        // Still a cage, one that grants nothing there. "No cage" would be the
+        // uncaged shell, with its working directory in the link's target.
+        if profile_available() {
+            let held = confinement_in(&cfg, &Cage::new(&planted_run), Some(&home));
+            assert!(held.is_real(), "a planted run dir must not remove the cage");
+        }
+
+        // What an operator allowed is the agent's to replace too, and a
+        // trailing slash must not make the link look like its target.
+        let allowed = root.join("allowed");
+        symlink(&config_dir, &allowed).expect("plant over an allowed path");
+        for spelled in [allowed.clone(), allowed.join("")] {
+            let cfg = config(vec![spelled]);
+            let writable = writable_paths(&cfg, &Cage::new(&run_dir), Some(&home));
+            assert!(
+                !writable.iter().any(|p| p.starts_with(&real_config)),
+                "a link at an allowed path carried the grant: {writable:?}"
+            );
+        }
 
         let held = confinement_in(&cfg, &Cage::new(&run_dir), Some(&home));
         if held.is_real() {
