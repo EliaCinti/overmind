@@ -1285,3 +1285,111 @@ async fn a_token_dies_with_its_run() {
         "the config file outlived its run — a token left on disk"
     );
 }
+
+/// Cancelled while its run works, the task's run still ends `completed`, but
+/// what it asked for and what it would teach are about work the person threw
+/// away: no meeting reaches the human, no memory says it was done (plan
+/// 2026-11-01, the task knows its run).
+#[tokio::test]
+async fn an_unapplied_run_raises_no_meeting_and_writes_no_memory() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let gate = gate_path();
+    let agent = format!(
+        r#"#!/bin/sh
+i=0
+while [ ! -f "{}" ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done
+echo done > out.txt
+cat > MEETING_REQUEST.json <<'JSON'
+{{"topic":"Do we keep the old path","reason":"It changes what Guard builds","participants":["Guard"]}}
+JSON
+echo '{{"total_cost_usd":0.01,"session_id":"s"}}'
+"#,
+        gate.display()
+    );
+    let env = setup_full(true, true, "", &agent).await;
+    let (company, goal) = found_company(&env, "Overruled").await;
+    send(
+        &env.app,
+        "POST",
+        &format!("/api/companies/{company}/agents"),
+        Some(json!({ "name": "Guard", "archetype": "builder" })),
+    )
+    .await;
+
+    let session = start_task(&env, &company, &goal, "THROWN_AWAY_work").await;
+    let (_, sv) = send(&env.app, "GET", &format!("/api/sessions/{session}"), None).await;
+    let task = sv["task_id"].as_str().expect("task id").to_string();
+    let (status, moved) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task}/transition"),
+        Some(json!({ "to": "cancelled" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "transition: {moved}");
+    std::fs::write(&gate, b"go").expect("release the agent");
+    await_session(&env, &session).await;
+    let _ = std::fs::remove_file(&gate);
+    // Both are written after the session is recorded: give them the time.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (_, meetings) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/meetings"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        meetings["meetings"].as_array().map(Vec::len),
+        Some(0),
+        "{meetings}"
+    );
+    let stored =
+        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).unwrap_or_default();
+    assert!(
+        !stored.contains("THROWN_AWAY_work"),
+        "a memory of cancelled work: {stored}"
+    );
+}
+
+/// A run that hands off is recorded `completed`, but its task goes back to the
+/// queue: no memory says the task was completed.
+#[tokio::test]
+async fn a_run_that_hands_off_writes_no_memory() {
+    if python().is_empty() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    // Where the file goes depends on the run's kind: this one covers both.
+    let agent = r#"#!/bin/sh
+mkdir -p deliverables
+echo 'pending: the second half' > deliverables/HANDOFF.md
+echo 'pending: the second half' > HANDOFF.md
+echo '{"total_cost_usd":0.01,"session_id":"s"}'
+"#;
+    let env = setup_full(true, true, "", agent).await;
+    let (company, goal) = found_company(&env, "Halfway").await;
+    let session = start_task(&env, &company, &goal, "HALF_DONE_work").await;
+    await_session(&env, &session).await;
+    // The memory is written after the session is recorded: give it the time.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (_, tasks) = send(
+        &env.app,
+        "GET",
+        &format!("/api/companies/{company}/tasks"),
+        None,
+    )
+    .await;
+    assert_eq!(tasks["tasks"][0]["status"], "todo", "{tasks}");
+    let stored =
+        std::fs::read_to_string(env.brain_dir(&company).join("memories.txt")).unwrap_or_default();
+    assert!(
+        !stored.contains("HALF_DONE_work"),
+        "a memory of unfinished work: {stored}"
+    );
+}

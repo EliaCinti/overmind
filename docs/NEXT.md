@@ -213,7 +213,17 @@ Found by the review of the wakeup fix (a refusal is the wakeup's outcome, and th
 
 Found by the review of M36a slice 1; older than it, written down here rather than widening the slice:
 
-- **A run that ends overwrites a task a person cancelled while it ran.** `in_progress → cancelled` is a person's transition, but every `UPDATE tasks` in `runner::finalize` (to `in_review`, `blocked`, `todo`, and now `stalled`) matches on the id alone, and its audit row always says `from: in_progress`. Cancel a task mid-run and the run's end brings it back — and the chain records a move from a state the task was not in. The fix is `AND status = 'in_progress'` on each, and an audit row only when a row moved; it touches every outcome, so it wants its own test per outcome.
+- **Moving a task does not stop its run.** A run's end no longer writes over a task a person moved while it worked (cancelled, blocked, back in *To do*, or taken again by a later session — fixed by [the task knows its run](plans/2026-11-01-the-task-knows-its-run.md)), but the run itself goes on: a cancelled task's run spends until its own end, and its session is recorded with `applied: false`. Stopping it means reaching the process from `transition_task` — the handle in `state.running` and the cage's process group — so it wants a change of its own. Until then, a cancel stops the task, not the bill.
+
+## Debts from a run that lost its task (6 Nov 2026)
+
+Found by the review of [the task knows its run](plans/2026-11-01-the-task-knows-its-run.md). The first two are older than it, and it added one more way into each; written down rather than widening the fix:
+
+- **A task finished by hand releases nothing.** `release_dependents` has one caller: the end of a run that held its task. A task taken to *Done* by hand keeps what waits on it waiting, forever and with no signal. Moved to *In review* under its run and then approved, a task now ends up there too; before the fix, the run's end released them. Releasing on the move to *Done* has to decide whose deliverables the dependents inherit, so it wants a change of its own.
+- **In progress with nothing running.** A move by hand to *In progress* — review rejected, or blocked and put back — starts no run, and nothing moves the task again. Asked to start it, `start_existing` and the CEO answer `AlreadyRunning`, the false report ADR-0046 removed. Blocked and put back under a live run, a task now stays there when the run ends. `tasks.run_session_id` being NULL now tells the two cases apart: the answer can stop being a guess.
+- **What reads a session does not read `applied`.** In the drawer, a session of a cancelled task reads `completed`, with nothing saying the outcome was set aside. Through MCP, `get_task` shows the newest session's `last_error` as the task's, even from a run that no longer held it. The column is there (migration 0035); neither reader looks at it.
+- **Dependents inherit only the last attempt's deliverables.** `release_dependents` copies the artifacts of the session that finished. A task that took two attempts through a handoff has the first attempt's files on it, but what waits on it never receives them, and nothing says so. Before this change it was released at the first attempt instead, with only those.
+- **`MEETING_REQUEST.json` is read following links.** `finalize` reads it with `read_to_string` from a directory the agent owns, outside the cage, while `read_own_handoff` goes through `O_NOFOLLOW` for exactly that reason. The content has to parse as a meeting request and is not echoed, so what it can carry looks small, but that has not been assessed. Look at it with the security debts from #114.
 
 ## Debts from the clone (30 Oct 2026)
 
