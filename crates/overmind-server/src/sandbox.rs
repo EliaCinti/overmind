@@ -955,7 +955,9 @@ pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
 
 fn lay_out(root: &Path, runs: &Path, home: Option<&Path>, user: AgentUser) -> std::io::Result<()> {
     // With the runs elsewhere, the agent has no reason to walk through here.
-    mkdir_mode(root, if root == runs { 0o755 } else { 0o700 })?;
+    // Runs inside it -- the default, or OVERMIND_RUNS_DIR under the data dir --
+    // are reached through it.
+    mkdir_mode(root, if runs.starts_with(root) { 0o755 } else { 0o700 })?;
     // Overmind's own shelves.
     for name in ["companies", "artifacts", "attachments", "backups"] {
         mkdir_mode(&root.join(name), 0o700)?;
@@ -1642,6 +1644,17 @@ probe write_cli_state write "$H/.claude/settings.json"
         }
         assert_eq!(mode(data), 0o700);
         assert_eq!(mode(runs), 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runs_inside_the_data_dir_keep_it_walkable() {
+        let dir = fresh_dir("nested");
+        let data = dir.join("data");
+        lay_out(&data, &data.join("runs"), None, this_user()).expect("layout");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&data).expect("data").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
     }
 
     #[test]
