@@ -1238,6 +1238,40 @@ async fn a_handoff_planted_as_a_symlink_is_not_followed() {
     assert_eq!(leaked, 0);
 }
 
+/// The same door, one level up: the folder a code run's deliverables are
+/// collected from is the agent's too, and the server that copies them is not
+/// in the cage. A link planted as the folder would carry a host directory into
+/// the artifacts -- the server's whole reach, which is root in the image.
+#[tokio::test]
+async fn a_deliverables_folder_planted_as_a_symlink_is_not_followed() {
+    let secret_dir = std::env::temp_dir().join(format!("om-secret-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&secret_dir).expect("secret dir");
+    std::fs::write(secret_dir.join("id_rsa"), "PRIVATE-KEY-MATERIAL").expect("secret");
+    let stub = format!(
+        "#!/bin/sh\nrm -rf deliverables\nln -s '{}' deliverables\n",
+        secret_dir.display()
+    );
+    let env = build_env(&stub, None, |_| {}).await;
+    let agent_id = hire(&env, "Sly", "builder").await;
+    let task_id = make_todo_task(&env, "Innocent work").await;
+
+    // Only a completed run collects: anything else would pass this for nothing.
+    let session = attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(session["status"], "completed", "{session}");
+    let _ = std::fs::remove_dir_all(&secret_dir);
+    let (leaked,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM task_artifacts WHERE task_id = ? AND title = 'id_rsa'",
+    )
+    .bind(&task_id)
+    .fetch_one(&env.state.pool)
+    .await
+    .expect("count");
+    assert_eq!(
+        leaked, 0,
+        "the server copied a host file into the artifacts"
+    );
+}
+
 /// Stops itself in time, as the prompt asks, and leaves its own handoff.
 const HANDING_OFF_STUB: &str =
     "#!/bin/sh\nmkdir -p deliverables\necho 'pending: the second half' > deliverables/HANDOFF.md\n";

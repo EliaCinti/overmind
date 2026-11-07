@@ -624,6 +624,16 @@ fn tag(id: &str) -> &str {
 }
 
 async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
+    // No time limit: nothing here is the agent's, and cloning a large
+    // repository from a slow disk is allowed to be slow.
+    Ok(run_git(git_command(cwd, args), None)
+        .await?
+        .trim()
+        .to_string())
+}
+
+/// The command [`git`] runs.
+fn git_command(cwd: &Path, args: &[&str]) -> Command {
     // The path is declared safe for this one invocation (M23). Since the uid
     // split of ADR-0029 the agent commits as uid 10001 while the server asks
     // git questions as root, and git refuses a repository owned by another
@@ -635,14 +645,47 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, RunnerError> {
     // Only over state that is the server's: the operator's repository, which
     // no cage grants (ADR-0052), and a run's clone before the agent has had
     // it. Anything after the agent goes through [`git_in_run`].
-    let mut cmd = Command::new("git");
+    let mut cmd = server_git(Path::new("/dev/null"));
     cmd.arg("-c")
         .arg(format!("safe.directory={}", cwd.display()))
         .args(args)
         .current_dir(cwd);
-    // No time limit: nothing here is the agent's, and cloning a large
-    // repository from a slow disk is allowed to be slow.
-    Ok(run_git(cmd, None).await?.trim().to_string())
+    cmd
+}
+
+/// What git never runs, over anything. They cost nothing, and over a run's files
+/// they are not the boundary ([`caged_git`]).
+const GIT_RUNS_NOTHING: [&str; 4] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+];
+
+/// Git as the server runs it: on none of the host's configuration (ADR-0053).
+///
+/// The host's `~/.gitconfig` and `~/.config/git/config` are the operator's for
+/// their own git. A `core.hooksPath` or an `init.templateDir` there is not meant
+/// for a clone the server makes for an agent, and on a native instance they are
+/// a place something else may have written. `global_config` is always
+/// Overmind's own: `/dev/null`, or the clone's [`SafeDirectoryConfig`].
+///
+/// Not [`crate::sandbox::git_isolation`]: this git has to keep working on the
+/// operator's repository, so it takes that one's configuration and not its
+/// identity, its transport or its credential resets.
+fn server_git(global_config: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_CONFIG_GLOBAL", global_config)
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .args(GIT_RUNS_NOTHING)
+        // Read from `~/.config/git` whatever the two variables above say.
+        .args([
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+        ]);
+    cmd
 }
 
 /// How long git over a run's files may take ([`caged_git`]). A diff someone
@@ -724,12 +767,7 @@ fn caged_git(
     cmd.arg("git")
         .arg("-c")
         .arg(format!("safe.directory={}", cage.run_dir.display()))
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-        ])
+        .args(GIT_RUNS_NOTHING)
         .args(args)
         .current_dir(cage.run_dir);
     // The cage denies `~/.gitconfig`, and git reads it before anything else.
@@ -1518,12 +1556,15 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     // A session that no longer holds its task, or whose worktree is gone,
     // cannot be resumed: fail it, and release the task only if it was its own.
     // A task started again holds a newer run, which is the one to resume.
+    //
+    // A link is gone too: the cage grants it nothing (ADR-0053), so a resume
+    // there could only fail, later and with a worse sentence.
     let (owned, _) = owns(&mut *state.pool.acquire().await?, &task_id, session_id).await?;
-    if !owned || !ctx.worktree_dir.is_dir() {
+    if !owned || !files::is_own_dir(&ctx.worktree_dir) {
         let error = if !owned {
             crate::i18n::run_not_resumed(&crate::i18n::company_language(state, &company_id).await)
         } else {
-            "cannot resume: worktree is missing".to_string()
+            "cannot resume: worktree is missing or has been replaced".to_string()
         };
         let release = owned;
         finalize(&ctx, Outcome::Infra { error, release }).await?;
@@ -1738,15 +1779,7 @@ async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), Run
     let safe = SafeDirectoryConfig::write(&ctx.state.config, &ctx.session_id, &common)?;
     // No hardlinks: an object shared by inode is the operator's file, and in
     // the agent's hands it could be rewritten (ADR-0052, rejected options).
-    let mut clone = Command::new("git");
-    clone
-        .arg("-c")
-        .arg(format!("safe.directory={}", repo.display()))
-        .args(["clone", "--quiet", "--no-hardlinks", "--no-checkout"])
-        .arg(&common)
-        .arg(&run_dir)
-        .current_dir(repo)
-        .env("GIT_CONFIG_GLOBAL", &safe.path);
+    let clone = clone_command(repo, &common, &run_dir, &safe.path);
     let cloned = run_git(clone, None).await;
     drop(safe);
     cloned?;
@@ -1774,6 +1807,19 @@ async fn prepare_clone(ctx: &SessionContext, spec: &CloneSpec) -> Result<(), Run
     .execute(&ctx.state.pool)
     .await?;
     Ok(())
+}
+
+/// The clone a run works in, taken with `global_config` as git's global config.
+fn clone_command(repo: &Path, common: &str, run_dir: &str, global_config: &Path) -> Command {
+    let mut clone = server_git(global_config);
+    clone
+        .arg("-c")
+        .arg(format!("safe.directory={}", repo.display()))
+        .args(["clone", "--quiet", "--no-hardlinks", "--no-checkout"])
+        .arg(common)
+        .arg(run_dir)
+        .current_dir(repo);
+    clone
 }
 
 /// A git config file declaring one directory safe, gone when this drops.
@@ -2354,7 +2400,14 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .join("artifacts")
             .join(&ctx.session_id);
         let mut n = 0usize;
-        for (rel, size) in files::collect_files(&root, MAX_ARTIFACTS).await {
+        // A run dir that is a link delivers nothing of its own. What the run
+        // said still reaches the drawer, below.
+        let collected = if files::is_own_dir(&ctx.worktree_dir) {
+            files::collect_files(&root, MAX_ARTIFACTS).await
+        } else {
+            Vec::new()
+        };
+        for (rel, size) in collected {
             let rel_str = files::safe_relative(&rel);
             // Control files and the inputs we placed are not deliverables.
             if rel_str.is_empty()
@@ -3086,8 +3139,6 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
             &[
                 "-c",
                 "transfer.fsckObjects=true",
-                "-c",
-                "core.hooksPath=/dev/null",
                 // The owner's repository is repacked by the owner, never by
                 // a server that is root in the image.
                 "-c",
@@ -3117,6 +3168,161 @@ async fn bring_back(ctx: &SessionContext) -> Result<Option<String>, RunnerError>
     )
     .await?;
     Ok(Some(landed))
+}
+
+#[cfg(test)]
+mod server_git_tests {
+    use super::{Path, clone_command, git_command, run_git};
+    use tokio::process::Command;
+
+    /// A home whose `.gitconfig` plants a hook and a template, as anything that
+    /// has written there would (ADR-0053).
+    fn plant_a_gitconfig(root: &Path, marker: &Path) -> std::path::PathBuf {
+        let home = root.join("home");
+        let hooks = root.join("hooks");
+        let template = root.join("template");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&hooks).expect("hooks");
+        std::fs::create_dir_all(&template).expect("template");
+        std::fs::write(template.join("planted-by-template"), "x").expect("template file");
+        let hook = hooks.join("post-checkout");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\necho ran >> '{}'\n", marker.display()),
+        )
+        .expect("hook");
+        crate::sandbox::set_mode(&hook, 0o755).expect("hook mode");
+        // Read beside any config file, whatever `GIT_CONFIG_GLOBAL` says.
+        std::fs::create_dir_all(home.join(".config/git")).expect("xdg dir");
+        std::fs::write(home.join(".config/git/ignore"), "*.planted\n").expect("xdg ignore");
+        std::fs::write(
+            home.join(".gitconfig"),
+            format!(
+                "[core]\n\thooksPath = {}\n[init]\n\ttemplateDir = {}\n",
+                hooks.display(),
+                template.display()
+            ),
+        )
+        .expect("gitconfig");
+        home
+    }
+
+    /// A repository with one commit, made with no configuration but its own.
+    async fn seeded_repo(repo: &Path) {
+        std::fs::create_dir_all(repo).expect("repo");
+        for args in [
+            &["init", "--quiet", "--initial-branch=main"][..],
+            &["add", "."][..],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "seed",
+            ][..],
+        ] {
+            let mut cmd = Command::new("git");
+            cmd.args(args)
+                .current_dir(repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null");
+            run_git(cmd, None).await.expect("seed the repository");
+        }
+    }
+
+    /// What the host's `~/.gitconfig` says is not meant for a clone the server
+    /// makes for an agent. Each command gets its own `HOME`, so the test
+    /// process's environment stays alone; the pair below is the same steps with
+    /// plain git, without which a clean result proves nothing.
+    #[tokio::test]
+    async fn the_servers_git_does_not_read_the_hosts_config() {
+        let root = std::env::temp_dir().join(format!(
+            "overmind-git-host-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let marker = root.join("the-hook-ran");
+        let home = plant_a_gitconfig(&root, &marker);
+        let repo = root.join("repo");
+        seeded_repo(&repo).await;
+        let common = repo.join(".git");
+        let common = common.to_string_lossy();
+
+        // The server's way: its clone, then its checkout.
+        let served = root.join("served");
+        let mut clone = clone_command(
+            &repo,
+            &common,
+            &served.to_string_lossy(),
+            Path::new("/dev/null"),
+        );
+        clone.env("HOME", &home);
+        run_git(clone, None).await.expect("the server's clone");
+        let mut checkout = git_command(&served, &["checkout", "--quiet", "-b", "run"]);
+        checkout.env("HOME", &home);
+        run_git(checkout, None)
+            .await
+            .expect("the server's checkout");
+        assert!(!marker.exists(), "a hook from the host's config ran");
+        assert!(
+            !served.join(".git/planted-by-template").exists(),
+            "a template from the host's config reached the clone"
+        );
+
+        // The same steps with plain git: the plant is real.
+        let plain = root.join("plain");
+        let mut clone = Command::new("git");
+        clone
+            .args(["clone", "--quiet", "--no-checkout"])
+            .arg(&*common)
+            .arg(&plain)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME");
+        run_git(clone, None).await.expect("the plain clone");
+        let mut checkout = Command::new("git");
+        checkout
+            .args(["checkout", "--quiet", "-b", "run"])
+            .current_dir(&plain)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME");
+        run_git(checkout, None).await.expect("the plain checkout");
+        // The file of ignores in `~/.config/git`, asked about in each clone.
+        let ignored = |cmd: Command| async { run_git(cmd, None).await.is_ok() };
+        let mut asked = git_command(&served, &["check-ignore", "-q", "a.planted"]);
+        asked.env("HOME", &home);
+        assert!(
+            !ignored(asked).await,
+            "the host's ~/.config/git/ignore reached the server's git"
+        );
+        let mut asked = Command::new("git");
+        asked
+            .args(["check-ignore", "-q", "a.planted"])
+            .current_dir(&plain)
+            .env("HOME", &home)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_CONFIG_GLOBAL")
+            .env_remove("XDG_CONFIG_HOME");
+        assert!(
+            ignored(asked).await,
+            "the planted ignore is never read: a broken probe"
+        );
+        assert!(
+            marker.exists(),
+            "the planted hook never runs: a broken probe"
+        );
+        assert!(
+            plain.join(".git/planted-by-template").exists(),
+            "the planted template is never used: a broken probe"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

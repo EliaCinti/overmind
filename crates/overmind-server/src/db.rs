@@ -433,6 +433,10 @@ pub struct Config {
     /// The profile cannot know every toolchain; this is how a setup it did not
     /// anticipate gets fixed without turning the cage off.
     pub sandbox_allow: Vec<PathBuf>,
+    /// Extra paths the cage may read and never write (`OVERMIND_SANDBOX_READ`,
+    /// colon-separated): a tool an agent has to run is not one it may replace
+    /// (ADR-0053).
+    pub sandbox_read: Vec<PathBuf>,
     /// The unprivileged user agent work runs as (`OVERMIND_AGENT_UID`,
     /// `OVERMIND_AGENT_GID`, `OVERMIND_AGENT_HOME` — ADR-0029).
     ///
@@ -583,6 +587,7 @@ impl Default for Config {
             web_dir: PathBuf::from("./web/dist"),
             sandbox: true,
             sandbox_allow: Vec::new(),
+            sandbox_read: Vec::new(),
             agent_uid: None,
             agent_gid: None,
             agent_home: None,
@@ -592,6 +597,15 @@ impl Default for Config {
             cookie_secure: false,
         }
     }
+}
+
+/// A colon-separated list of paths, as the cage's two allow variables take it.
+fn colon_separated_paths(value: &str) -> Vec<PathBuf> {
+    value
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 impl Config {
@@ -654,13 +668,11 @@ impl Config {
                 .map(|v| !v.eq_ignore_ascii_case("off"))
                 .unwrap_or(defaults.sandbox),
             sandbox_allow: std::env::var("OVERMIND_SANDBOX_ALLOW")
-                .map(|v| {
-                    v.split(':')
-                        .filter(|s| !s.is_empty())
-                        .map(PathBuf::from)
-                        .collect()
-                })
+                .map(|v| colon_separated_paths(&v))
                 .unwrap_or(defaults.sandbox_allow),
+            sandbox_read: std::env::var("OVERMIND_SANDBOX_READ")
+                .map(|v| colon_separated_paths(&v))
+                .unwrap_or(defaults.sandbox_read),
             // A uid we cannot parse is a uid we do not use: the cage is then
             // absent and says so, which is the direction ADR-0023 chose. The
             // alternative — falling back to some default uid — would mean
