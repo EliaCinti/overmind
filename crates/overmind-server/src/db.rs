@@ -844,7 +844,12 @@ pub async fn init_with(database_url: &str, mut config: Config) -> Result<AppStat
     // Those modes are a claim about the filesystem, and a bind mount on Docker
     // Desktop makes it false (ADR-0054). Measured here, once, before anything
     // can start a run.
-    config.uid_refuted = crate::sandbox::measure_uid(&config).await;
+    let db_files = if is_memory {
+        Vec::new()
+    } else {
+        sqlite_files(database_url)
+    };
+    config.uid_refuted = crate::sandbox::measure_uid(&config, &db_files).await;
 
     // An unclaimed instance is open by construction, so it mints the code its
     // first claim will cost (ADR-0045). Idempotent: already claimed clears it,

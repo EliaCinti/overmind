@@ -234,13 +234,26 @@ pub fn announce(config: &Config) -> String {
 /// ownership. A VirtioFS bind mount shows every file as owned by whoever looks,
 /// exFAT and network shares have their own ways, and none of them say so
 /// (ADR-0054). So the question goes to the kernel, as the agent uid, against a
-/// `0600` file of the server's and the repositories dir.
+/// `0600` file of the server's in each place it keeps something — the data
+/// dir, the backups, the database's own directory — and the repositories dir.
 ///
 /// A measurement that cannot be made counts as a failed one: the claim it
 /// would have supported is what grants the permission flag.
-pub async fn measure_uid(config: &Config) -> Option<String> {
+pub async fn measure_uid(config: &Config, db_files: &[PathBuf]) -> Option<String> {
     let user = agent_user(config)?;
-    let canary = config.data_dir.join(".uid-canary");
+    let mut shelves = vec![config.data_dir.clone(), crate::backup::backup_dir(config)];
+    shelves.extend(
+        db_files
+            .iter()
+            .filter_map(|f| f.parent().map(Path::to_path_buf)),
+    );
+    let mut canaries: Vec<PathBuf> = Vec::new();
+    for shelf in shelves.into_iter().filter(|d| d.is_dir()) {
+        let canary = shelf.join(".uid-canary");
+        if !canaries.contains(&canary) {
+            canaries.push(canary);
+        }
+    }
     let repos = config.repos_dir.clone();
     tokio::task::spawn_blocking(move || {
         // A probe that cannot even start would read as "refused" below, which
@@ -251,14 +264,18 @@ pub async fn measure_uid(config: &Config) -> Option<String> {
                 user.uid
             ));
         }
-        if let Err(e) = plant_canary(&canary) {
-            return Some(format!(
-                "it could not be measured at {}: {e}",
-                canary.display()
-            ));
+        for canary in &canaries {
+            if let Err(e) = plant_canary(canary) {
+                return Some(format!(
+                    "it could not be measured at {}: {e}",
+                    canary.display()
+                ));
+            }
         }
-        let reached = uid_reaches(user, &canary, repos.as_deref());
-        let _ = std::fs::remove_file(&canary);
+        let reached = uid_reaches(user, &canaries, repos.as_deref());
+        for canary in &canaries {
+            let _ = std::fs::remove_file(canary);
+        }
         (!reached.is_empty()).then(|| reached.join("; "))
     })
     .await
@@ -313,7 +330,7 @@ fn uid_runs(_user: AgentUser) -> bool {
 
 /// What `user` reached of what it must not, each in a sentence.
 #[cfg(unix)]
-fn uid_reaches(user: AgentUser, canary: &Path, repos: Option<&Path>) -> Vec<String> {
+fn uid_reaches(user: AgentUser, canaries: &[PathBuf], repos: Option<&Path>) -> Vec<String> {
     use std::os::unix::process::CommandExt;
     let can = |script: &str, path: &Path| {
         std::process::Command::new("sh")
@@ -328,8 +345,10 @@ fn uid_reaches(user: AgentUser, canary: &Path, repos: Option<&Path>) -> Vec<Stri
             .is_ok_and(|status| status.success())
     };
     let mut reached = Vec::new();
-    if can("cat -- \"$1\"", canary) {
-        reached.push(format!("uid {} read {}", user.uid, canary.display()));
+    for canary in canaries {
+        if can("cat -- \"$1\"", canary) {
+            reached.push(format!("uid {} read {}", user.uid, canary.display()));
+        }
     }
     if let Some(repos) = repos
         && can("ls -- \"$1\"", repos)
@@ -340,7 +359,7 @@ fn uid_reaches(user: AgentUser, canary: &Path, repos: Option<&Path>) -> Vec<Stri
 }
 
 #[cfg(not(unix))]
-fn uid_reaches(_user: AgentUser, _canary: &Path, _repos: Option<&Path>) -> Vec<String> {
+fn uid_reaches(_user: AgentUser, _canaries: &[PathBuf], _repos: Option<&Path>) -> Vec<String> {
     Vec::new()
 }
 
@@ -1535,7 +1554,7 @@ probe write_cli_state write "$H/.claude/settings.json"
         let canary = dir.join("canary");
         std::fs::write(&canary, "x").expect("canary");
         set_mode(&canary, 0o600).expect("mode");
-        let reached = uid_reaches(this_user(), &canary, None);
+        let reached = uid_reaches(this_user(), &[dir.join("refused"), canary.clone()], None);
         assert_eq!(reached.len(), 1, "reached: {reached:?}");
         assert!(
             reached[0].contains(&canary.display().to_string()),
@@ -1547,7 +1566,7 @@ probe write_cli_state write "$H/.claude/settings.json"
     #[test]
     fn a_repositories_dir_the_agent_uid_can_list_means_the_same() {
         let dir = fresh_dir("repos");
-        let reached = uid_reaches(this_user(), &dir.join("no-canary"), Some(&dir));
+        let reached = uid_reaches(this_user(), &[dir.join("no-canary")], Some(&dir));
         assert_eq!(reached.len(), 1, "reached: {reached:?}");
         assert!(
             reached[0].contains(&dir.display().to_string()),
@@ -1567,7 +1586,7 @@ probe write_cli_state write "$H/.claude/settings.json"
         let dir = fresh_dir("refused");
         let reached = uid_reaches(
             this_user(),
-            &dir.join("no-canary"),
+            &[dir.join("no-canary")],
             Some(&dir.join("no-repos")),
         );
         assert!(reached.is_empty(), "reached: {reached:?}");
