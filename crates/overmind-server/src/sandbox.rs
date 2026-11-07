@@ -243,6 +243,14 @@ pub async fn measure_uid(config: &Config) -> Option<String> {
     let canary = config.data_dir.join(".uid-canary");
     let repos = config.repos_dir.clone();
     tokio::task::spawn_blocking(move || {
+        // A probe that cannot even start would read as "refused" below, which
+        // is the answer that grants the permission flag.
+        if !uid_runs(user) {
+            return Some(format!(
+                "it could not be measured: uid {} could not run a shell",
+                user.uid
+            ));
+        }
         if let Err(e) = plant_canary(&canary) {
             return Some(format!(
                 "it could not be measured at {}: {e}",
@@ -281,6 +289,26 @@ fn plant_canary(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn plant_canary(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Can `user` run anything at all? The control for [`uid_reaches`].
+#[cfg(unix)]
+fn uid_runs(user: AgentUser) -> bool {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("sh")
+        .args(["-c", "true"])
+        .uid(user.uid)
+        .gid(user.gid)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn uid_runs(_user: AgentUser) -> bool {
+    false
 }
 
 /// What `user` reached of what it must not, each in a sentence.
@@ -1525,6 +1553,12 @@ probe write_cli_state write "$H/.claude/settings.json"
             reached[0].contains(&dir.display().to_string()),
             "{reached:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_has_a_control_that_runs() {
+        assert!(uid_runs(this_user()));
     }
 
     #[cfg(unix)]
