@@ -827,7 +827,8 @@ pub async fn init_with(database_url: &str, mut config: Config) -> Result<AppStat
     // Where agent work runs as another uid (ADR-0029), the boundary is only as
     // real as the filesystem under it. Both calls are no-ops without an agent
     // uid, which is every install but the image.
-    if let Err(e) = crate::sandbox::lay_out_data_dir(&config).await {
+    let laid_out = crate::sandbox::lay_out_data_dir(&config).await;
+    if let Err(e) = &laid_out {
         eprintln!("data dir layout failed (agents may be able to read it): {e}");
     }
     // SQLite makes these 0644, and they hold the audit chain and every
@@ -849,7 +850,14 @@ pub async fn init_with(database_url: &str, mut config: Config) -> Result<AppStat
     } else {
         sqlite_files(database_url)
     };
-    config.uid_refuted = crate::sandbox::measure_uid(&config, &db_files).await;
+    // A layout that did not happen leaves modes nobody set, so the uid is not
+    // measured against them: it simply does not count.
+    config.uid_refuted = match laid_out {
+        Err(e) if crate::sandbox::drops_to_agent_uid(&config) => {
+            Some(format!("the data dir could not be laid out: {e}"))
+        }
+        _ => crate::sandbox::measure_uid(&config, &db_files).await,
+    };
 
     // An unclaimed instance is open by construction, so it mints the code its
     // first claim will cost (ADR-0045). Idempotent: already claimed clears it,

@@ -961,18 +961,33 @@ pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
 }
 
 fn lay_out(root: &Path, runs: &Path, home: Option<&Path>, user: AgentUser) -> std::io::Result<()> {
+    // These run as root at every start, over a tree an agent could write on an
+    // install that was exposed (ADR-0054): a link where a shelf should be is
+    // refused, never followed, or the mode lands on whatever it names.
+    let shelf = |path: &Path, mode: u32| {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(std::io::Error::other(format!(
+                "{} is a link where Overmind keeps a directory of its own; remove it",
+                path.display()
+            )));
+        }
+        mkdir_mode(path, mode)
+    };
     // With the runs elsewhere, the agent has no reason to walk through here.
     // Runs inside it -- the default, or OVERMIND_RUNS_DIR under the data dir --
     // are reached through it.
     mkdir_mode(root, if runs.starts_with(root) { 0o755 } else { 0o700 })?;
     // Overmind's own shelves.
     for name in ["companies", "artifacts", "attachments", "backups"] {
-        mkdir_mode(&root.join(name), 0o700)?;
+        shelf(&root.join(name), 0o700)?;
     }
     mkdir_mode(runs, 0o755)?;
     // Traversable, not listable: these hold the runs.
     for name in ["sessions", "worktrees", "chat", "meetings"] {
-        mkdir_mode(&runs.join(name), 0o711)?;
+        shelf(&runs.join(name), 0o711)?;
     }
     // The agent's home is the agent's. A named volume mounted there — which
     // is how credentials survive a rebuild — arrives owned by root and empty,
@@ -986,7 +1001,7 @@ fn lay_out(root: &Path, runs: &Path, home: Option<&Path>, user: AgentUser) -> st
         mkdir_mode(home, 0o700)?;
         chown_one(home, user)?;
         let cli_state = home.join(".claude");
-        mkdir_mode(&cli_state, 0o700)?;
+        shelf(&cli_state, 0o700)?;
         chown_one(&cli_state, user)?;
     }
     Ok(())
@@ -1651,6 +1666,30 @@ probe write_cli_state write "$H/.claude/settings.json"
         }
         assert_eq!(mode(data), 0o700);
         assert_eq!(mode(runs), 0o755);
+    }
+
+    /// An install that was exposed (ADR-0054) may carry links an agent planted
+    /// in the data dir. The layout runs as root at every start, and a mode set
+    /// through one lands on whatever it names.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_where_a_shelf_should_be_is_refused_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_dir("planted");
+        let (data, runs, target) = (dir.join("data"), dir.join("runs"), dir.join("target"));
+        std::fs::create_dir_all(&data).expect("data");
+        std::fs::create_dir_all(&target).expect("target");
+        set_mode(&target, 0o755).expect("mode");
+        std::os::unix::fs::symlink(&target, data.join("backups")).expect("link");
+
+        let refused = lay_out(&data, &runs, None, this_user());
+        assert!(refused.is_err(), "the layout went through the link");
+        let mode = std::fs::metadata(&target)
+            .expect("target")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the link's target was re-moded");
     }
 
     #[cfg(unix)]
