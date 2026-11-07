@@ -503,7 +503,7 @@ In the image, on every row, an agent cannot read the database, the audit chain, 
 docker exec --user 10001 overmind sh -c 'cat /data/overmind.sqlite >/dev/null 2>&1 && echo EXPOSED || echo held'
 ```
 
-`EXPOSED` means an agent on that instance can read Overmind's own data. That was true on Docker Desktop with the default compose file from v0.2.4 until the fix ([GHSA-cr22-mp4p-vj89](https://github.com/EliaCinti/overmind/security/advisories/GHSA-cr22-mp4p-vj89)). Update the image with `docker compose up -d --pull always`; your compose file can stay as it is.
+`EXPOSED` means an agent on that instance can read Overmind's own data. That was true on Docker Desktop with the default compose file from v0.2.4 until the fix ([GHSA-cr22-mp4p-vj89](https://github.com/EliaCinti/overmind/security/advisories/GHSA-cr22-mp4p-vj89)). Update the image with `docker compose up -d --pull always`; your compose file can stay as it is. If that instance ran tasks you do not fully trust, updating closes the hole but does not undo what came through it: sign in again (or replace your API key), since the subscription token was in `./data`; check the audit chain from the product or with `GET /api/audit/verify`; and look for links an agent may have left, with `find ./data -type l` — the updated server refuses to cage a run while one sits where it keeps its own directories, and says which.
 
 Found a way across a boundary the threat model claims? Report it privately, as [SECURITY.md](SECURITY.md) says.
 
