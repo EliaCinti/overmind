@@ -410,11 +410,28 @@ async fn concurrent_tasks_use_memory_in_parallel() {
     }
 
     // Every completion stored a memory concurrently — all N landed.
-    let logged = std::fs::read_to_string(&store_log).unwrap_or_default();
-    let count = logged
-        .lines()
-        .filter(|l| l.contains("Concurrent task"))
-        .count();
+    //
+    // Waited for, not read once. A run is `completed` when finalize commits,
+    // and the memory is stored after that, best-effort, outside the
+    // transaction (runner.rs). Reading the log the moment the last session
+    // reads `completed` raced that store and lost about one run in eight:
+    // five memories of six, the sixth still on its way.
+    let count_stored = || {
+        let logged = std::fs::read_to_string(&store_log).unwrap_or_default();
+        let count = logged
+            .lines()
+            .filter(|l| l.contains("Concurrent task"))
+            .count();
+        (count, logged)
+    };
+    let (mut count, mut logged) = count_stored();
+    for _ in 0..100 {
+        if count >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        (count, logged) = count_stored();
+    }
     assert_eq!(
         count, n,
         "expected {n} stored memories, got {count}: {logged:?}"
