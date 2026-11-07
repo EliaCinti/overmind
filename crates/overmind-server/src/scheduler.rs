@@ -50,9 +50,10 @@ async fn process_digests(state: &AppState) -> Result<(), RunnerError> {
         "SELECT c.id, c.company_id, c.agent_id, MAX(s.finished_at), MAX(m.created_at)
          FROM conversations c
          JOIN tasks t ON t.conversation_id = c.id
-         JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed'
+         JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed' AND s.applied = 1
          JOIN messages m ON m.conversation_id = c.id
          WHERE s.finished_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM task_artifacts a WHERE a.session_id = s.id AND a.kind = 'handoff')
          GROUP BY c.id
          HAVING MAX(s.finished_at) > MAX(m.created_at)",
     )
@@ -77,11 +78,14 @@ async fn process_digests(state: &AppState) -> Result<(), RunnerError> {
             continue;
         }
         // What finished since the person's last word, worded by the agents'
-        // own reports (clamped: a digest reads summaries, not transcripts).
+        // own reports (clamped: a digest reads summaries, not transcripts). A
+        // run that handed off is `completed` with its task back in the queue:
+        // that is not finished.
         let finished: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
             "SELECT t.title, COALESCE(s.output, '') FROM tasks t
-             JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed'
+             JOIN agent_task_sessions s ON s.task_id = t.id AND s.status = 'completed' AND s.applied = 1
              WHERE t.conversation_id = ? AND s.finished_at > ?
+               AND NOT EXISTS (SELECT 1 FROM task_artifacts a WHERE a.session_id = s.id AND a.kind = 'handoff')
              ORDER BY s.finished_at DESC LIMIT 6",
         )
         .bind(&convo)

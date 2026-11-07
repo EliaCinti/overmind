@@ -371,30 +371,20 @@ async fn restart_recovery_resumes_orphaned_session() {
     .execute(&env.state.pool)
     .await
     .expect("insert orphan session");
-    sqlx::query("UPDATE tasks SET status = 'in_progress', assignee_agent_id = ? WHERE id = ?")
-        .bind(&agent_id)
-        .bind(&task_id)
-        .execute(&env.state.pool)
-        .await
-        .expect("mark task in progress");
+    // As the checkout leaves it: in progress, held by the orphaned run.
+    sqlx::query(
+        "UPDATE tasks SET status = 'in_progress', assignee_agent_id = ?, run_session_id = 'orphan-sess' WHERE id = ?",
+    )
+    .bind(&agent_id)
+    .bind(&task_id)
+    .execute(&env.state.pool)
+    .await
+    .expect("mark task in progress");
     env.state.pool.close().await;
 
     // "Second server run" over the same database: its registry is empty, so
     // the heartbeat must recover and resume the orphan.
-    let script_path = root.join("stub2.sh");
-    std::fs::write(&script_path, HAPPY_STUB).expect("write stub");
-    let config = overmind_server::Config {
-        agent_cmd: Some(format!("sh {}", script_path.display())),
-        data_dir: root.join("data"),
-        heartbeat_ms: 100,
-        ..overmind_server::Config::default()
-    };
-    let state2 = overmind_server::init_with(&db_url, config)
-        .await
-        .expect("reopen db");
-    // The same owner, entering a server that has already been claimed.
-    let app2 = common::claimed(overmind_server::app(state2.clone()), &root.join("data")).await;
-    let _scheduler = overmind_server::scheduler::spawn(state2.clone());
+    let (state2, app2, _scheduler) = restart(&root, &db_url).await;
 
     let session = wait_for_session(&app2, "orphan-sess").await;
     assert_eq!(session["status"], "completed", "session: {session}");
@@ -1707,4 +1697,613 @@ git commit -qm "the agent's work"
         "work",
         "{session}"
     );
+}
+
+// --- A run ends on the task it started (plan 2026-11-01) --------------------
+
+/// Holds the run until the test drops `gate` next to the script, then goes on
+/// with `then`: the test moves the task while the run is held.
+fn gated(then: &str) -> String {
+    format!(
+        "#!/bin/sh\nwhile [ ! -f \"$(dirname \"$0\")/gate\" ]; do sleep 0.05; done\n{}",
+        then.trim_start_matches("#!/bin/sh\n")
+    )
+}
+
+fn open_gate(env: &Env, name: &str) {
+    std::fs::write(env.root.join(name), "").expect("open the gate");
+}
+
+async fn start(env: &Env, task_id: &str, agent_id: &str) -> String {
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/start"),
+        Some(json!({ "agent_id": agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start: {started}");
+    started["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_string()
+}
+
+async fn move_by_hand(env: &Env, task_id: &str, to: &str) {
+    let (status, moved) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{task_id}/transition"),
+        Some(json!({ "to": to })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "transition: {moved}");
+}
+
+async fn audit_of(env: &Env, task_id: &str, kind: &str) -> Vec<Value> {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT payload FROM audit_events WHERE task_id = ? AND kind = ? ORDER BY seq",
+    )
+    .bind(task_id)
+    .bind(kind)
+    .fetch_all(&env.state.pool)
+    .await
+    .expect("audit")
+    .into_iter()
+    .map(|(p,)| serde_json::from_str(&p).expect("payload"))
+    .collect()
+}
+
+async fn finished_payload(env: &Env, task_id: &str, session_id: &str) -> Value {
+    audit_of(env, task_id, "session.finished")
+        .await
+        .into_iter()
+        .find(|p| p["session_id"] == session_id)
+        .expect("session.finished")
+}
+
+/// The run's outcome is not written over the person's decision, the chain
+/// records no move out of a state the task was not in, and the session says
+/// why the task did not move.
+async fn assert_left_where_the_person_put_it(env: &Env, task_id: &str, session_id: &str, to: &str) {
+    assert_eq!(task_status(env, task_id).await, to);
+    let last = audit_of(env, task_id, "task.transitioned")
+        .await
+        .pop()
+        .expect("a transition");
+    assert_eq!(last["to"], to, "the last move is the person's: {last}");
+    let finished = finished_payload(env, task_id, session_id).await;
+    assert_eq!(finished["applied"], json!(false), "{finished}");
+    assert_eq!(finished["task_status"], to, "{finished}");
+}
+
+/// NEXT.md, *Debts from the attempts cap*: cancel a task mid-run and the
+/// run's end brought it back to review.
+#[tokio::test]
+async fn a_task_cancelled_while_its_run_works_stays_cancelled() {
+    let env = build_env(&gated(HAPPY_STUB), None, |_| {}).await;
+    let agent_id = hire(&env, "Worker", "builder").await;
+    let task_id = make_todo_task(&env, "Cancelled midway").await;
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "cancelled").await;
+    open_gate(&env, "gate");
+    let session = wait_for_session(&env.app, &session_id).await;
+
+    // What the run did and cost is still recorded in full.
+    assert_eq!(session["status"], "completed", "{session}");
+    assert_left_where_the_person_put_it(&env, &task_id, &session_id, "cancelled").await;
+    assert!(audit_of(&env, &task_id, "task.released").await.is_empty());
+    let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
+    assert_eq!(report["valid"], json!(true));
+}
+
+#[tokio::test]
+async fn a_task_blocked_by_hand_while_its_run_works_stays_blocked() {
+    let env = build_env(&gated(HAPPY_STUB), None, |_| {}).await;
+    let agent_id = hire(&env, "Worker", "builder").await;
+    let task_id = make_todo_task(&env, "Blocked midway").await;
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "blocked").await;
+    open_gate(&env, "gate");
+    wait_for_session(&env.app, &session_id).await;
+
+    assert_left_where_the_person_put_it(&env, &task_id, &session_id, "blocked").await;
+}
+
+/// The release path also cleared the assignee of a task the person had
+/// already taken out of the queue.
+#[tokio::test]
+async fn a_run_that_releases_does_not_unassign_a_cancelled_task() {
+    let env = build_env(SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Cancelled before its deadline").await;
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "cancelled").await;
+    let session = wait_for_session(&env.app, &session_id).await;
+    assert_eq!(session["status"], "failed", "{session}");
+
+    assert_left_where_the_person_put_it(&env, &task_id, &session_id, "cancelled").await;
+    assert!(audit_of(&env, &task_id, "task.released").await.is_empty());
+    let (assignee,): (Option<String>,) =
+        sqlx::query_as("SELECT assignee_agent_id FROM tasks WHERE id = ?")
+            .bind(&task_id)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("task");
+    assert_eq!(assignee.as_deref(), Some(agent_id.as_str()));
+}
+
+#[tokio::test]
+async fn a_run_at_the_cap_does_not_stall_a_cancelled_task() {
+    let env = build_env(SLOW_STUB, None, |c| {
+        c.session_timeout_secs = 1;
+        c.attempts_cap = 1;
+    })
+    .await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Cancelled at the cap").await;
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "cancelled").await;
+    wait_for_session(&env.app, &session_id).await;
+
+    assert_left_where_the_person_put_it(&env, &task_id, &session_id, "cancelled").await;
+    assert!(stalled_payloads(&env, &task_id).await.is_empty());
+}
+
+/// Put back in the queue by hand while the first run works, the task is
+/// checked out again: it is the second run's now, and the first run ending
+/// later -- even on `in_progress` -- must not write over it.
+#[tokio::test]
+async fn a_run_that_ends_after_the_task_was_restarted_leaves_the_new_run_alone() {
+    // The first run to arrive fails on gate_a; the second succeeds on gate_b.
+    let stub = format!(
+        "#!/bin/sh\nd=\"$(dirname \"$0\")\"\n\
+         if mkdir \"$d/first\" 2>/dev/null; then\n\
+           while [ ! -f \"$d/gate_a\" ]; do sleep 0.05; done\n\
+           echo 'it broke' >&2\n  exit 1\nfi\n\
+         while [ ! -f \"$d/gate_b\" ]; do sleep 0.05; done\n{}",
+        HAPPY_STUB.trim_start_matches("#!/bin/sh\n")
+    );
+    let env = build_env(&stub, None, |_| {}).await;
+    let first_agent = hire(&env, "First", "builder").await;
+    let second_agent = hire(&env, "Second", "builder").await;
+    let task_id = make_todo_task(&env, "Restarted midway").await;
+
+    let first = start(&env, &task_id, &first_agent).await;
+    while !env.root.join("first").exists() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    move_by_hand(&env, &task_id, "todo").await;
+    let second = start(&env, &task_id, &second_agent).await;
+
+    open_gate(&env, "gate_b");
+    wait_for_session(&env.app, &second).await;
+    assert_eq!(task_status(&env, &task_id).await, "in_review");
+
+    open_gate(&env, "gate_a");
+    let session = wait_for_session(&env.app, &first).await;
+    assert_eq!(session["status"], "failed", "{session}");
+    assert_eq!(task_status(&env, &task_id).await, "in_review");
+    let finished = finished_payload(&env, &task_id, &first).await;
+    assert_eq!(finished["applied"], json!(false), "{finished}");
+    let last = audit_of(&env, &task_id, "task.transitioned")
+        .await
+        .pop()
+        .expect("a transition");
+    assert_eq!(last["to"], "in_review", "{last}");
+}
+
+#[tokio::test]
+async fn a_completed_run_of_a_cancelled_task_releases_no_dependents() {
+    let env = build_env(&gated(HAPPY_STUB), None, |_| {}).await;
+    let agent_id = hire(&env, "Reader", "researcher").await;
+    let task_id = make_todo_knowledge_task(&env, "Cancelled upstream").await;
+    let dependent = make_todo_knowledge_task(&env, "Waits on it").await;
+    sqlx::query("UPDATE tasks SET depends_on = ? WHERE id = ?")
+        .bind(&task_id)
+        .bind(&dependent)
+        .execute(&env.state.pool)
+        .await
+        .expect("make it wait");
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "cancelled").await;
+    open_gate(&env, "gate");
+    let session = wait_for_session(&env.app, &session_id).await;
+    assert_eq!(session["status"], "completed", "{session}");
+    // release_dependents is spawned after the commit: give it the time it
+    // would take.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let (_, atts) = send(
+        &env.app,
+        "GET",
+        &format!("/api/tasks/{dependent}/attachments"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        atts["attachments"].as_array().map(Vec::len),
+        Some(0),
+        "{atts}"
+    );
+}
+
+/// A run of a task cancelled while the server was down came back to life at
+/// the restart, and its end brought the task back.
+#[tokio::test]
+async fn a_session_of_a_cancelled_task_is_not_resumed_after_a_restart() {
+    let root = unique_root();
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let db_url = format!("sqlite://{}", root.join("overmind.sqlite").display());
+
+    let env = build_env(HAPPY_STUB, Some(db_url.clone()), |_| {}).await;
+    let agent_id = hire(&env, "Phoenix", "builder").await;
+    let task_id = make_todo_task(&env, "Cancelled while down").await;
+    let repo = env.root.join("repo");
+    let orphan_wt = env.root.join("data").join("worktrees").join("orphan-sess");
+    std::fs::create_dir_all(orphan_wt.parent().expect("parent")).expect("mkdir worktrees");
+    sh(
+        &repo,
+        &format!(
+            "git worktree add {} -b overmind/orphan",
+            orphan_wt.display()
+        ),
+    );
+    let base_sha = sh(&orphan_wt, "git rev-parse HEAD");
+    sqlx::query(
+        "INSERT INTO agent_task_sessions (id, task_id, agent_id, status, branch, workspace_path, base_sha, created_at, started_at)
+         VALUES ('orphan-sess', ?, ?, 'running', 'overmind/orphan', ?, ?, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+    )
+    .bind(&task_id)
+    .bind(&agent_id)
+    .bind(orphan_wt.to_string_lossy().as_ref())
+    .bind(&base_sha)
+    .execute(&env.state.pool)
+    .await
+    .expect("insert orphan session");
+    sqlx::query(
+        "UPDATE tasks SET status = 'in_progress', assignee_agent_id = ?, run_session_id = 'orphan-sess' WHERE id = ?",
+    )
+    .bind(&agent_id)
+    .bind(&task_id)
+    .execute(&env.state.pool)
+    .await
+    .expect("mark task in progress");
+    move_by_hand(&env, &task_id, "cancelled").await;
+    sqlx::query("UPDATE companies SET language = 'it' WHERE id = ?")
+        .bind(&env.company_id)
+        .execute(&env.state.pool)
+        .await
+        .expect("an Italian company");
+    env.state.pool.close().await;
+
+    let (state2, app2, _scheduler) = restart(&root, &db_url).await;
+
+    let session = wait_for_session(&app2, "orphan-sess").await;
+    assert_eq!(session["status"], "failed", "{session}");
+    // The person reads why, in the company's language.
+    assert!(
+        session["last_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("non è stata ripresa"),
+        "{session}"
+    );
+    assert!(
+        !orphan_wt.join("result.txt").exists(),
+        "the agent did not run again"
+    );
+    assert_eq!(resumed_count(&state2.pool, "orphan-sess").await, 0);
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(&state2.pool)
+        .await
+        .expect("task status");
+    assert_eq!(status, "cancelled");
+}
+
+// --- The task knows its run (plan 2026-11-01) --------------------------------
+
+/// Blocked and put back in progress by hand, the task never went through
+/// `todo`, so no new session holds it: the person does, and the old run
+/// ending later must not move it.
+#[tokio::test]
+async fn a_task_blocked_and_resumed_by_hand_is_not_the_old_runs_anymore() {
+    let env = build_env(&gated(HAPPY_STUB), None, |_| {}).await;
+    let agent_id = hire(&env, "Worker", "builder").await;
+    let task_id = make_todo_task(&env, "Blocked and back").await;
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "blocked").await;
+    move_by_hand(&env, &task_id, "in_progress").await;
+    open_gate(&env, "gate");
+    wait_for_session(&env.app, &session_id).await;
+
+    assert_left_where_the_person_put_it(&env, &task_id, &session_id, "in_progress").await;
+}
+
+/// The server comes back on the same database, with an agent that just works,
+/// and the same owner enters it: it has already been claimed.
+async fn restart(
+    root: &std::path::Path,
+    db_url: &str,
+) -> (overmind_server::AppState, axum::Router, impl Sized) {
+    let script_path = root.join("stub2.sh");
+    std::fs::write(&script_path, HAPPY_STUB).expect("write stub");
+    let config = overmind_server::Config {
+        agent_cmd: Some(format!("sh {}", script_path.display())),
+        data_dir: root.join("data"),
+        heartbeat_ms: 100,
+        ..overmind_server::Config::default()
+    };
+    let state = overmind_server::init_with(db_url, config)
+        .await
+        .expect("reopen db");
+    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
+    let scheduler = overmind_server::scheduler::spawn(state.clone());
+    (state, app, scheduler)
+}
+
+/// A session is `running` once its clone is ready: only then does a restart
+/// find a run it can bring back.
+async fn wait_until_running(env: &Env, session_id: &str) {
+    for _ in 0..200 {
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM agent_task_sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_one(&env.state.pool)
+                .await
+                .expect("session status");
+        if status == "running" {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("session {session_id} never got its clone");
+}
+
+async fn resumed_count(pool: &sqlx::SqlitePool, session_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT resumed_count FROM agent_task_sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await
+        .expect("resumed_count")
+}
+
+/// Put back in the queue and started again, a task has two live sessions.
+/// After a restart only the one that holds it comes back: the stale one would
+/// spend a second time on work that is no longer its own.
+#[tokio::test]
+async fn a_stale_run_is_not_resumed_when_its_task_was_started_again() {
+    let root = unique_root();
+    std::fs::create_dir_all(&root).expect("mkdir");
+    let db_url = format!("sqlite://{}", root.join("overmind.sqlite").display());
+
+    // The gate is never opened: both runs are still working when the server
+    // goes down.
+    let env = build_env(&gated(HAPPY_STUB), Some(db_url.clone()), |_| {}).await;
+    let first_agent = hire(&env, "First", "builder").await;
+    let second_agent = hire(&env, "Second", "builder").await;
+    let task_id = make_todo_task(&env, "Started twice").await;
+    let first = start(&env, &task_id, &first_agent).await;
+    move_by_hand(&env, &task_id, "todo").await;
+    let second = start(&env, &task_id, &second_agent).await;
+    wait_until_running(&env, &first).await;
+    wait_until_running(&env, &second).await;
+    env.state.pool.close().await;
+
+    let (state2, app2, _scheduler) = restart(&root, &db_url).await;
+
+    let stale = wait_for_session(&app2, &first).await;
+    assert_eq!(resumed_count(&state2.pool, &first).await, 0, "{stale}");
+    assert_eq!(stale["status"], "failed", "{stale}");
+    // The run that holds the task is the one brought back.
+    for _ in 0..50 {
+        if resumed_count(&state2.pool, &second).await == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(resumed_count(&state2.pool, &second).await, 1);
+    let (payload,): (String,) = sqlx::query_as(
+        "SELECT payload FROM audit_events
+         WHERE kind = 'session.finished' AND json_extract(payload, '$.session_id') = ?",
+    )
+    .bind(&first)
+    .fetch_one(&state2.pool)
+    .await
+    .expect("session.finished");
+    let finished: Value = serde_json::from_str(&payload).expect("payload");
+    assert_eq!(finished["applied"], json!(false), "{finished}");
+}
+
+/// The cap counts the failures of the runs that held the task. A run put back
+/// in the queue under it failed on work that was no longer its own.
+#[tokio::test]
+async fn an_unapplied_failure_does_not_count_toward_the_cap() {
+    let env = build_env(SLOW_STUB, None, |c| {
+        c.session_timeout_secs = 1;
+        c.attempts_cap = 2;
+    })
+    .await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Requeued under its run").await;
+
+    let first = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "todo").await;
+    wait_for_session(&env.app, &first).await;
+    // Why it failed stays true; that it was not the task's run is its own fact.
+    let (cause, applied): (Option<String>, bool) =
+        sqlx::query_as("SELECT failure_cause, applied FROM agent_task_sessions WHERE id = ?")
+            .bind(&first)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("session");
+    assert_eq!(cause.as_deref(), Some("timed_out"));
+    assert!(!applied);
+
+    // The one run that held it times out: one failure, under a cap of two.
+    attempt(&env, &task_id, &agent_id).await;
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    assert!(stalled_payloads(&env, &task_id).await.is_empty());
+}
+
+/// A person put the task back in the queue because the run was going the wrong
+/// way: what that run hands on stays on the task for them to read, but the next
+/// attempt does not start from it.
+#[tokio::test]
+async fn the_next_attempt_does_not_read_the_handoff_of_a_run_that_lost_its_task() {
+    let env = build_env(TALKING_SLOW_STUB, None, |c| c.session_timeout_secs = 1).await;
+    let agent_id = hire(&env, "Slowpoke", "builder").await;
+    let task_id = make_todo_task(&env, "Requeued, wrong direction").await;
+
+    let first = start(&env, &task_id, &agent_id).await;
+    move_by_hand(&env, &task_id, "todo").await;
+    wait_for_session(&env.app, &first).await;
+    assert_eq!(handoffs(&env, &task_id).await.len(), 1);
+
+    std::fs::write(env.root.join("stub-agent.sh"), PROMPT_STUB).expect("swap stub");
+    let session = attempt(&env, &task_id, &agent_id).await;
+    let prompt = session["output"].as_str().unwrap_or("");
+    assert!(!prompt.contains("previous attempt"), "{prompt}");
+    assert!(
+        !prompt.contains("read the brief, drafted the outline"),
+        "{prompt}"
+    );
+}
+
+/// Writes no file: a knowledge run that delivers only its transcript.
+const EMPTY_HANDED_STUB: &str = "#!/bin/sh\necho '{\"model\":\"stub\",\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n";
+
+/// An empty-handed run is downgraded to failed after the agent exits; the
+/// release read what the agent claimed instead.
+#[tokio::test]
+async fn an_empty_handed_run_releases_no_dependents() {
+    let env = build_env(EMPTY_HANDED_STUB, None, |_| {}).await;
+    let agent_id = hire(&env, "Reader", "researcher").await;
+    let task_id = make_todo_knowledge_task(&env, "Delivers nothing").await;
+    let dependent = make_todo_knowledge_task(&env, "Waits on it").await;
+    sqlx::query("UPDATE tasks SET depends_on = ? WHERE id = ?")
+        .bind(&task_id)
+        .bind(&dependent)
+        .execute(&env.state.pool)
+        .await
+        .expect("make it wait");
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    let session = wait_for_session(&env.app, &session_id).await;
+    assert_eq!(session["status"], "failed", "{session}");
+    assert_eq!(task_status(&env, &task_id).await, "blocked");
+    // release_dependents is spawned after the commit: give it the time it
+    // would take.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let depends_on: Option<String> =
+        sqlx::query_scalar("SELECT depends_on FROM tasks WHERE id = ?")
+            .bind(&dependent)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("dependent");
+    assert_eq!(depends_on.as_deref(), Some(task_id.as_str()));
+}
+
+/// A run that hands off is recorded `completed`, but its task goes back to the
+/// queue: nothing was finished, so what waits on it keeps waiting.
+#[tokio::test]
+async fn a_run_that_hands_off_releases_no_dependents() {
+    let env = build_env(HANDING_OFF_STUB, None, |_| {}).await;
+    let agent_id = hire(&env, "Careful", "builder").await;
+    let task_id = make_todo_task(&env, "Half a day of work").await;
+    let dependent = make_todo_knowledge_task(&env, "Waits on it").await;
+    sqlx::query("UPDATE tasks SET depends_on = ? WHERE id = ?")
+        .bind(&task_id)
+        .bind(&dependent)
+        .execute(&env.state.pool)
+        .await
+        .expect("make it wait");
+
+    let session_id = start(&env, &task_id, &agent_id).await;
+    let session = wait_for_session(&env.app, &session_id).await;
+    assert_eq!(session["status"], "completed", "{session}");
+    assert_eq!(task_status(&env, &task_id).await, "todo");
+    // release_dependents is spawned after the commit: give it the time it
+    // would take.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let depends_on: Option<String> =
+        sqlx::query_scalar("SELECT depends_on FROM tasks WHERE id = ?")
+            .bind(&dependent)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("dependent");
+    assert_eq!(depends_on.as_deref(), Some(task_id.as_str()));
+}
+
+/// A run in flight across the upgrade holds its task: the backfill gives each
+/// `in_progress` task its newest live session.
+#[tokio::test]
+async fn a_run_in_flight_across_the_migration_keeps_its_task() {
+    let env = build_env(HAPPY_STUB, None, |_| {}).await;
+    let agent_id = hire(&env, "Worker", "builder").await;
+    let task_id = make_todo_task(&env, "In flight at the upgrade").await;
+    sqlx::query("UPDATE tasks SET status = 'in_progress', assignee_agent_id = ? WHERE id = ?")
+        .bind(&agent_id)
+        .bind(&task_id)
+        .execute(&env.state.pool)
+        .await
+        .expect("mark task in progress");
+    for (id, status, at) in [
+        ("older-run", "running", "2026-01-01T00:00:00+00:00"),
+        ("in-flight", "running", "2026-01-02T00:00:00+00:00"),
+        ("ended-later", "failed", "2026-01-03T00:00:00+00:00"),
+    ] {
+        sqlx::query(
+            "INSERT INTO agent_task_sessions (id, task_id, agent_id, status, branch, workspace_path, created_at)
+             VALUES (?, ?, ?, ?, 'overmind/x', '/nowhere', ?)",
+        )
+        .bind(id)
+        .bind(&task_id)
+        .bind(&agent_id)
+        .bind(status)
+        .bind(at)
+        .execute(&env.state.pool)
+        .await
+        .expect("insert session");
+    }
+
+    let migration = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations/0035_task_run_session.sql"
+    ))
+    .expect("migration 0035");
+    let backfill: Vec<String> = migration
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .split(';')
+        .map(str::trim)
+        .filter(|s| s.starts_with("UPDATE"))
+        .map(str::to_string)
+        .collect();
+    assert!(!backfill.is_empty(), "no backfill in: {migration}");
+    for statement in &backfill {
+        sqlx::query(statement)
+            .execute(&env.state.pool)
+            .await
+            .expect("backfill");
+    }
+
+    let holder: Option<String> =
+        sqlx::query_scalar("SELECT run_session_id FROM tasks WHERE id = ?")
+            .bind(&task_id)
+            .fetch_one(&env.state.pool)
+            .await
+            .expect("task");
+    assert_eq!(holder.as_deref(), Some("in-flight"));
 }
