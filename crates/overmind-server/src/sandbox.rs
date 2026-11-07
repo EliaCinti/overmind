@@ -192,8 +192,9 @@ pub fn announce(config: &Config) -> String {
     }
     let refuted = config.uid_refuted.as_ref().map(|why| {
         format!(
-            "the agent uid holds nothing on this filesystem: {why} (ADR-0054). Mount the data at \
-             /data and repositories at /repos, as docker-compose.yml does, or use a volume"
+            "the agent uid holds nothing on this filesystem: {why} (ADR-0054). Keep what the agent \
+             must not reach on a filesystem that keeps ownership; in the image, mount the data at \
+             /data and repositories at /repos, as docker-compose.yml does"
         )
     });
     #[cfg(target_os = "linux")]
