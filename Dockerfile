@@ -144,6 +144,7 @@ ENV OVERMIND_AGENT_UID=10001 \
 ENV OVERMIND_WEB_DIR=/app/web/dist \
     OVERMIND_DB=sqlite:///data/overmind.sqlite \
     OVERMIND_DATA_DIR=/data \
+    OVERMIND_RUNS_DIR=/runs \
     OVERMIND_ADDR=0.0.0.0:7070 \
     OVERMIND_REPOS_DIR=/repos \
     OVERMIND_MEMORY_CMD=wadachi
@@ -153,8 +154,18 @@ WORKDIR /app
 # these hold runs and which hold its own shelves, and it has to do it on every
 # boot anyway for volumes that predate this layout. `/repos` exists empty so
 # that a container with nothing mounted can still say so.
-RUN mkdir -p /data /repos
+#
+# A permission on a file behind a bind mount means nothing on Docker Desktop:
+# VirtioFS shows it as owned by whoever looks. A permission on this directory, in
+# the image's own layer, is real, and the kernel checks it on the way to the
+# mount (ADR-0054). Docker follows the links when it mounts, so a compose file
+# naming /data and /repos lands behind it, and paths in the database stay valid.
+RUN mkdir -p -m 700 /srv/hold \
+    && mkdir -p /srv/hold/data /srv/hold/repos /runs \
+    && ln -s /srv/hold/data /data \
+    && ln -s /srv/hold/repos /repos
 VOLUME /data
+VOLUME /runs
 EXPOSE 7070
 
 # A minimal healthcheck the orchestrator can read.
