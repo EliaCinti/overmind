@@ -99,6 +99,9 @@ pub struct Confinement {
     /// rather than cloned — a ruleset is a file descriptor, not a value.
     #[cfg(target_os = "linux")]
     pub landlock: Option<std::sync::Arc<crate::landlock::Ruleset>>,
+    /// The uid was measured not to hold on this filesystem (ADR-0054). The
+    /// agent still runs as it, and it no longer counts as a boundary.
+    pub uid_refuted: bool,
 }
 
 impl Confinement {
@@ -109,7 +112,7 @@ impl Confinement {
     /// that asked about one named mechanism would answer "no cage" on a
     /// platform that has a different one.
     pub fn is_real(&self) -> bool {
-        if self.profile.is_some() || self.agent_user.is_some() {
+        if self.profile.is_some() || (self.agent_user.is_some() && !self.uid_refuted) {
             return true;
         }
         #[cfg(target_os = "linux")]
@@ -184,14 +187,24 @@ pub fn announce(config: &Config) -> String {
     if profile_available() {
         held.push("sandbox-exec profile".to_string());
     }
-    if let Some(u) = agent_user(config) {
+    if let Some(u) = agent_user(config).filter(|_| config.uid_refuted.is_none()) {
         held.push(format!("unprivileged uid {}", u.uid));
     }
+    let refuted = config.uid_refuted.as_ref().map(|why| {
+        format!(
+            "the agent uid holds nothing on this filesystem: {why} (ADR-0054). Keep what the agent \
+             must not reach on a filesystem that keeps ownership; in the image, mount the data at \
+             /data and repositories at /repos, as docker-compose.yml does"
+        )
+    });
     #[cfg(target_os = "linux")]
     if let Some(abi) = crate::landlock::abi() {
         held.push(format!("Landlock (ABI {abi})"));
     }
     if held.is_empty() {
+        if let Some(refuted) = refuted {
+            return format!("none — {refuted}; agents are read-only");
+        }
         // Naming the likeliest cause: the image sets the uid, so seeing this
         // inside a container means the server is not privileged enough to drop
         // to it — a `user:` override in compose is how that happens.
@@ -201,6 +214,9 @@ pub fn announce(config: &Config) -> String {
         };
     }
     let held = held.join(" + ");
+    if let Some(refuted) = refuted {
+        return format!("{held} — {refuted}");
+    }
     // The image's agent has a home of its own and the uid is the boundary. On a
     // host the home is the owner's, and the line says what that leaves open.
     if agent_user(config).is_some() {
@@ -211,6 +227,147 @@ pub fn announce(config: &Config) -> String {
          planted there runs as you (ADR-0053). A toolchain the cage refuses is fitted with \
          OVERMIND_SANDBOX_READ or OVERMIND_SANDBOX_ALLOW"
     )
+}
+
+/// Does agent work run as its own uid here? Only then can a path stand where the
+/// agent cannot reach it while the server can.
+pub(crate) fn drops_to_agent_uid(config: &Config) -> bool {
+    agent_user(config).is_some()
+}
+
+/// Does the agent uid hold on this filesystem? `Some(why)` when it does not.
+///
+/// The modes the server sets only mean something where the filesystem keeps
+/// ownership. A VirtioFS bind mount shows every file as owned by whoever looks,
+/// exFAT and network shares have their own ways, and none of them say so
+/// (ADR-0054). So the question goes to the kernel, as the agent uid, against a
+/// `0600` file of the server's in each place it keeps something — the data
+/// dir, the backups, the database's own directory — and the repositories dir.
+///
+/// A measurement that cannot be made counts as a failed one: the claim it
+/// would have supported is what grants the permission flag.
+pub async fn measure_uid(config: &Config, db_files: &[PathBuf]) -> Option<String> {
+    let user = agent_user(config)?;
+    let mut shelves = vec![config.data_dir.clone(), crate::backup::backup_dir(config)];
+    shelves.extend(
+        db_files
+            .iter()
+            .filter_map(|f| f.parent().map(Path::to_path_buf)),
+    );
+    let mut canaries: Vec<PathBuf> = Vec::new();
+    for shelf in shelves.into_iter().filter(|d| d.is_dir()) {
+        let canary = shelf.join(".uid-canary");
+        if !canaries.contains(&canary) {
+            canaries.push(canary);
+        }
+    }
+    let repos = config.repos_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        // A probe that cannot even start would read as "refused" below, which
+        // is the answer that grants the permission flag.
+        if !uid_runs(user) {
+            return Some(format!(
+                "it could not be measured: uid {} could not run a shell",
+                user.uid
+            ));
+        }
+        for canary in &canaries {
+            if let Err(e) = plant_canary(canary) {
+                return Some(format!(
+                    "it could not be measured at {}: {e}",
+                    canary.display()
+                ));
+            }
+        }
+        let reached = uid_reaches(user, &canaries, repos.as_deref());
+        for canary in &canaries {
+            let _ = std::fs::remove_file(canary);
+        }
+        (!reached.is_empty()).then(|| reached.join("; "))
+    })
+    .await
+    .unwrap_or_else(|e| Some(format!("it could not be measured: {e}")))
+}
+
+/// A file only the server should be able to read.
+///
+/// The directory may have been the agent's to write until this very check says
+/// otherwise, so whatever is at that name goes first and nothing is followed: a
+/// link planted there would turn this into a write as root.
+#[cfg(unix)]
+fn plant_canary(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map(drop)
+}
+
+#[cfg(not(unix))]
+fn plant_canary(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Can `user` run anything at all? The control for [`uid_reaches`].
+#[cfg(unix)]
+fn uid_runs(user: AgentUser) -> bool {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("sh")
+        .args(["-c", "true"])
+        .uid(user.uid)
+        .gid(user.gid)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn uid_runs(_user: AgentUser) -> bool {
+    false
+}
+
+/// What `user` reached of what it must not, each in a sentence.
+#[cfg(unix)]
+fn uid_reaches(user: AgentUser, canaries: &[PathBuf], repos: Option<&Path>) -> Vec<String> {
+    use std::os::unix::process::CommandExt;
+    let can = |script: &str, path: &Path| {
+        std::process::Command::new("sh")
+            .args(["-c", script, "sh"])
+            .arg(path)
+            .uid(user.uid)
+            .gid(user.gid)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let mut reached = Vec::new();
+    for canary in canaries {
+        if can("cat -- \"$1\"", canary) {
+            reached.push(format!("uid {} read {}", user.uid, canary.display()));
+        }
+    }
+    if let Some(repos) = repos
+        && can("ls -- \"$1\"", repos)
+    {
+        reached.push(format!("uid {} listed {}", user.uid, repos.display()));
+    }
+    reached
+}
+
+#[cfg(not(unix))]
+fn uid_reaches(_user: AgentUser, _canaries: &[PathBuf], _repos: Option<&Path>) -> Vec<String> {
+    Vec::new()
 }
 
 /// Is the macOS mechanism available? Used by its own tests, which have nothing
@@ -279,6 +436,7 @@ fn confinement_in(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Conf
         agent_user: agent_user(config),
         #[cfg(target_os = "linux")]
         landlock: build_landlock(config, cage, home),
+        uid_refuted: config.uid_refuted.is_some(),
     }
 }
 
@@ -783,8 +941,9 @@ fn chown_tree(_path: &Path, _user: AgentUser) -> std::io::Result<()> {
 ///   ADR-0029 — but enumeration is not the same as access, and a directory
 ///   listing is how you find something to try.
 ///
-/// The data directory itself is `0755`: it holds these names and nothing else,
-/// and the agent has to walk through it to reach its own run.
+/// The data directory itself is `0755` when it holds the runs too, which the
+/// agent has to walk through to reach its own, and `0700` when they live in
+/// `OVERMIND_RUNS_DIR` (ADR-0054).
 ///
 /// Applied only where an agent uid is configured. On a user's own machine
 /// Overmind runs as that user and there is no second party to keep out;
@@ -794,36 +953,58 @@ pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
         return Ok(());
     };
     let root = config.data_dir.clone();
+    let runs = config.runs_dir().to_path_buf();
     let home = config.agent_home.clone();
-    tokio::task::spawn_blocking(move || {
-        mkdir_mode(&root, 0o755)?;
-        // Overmind's own shelves.
-        for name in ["companies", "artifacts", "attachments", "backups"] {
-            mkdir_mode(&root.join(name), 0o700)?;
+    tokio::task::spawn_blocking(move || lay_out(&root, &runs, home.as_deref(), user))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+fn lay_out(root: &Path, runs: &Path, home: Option<&Path>, user: AgentUser) -> std::io::Result<()> {
+    // These run as root at every start, over a tree an agent could write on an
+    // install that was exposed (ADR-0054): a link where a shelf should be is
+    // refused, never followed, or the mode lands on whatever it names.
+    let shelf = |path: &Path, mode: u32| {
+        if path
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(std::io::Error::other(format!(
+                "{} is a link where Overmind keeps a directory of its own; remove it",
+                path.display()
+            )));
         }
-        // Traversable, not listable: these hold the runs.
-        for name in ["sessions", "worktrees", "chat", "meetings"] {
-            mkdir_mode(&root.join(name), 0o711)?;
-        }
-        // The agent's home is the agent's. A named volume mounted there — which
-        // is how credentials survive a rebuild — arrives owned by root and empty,
-        // so without this the adapter CLI cannot write the session it just
-        // authenticated, and the failure surfaces as a login that never sticks.
-        //
-        // Only the home itself and the CLI's own directory: whatever the agent
-        // has already put in there is its own, and re-owning a tree on every
-        // boot would be a slow way to say nothing.
-        if let Some(home) = home {
-            mkdir_mode(&home, 0o700)?;
-            chown_one(&home, user)?;
-            let cli_state = home.join(".claude");
-            mkdir_mode(&cli_state, 0o700)?;
-            chown_one(&cli_state, user)?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(std::io::Error::other)?
+        mkdir_mode(path, mode)
+    };
+    // With the runs elsewhere, the agent has no reason to walk through here.
+    // Runs inside it -- the default, or OVERMIND_RUNS_DIR under the data dir --
+    // are reached through it.
+    mkdir_mode(root, if runs.starts_with(root) { 0o755 } else { 0o700 })?;
+    // Overmind's own shelves.
+    for name in ["companies", "artifacts", "attachments", "backups"] {
+        shelf(&root.join(name), 0o700)?;
+    }
+    mkdir_mode(runs, 0o755)?;
+    // Traversable, not listable: these hold the runs.
+    for name in ["sessions", "worktrees", "chat", "meetings"] {
+        shelf(&runs.join(name), 0o711)?;
+    }
+    // The agent's home is the agent's. A named volume mounted there — which
+    // is how credentials survive a rebuild — arrives owned by root and empty,
+    // so without this the adapter CLI cannot write the session it just
+    // authenticated, and the failure surfaces as a login that never sticks.
+    //
+    // Only the home itself and the CLI's own directory: whatever the agent
+    // has already put in there is its own, and re-owning a tree on every
+    // boot would be a slow way to say nothing.
+    if let Some(home) = home {
+        mkdir_mode(home, 0o700)?;
+        chown_one(home, user)?;
+        let cli_state = home.join(".claude");
+        shelf(&cli_state, 0o700)?;
+        chown_one(&cli_state, user)?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1373,6 +1554,168 @@ probe write_cli_state write "$H/.claude/settings.json"
             ..config(Vec::new())
         };
         assert_eq!(agent_user(&cfg), None);
+    }
+
+    #[cfg(unix)]
+    fn this_user() -> AgentUser {
+        // Reading our own ids: nothing is touched and no pointer is followed.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        AgentUser { uid, gid }
+    }
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("om-{name}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// What VirtioFS does to the boundary, reproduced without VirtioFS and
+    /// without root: a `0600` file the agent uid can read after all.
+    #[cfg(unix)]
+    #[test]
+    fn a_shelf_the_agent_uid_can_read_means_the_uid_is_no_boundary() {
+        let dir = fresh_dir("canary");
+        let canary = dir.join("canary");
+        std::fs::write(&canary, "x").expect("canary");
+        set_mode(&canary, 0o600).expect("mode");
+        let reached = uid_reaches(this_user(), &[dir.join("refused"), canary.clone()], None);
+        assert_eq!(reached.len(), 1, "reached: {reached:?}");
+        assert!(
+            reached[0].contains(&canary.display().to_string()),
+            "{reached:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_repositories_dir_the_agent_uid_can_list_means_the_same() {
+        let dir = fresh_dir("repos");
+        let reached = uid_reaches(this_user(), &[dir.join("no-canary")], Some(&dir));
+        assert_eq!(reached.len(), 1, "reached: {reached:?}");
+        assert!(
+            reached[0].contains(&dir.display().to_string()),
+            "{reached:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_has_a_control_that_runs() {
+        assert!(uid_runs(this_user()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn what_the_agent_uid_is_refused_leaves_the_uid_standing() {
+        let dir = fresh_dir("refused");
+        let reached = uid_reaches(
+            this_user(),
+            &[dir.join("no-canary")],
+            Some(&dir.join("no-repos")),
+        );
+        assert!(reached.is_empty(), "reached: {reached:?}");
+    }
+
+    #[test]
+    fn a_refuted_uid_holds_nothing_and_the_agent_still_runs_as_it() {
+        let user = AgentUser {
+            uid: 10_001,
+            gid: 10_001,
+        };
+        let standing = Confinement {
+            agent_user: Some(user),
+            ..Confinement::default()
+        };
+        assert!(standing.is_real());
+        let refuted = Confinement {
+            uid_refuted: true,
+            ..standing
+        };
+        assert!(!refuted.is_real());
+        assert_eq!(refuted.agent_user, Some(user));
+    }
+
+    #[test]
+    fn the_startup_line_says_the_uid_was_refuted_and_what_to_do() {
+        let cfg = Config {
+            uid_refuted: Some("uid 10001 read /data/.uid-canary".to_string()),
+            ..config(Vec::new())
+        };
+        let line = announce(&cfg);
+        assert!(line.contains("uid 10001 read /data/.uid-canary"), "{line}");
+        assert!(line.contains("ADR-0054"), "{line}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runs_stand_apart_from_the_shelves() {
+        let dir = fresh_dir("layout");
+        let (data, runs) = (dir.join("data"), dir.join("runs"));
+        lay_out(&data, &runs, None, this_user()).expect("layout");
+        let mode = |p: PathBuf| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p).expect("exists").permissions().mode() & 0o777
+        };
+        for shelf in ["companies", "artifacts", "attachments", "backups"] {
+            assert_eq!(mode(data.join(shelf)), 0o700, "{shelf}");
+            assert!(!runs.join(shelf).exists(), "{shelf}");
+        }
+        for parent in ["sessions", "worktrees", "chat", "meetings"] {
+            assert_eq!(mode(runs.join(parent)), 0o711, "{parent}");
+            assert!(!data.join(parent).exists(), "{parent}");
+        }
+        assert_eq!(mode(data), 0o700);
+        assert_eq!(mode(runs), 0o755);
+    }
+
+    /// An install that was exposed (ADR-0054) may carry links an agent planted
+    /// in the data dir. The layout runs as root at every start, and a mode set
+    /// through one lands on whatever it names.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_where_a_shelf_should_be_is_refused_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_dir("planted");
+        let (data, runs, target) = (dir.join("data"), dir.join("runs"), dir.join("target"));
+        std::fs::create_dir_all(&data).expect("data");
+        std::fs::create_dir_all(&target).expect("target");
+        set_mode(&target, 0o755).expect("mode");
+        std::os::unix::fs::symlink(&target, data.join("backups")).expect("link");
+
+        let refused = lay_out(&data, &runs, None, this_user());
+        assert!(refused.is_err(), "the layout went through the link");
+        let mode = std::fs::metadata(&target)
+            .expect("target")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "the link's target was re-moded");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runs_inside_the_data_dir_keep_it_walkable() {
+        let dir = fresh_dir("nested");
+        let data = dir.join("data");
+        lay_out(&data, &data.join("runs"), None, this_user()).expect("layout");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&data).expect("data").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+    }
+
+    #[test]
+    fn runs_stay_in_the_data_dir_unless_told() {
+        let data = PathBuf::from("/some/data");
+        let cfg = Config {
+            data_dir: data.clone(),
+            ..Config::default()
+        };
+        assert_eq!(cfg.runs_dir(), data);
+        let cfg = Config {
+            runs_dir: Some(PathBuf::from("/runs")),
+            ..cfg
+        };
+        assert_eq!(cfg.runs_dir(), Path::new("/runs"));
     }
 
     /// A configured uid is a boundary only if we can actually drop to it.

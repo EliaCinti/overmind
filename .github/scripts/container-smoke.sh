@@ -60,6 +60,10 @@ printf 'The container can do a day of work.\n' > ARTIFACT.md
     if [ -r /data/overmind.sqlite ]; then echo "db=READABLE"; else echo "db=DENIED"; fi
     if ls /data/companies >/dev/null 2>&1; then echo "brains=READABLE"; else echo "brains=DENIED"; fi
     if ls /data/backups >/dev/null 2>&1; then echo "backups=READABLE"; else echo "backups=DENIED"; fi
+    if ls /data/ >/dev/null 2>&1; then echo "data=LISTABLE"; else echo "data=DENIED"; fi
+    if ls /srv/hold >/dev/null 2>&1; then echo "hold=LISTABLE"; else echo "hold=DENIED"; fi
+    if ls /repos/ >/dev/null 2>&1; then echo "repos=LISTABLE"; else echo "repos=DENIED"; fi
+    if ls /proc/1/root/ >/dev/null 2>&1; then echo "procroot=LISTABLE"; else echo "procroot=DENIED"; fi
 } > PROBE.txt
 echo '{"total_cost_usd":0.01,"model":"stub","usage":{"input_tokens":1,"output_tokens":1}}'
 STUB
@@ -160,6 +164,8 @@ scenario() { # label [extra docker -e args…]
         -p "127.0.0.1:${PORT}:7070" \
         -v "$WORK/stub:/stub:ro" \
         -v "$WORK/repo:/repo" \
+        -v "$WORK/data-$label:/data" \
+        -v "$WORK/repos:/repos" \
         -e OVERMIND_AGENT_CMD='sh /stub/agent.sh' \
         -e OVERMIND_SANDBOX_ALLOW=/stub \
         "$@" \
@@ -315,6 +321,11 @@ if caged.get("db") != "DENIED":
                  "every company's data")
 if caged.get("brains") != "DENIED":
     fails.append("the caged agent could read /data/companies — every company's brain")
+for name, what in (("data", "/data"), ("hold", "/srv/hold"), ("repos", "/repos"),
+                   ("procroot", "/proc/1/root")):
+    if caged.get(name) != "DENIED":
+        fails.append(f"the caged agent could list {what}: the mounts are not behind the "
+                     "hold (ADR-0054)")
 if caged.get("backups") != "DENIED":
     fails.append("the caged agent could read /data/backups — an archive is the whole "
                  "instance, database and brains and all (ADR-0044)")
@@ -327,6 +338,11 @@ if (uncaged.get("db") != "READABLE" or uncaged.get("brains") != "READABLE"
         or uncaged.get("backups") != "READABLE"):
     fails.append("the uncaged agent could not read Overmind's data either, so the caged "
                  "denials say nothing about the cage")
+
+for name in ("data", "hold", "repos", "procroot"):
+    if uncaged.get(name) != "LISTABLE":
+        fails.append(f"the uncaged agent could not list {name} either, so the caged "
+                     "denial says nothing about the cage")
 
 if fails:
     for f in fails:

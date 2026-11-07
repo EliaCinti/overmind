@@ -391,6 +391,15 @@ pub struct Config {
     pub agent_tools: AgentTools,
     /// Where worktrees and other runtime data live (`OVERMIND_DATA_DIR`).
     pub data_dir: PathBuf,
+    /// Where run directories live (`OVERMIND_RUNS_DIR`), when not in the data
+    /// dir. The image sets it: on a bind mount a run directory cannot stand
+    /// beside what the agent must not reach (ADR-0054). Read through
+    /// [`Config::runs_dir`].
+    pub runs_dir: Option<PathBuf>,
+    /// Why the agent uid turned out not to be a boundary on this filesystem,
+    /// measured at startup (ADR-0054). The uid still takes the agent below the
+    /// server; it stops counting as a cage.
+    pub uid_refuted: Option<String>,
     /// Where archives land (`OVERMIND_BACKUP_DIR`, ADR-0044); `None` means
     /// `<data>/backups/`.
     pub backup_dir: Option<PathBuf>,
@@ -511,6 +520,13 @@ impl AgentTools {
 }
 
 impl Config {
+    /// Where run directories live: the data dir unless told otherwise.
+    pub fn runs_dir(&self) -> &std::path::Path {
+        self.runs_dir.as_deref().unwrap_or(&self.data_dir)
+    }
+}
+
+impl Config {
     /// Read the registry from a file in the CLI's `{"mcpServers": {...}}`
     /// shape, with our optional top-level `"descriptions"`. A file that
     /// cannot be read or parsed yields an empty registry **and says so on
@@ -574,6 +590,8 @@ impl Default for Config {
             agent_cmd: None,
             agent_tools: AgentTools::default(),
             data_dir: PathBuf::from("./overmind-data"),
+            runs_dir: None,
+            uid_refuted: None,
             backup_dir: None,
             heartbeat_ms: 30_000,
             session_timeout_secs: 3_600,
@@ -624,6 +642,11 @@ impl Config {
             data_dir: std::env::var("OVERMIND_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or(defaults.data_dir),
+            runs_dir: std::env::var("OVERMIND_RUNS_DIR")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
+            uid_refuted: None,
             heartbeat_ms: std::env::var("OVERMIND_HEARTBEAT_SECS")
                 .ok()
                 .and_then(|s| s.parse::<f64>().ok())
@@ -769,7 +792,7 @@ pub async fn init(database_url: &str) -> Result<AppState, InitError> {
 }
 
 /// Like [`init`] but with explicit configuration (used by tests).
-pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, InitError> {
+pub async fn init_with(database_url: &str, mut config: Config) -> Result<AppState, InitError> {
     let options = SqliteConnectOptions::from_str(database_url)
         .map_err(|e| InitError::Url(e.to_string()))?
         .create_if_missing(true)
@@ -804,7 +827,8 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
     // Where agent work runs as another uid (ADR-0029), the boundary is only as
     // real as the filesystem under it. Both calls are no-ops without an agent
     // uid, which is every install but the image.
-    if let Err(e) = crate::sandbox::lay_out_data_dir(&config).await {
+    let laid_out = crate::sandbox::lay_out_data_dir(&config).await;
+    if let Err(e) = &laid_out {
         eprintln!("data dir layout failed (agents may be able to read it): {e}");
     }
     // SQLite makes these 0644, and they hold the audit chain and every
@@ -818,6 +842,22 @@ pub async fn init_with(database_url: &str, config: Config) -> Result<AppState, I
             }
         }
     }
+    // Those modes are a claim about the filesystem, and a bind mount on Docker
+    // Desktop makes it false (ADR-0054). Measured here, once, before anything
+    // can start a run.
+    let db_files = if is_memory {
+        Vec::new()
+    } else {
+        sqlite_files(database_url)
+    };
+    // A layout that did not happen leaves modes nobody set, so the uid is not
+    // measured against them: it simply does not count.
+    config.uid_refuted = match laid_out {
+        Err(e) if crate::sandbox::drops_to_agent_uid(&config) => {
+            Some(format!("the data dir could not be laid out: {e}"))
+        }
+        _ => crate::sandbox::measure_uid(&config, &db_files).await,
+    };
 
     // An unclaimed instance is open by construction, so it mints the code its
     // first claim will cost (ADR-0045). Idempotent: already claimed clears it,

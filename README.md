@@ -312,7 +312,7 @@ Both at once — a key exported in your shell *and* a claude.ai login (the usual
 
 Open the browser, **create the owner account** — the first run offers exactly that, and asks for the setup code you just read. Then found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is.
 
-Everything durable is in `./data` beside the compose file, in plain sight: the database, every brain, the audit chain, attachments, artifacts and the subscription token. `./agent` holds the agent CLI's own sign-in. They are bind mounts, not Docker volumes, so **`docker compose down -v` cannot destroy them** — and the other side of that bargain is that the folder *is* the installation: run `docker compose` from somewhere else and you get an empty instance, because `./data` is somewhere else too. Keep them together, or set `OVERMIND_DATA` to an absolute path on purpose.
+Everything durable is in `./data` beside the compose file, in plain sight: the database, every brain, the audit chain, attachments, artifacts and the subscription token. `./agent` holds the agent CLI's own sign-in. They are bind mounts, not Docker volumes, so **`docker compose down -v` cannot destroy them** — and the other side of that bargain is that the folder *is* the installation: run `docker compose` from somewhere else and you get an empty instance, because `./data` is somewhere else too. Keep them together, or set `OVERMIND_DATA` to an absolute path on purpose. One thing lives outside the folder, on purpose: the run directories, on a Docker volume, because a run needs ownership a bind mount on Docker Desktop does not keep ([ADR-0054](docs/adr/0054-a-bind-mount-holds-no-boundary.md)). `down -v` deletes them, and with them the diffs of past sessions; what a run committed is already its branch, and what it delivered is in `./data`.
 
 To let `code` tasks work on your repositories, mount them under `/repos` — see the comments in [`docker-compose.yml`](docker-compose.yml), which also cover the memory server (`OVERMIND_MEMORY_CMD`); the agent CLI is swapped with `OVERMIND_AGENT_CMD` (the [environment table](#configuration) below). Agents need a toolchain the image lacks (LaTeX, a linter)? Add it at build time, from a checkout (see *From source*), and keep starting from the same two files — the plain update line would put the published image back: `docker compose -f docker-compose.yml -f docker-compose.build.yml build --build-arg EXTRA_APT_PACKAGES="texlive-latex-base"`, then `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d`.
 
@@ -454,9 +454,10 @@ Every setting is optional; the defaults are the working path.
 |---|---|
 | `OVERMIND_ADDR` | Listen address (default `127.0.0.1:7070`; the image binds `0.0.0.0:7070` inside the container and compose publishes it on loopback) |
 | `OVERMIND_DB` | SQLite URL (default `sqlite://overmind.sqlite`) |
-| `OVERMIND_DATA_DIR` | Run clones, brains, artifacts, attachments (default `./overmind-data`) |
+| `OVERMIND_DATA_DIR` | Database, brains, artifacts, attachments, and runs unless `OVERMIND_RUNS_DIR` says otherwise (default `./overmind-data`) |
+| `OVERMIND_RUNS_DIR` | Where run directories live, apart from the data (the image: `/runs`, a volume — [ADR-0054](docs/adr/0054-a-bind-mount-holds-no-boundary.md)) |
 | `OVERMIND_AGENT_CMD` | Agent adapter command (default: the Claude Code CLI, `claude -p … --output-format stream-json --verbose`). A custom adapter is never interrogated for how it pays |
-| `OVERMIND_BACKUP_DIR` | Where `POST /api/backup` writes its archives (and `POST /api/restore` reads one back, on an empty instance) (default `<data>/backups/`, created `0700`; a folder that holds the data directory is refused, since forcing it `0700` would take away the path a caged agent walks). The archive is the whole instance; the subscription token in it is sealed under the passphrase you give at export ([ADR-0044](docs/adr/0044-the-archive-is-the-instance.md)) |
+| `OVERMIND_BACKUP_DIR` | Where `POST /api/backup` writes its archives (and `POST /api/restore` reads one back, on an empty instance) (default `<data>/backups/`, created `0700`; a folder that holds the data directory is refused: where runs live in the data directory, forcing it `0700` would take away the path a caged agent walks to its run, and an archive kept among the shelves it archives is no backup). The archive is the whole instance; the subscription token in it is sealed under the passphrase you give at export ([ADR-0044](docs/adr/0044-the-archive-is-the-instance.md)) |
 | `OVERMIND_MEMORY_CMD` | MCP memory server command (unset = no memory; the image sets `wadachi`; empty = off deliberately) |
 | `OVERMIND_AGENT_TOOLS` | A file of MCP servers agents *may* be granted, in the CLI's `{"mcpServers": …}` shape — e.g. Blender via BlenderMCP ([example](docs/examples/agent-tools.blender.json)). Declared here by the operator, granted per agent in the hire dialog; an agent holds exactly what it was granted, and an `"exclusive"` tool fits one hand at a time ([ADR-0036](docs/adr/0036-tools-in-the-agents-hand.md)) |
 | `OVERMIND_CEO_DIGEST` | `off` disables unprompted updates — by default, when tasks born in a chat finish after your last word there, the thread's agent writes one short update (or deliberately stays silent) ([ADR-0041](docs/adr/0041-the-ceo-writes-back-on-its-own.md)) |
@@ -467,7 +468,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_SANDBOX` | `off` empties the whole set of cage mechanisms — agents become read-only (default on) |
 | `OVERMIND_SANDBOX_ALLOW` | Colon-separated extra writable paths, to fit a toolchain without turning the cage off. A path that is a link is not granted: name the real place |
 | `OVERMIND_SANDBOX_READ` | Colon-separated extra paths the cage may read and never write. Since [ADR-0053](docs/adr/0053-the-cage-grants-nothing-the-host-runs.md) the cage grants nothing under `~/.config` and only the CLI's own install under `~/.local`: a toolchain that needs more names it here, or in `OVERMIND_SANDBOX_ALLOW` if it has to write. A path under a writable grant stays writable |
-| `OVERMIND_AGENT_UID` / `OVERMIND_AGENT_GID` | Unprivileged uid/gid agent work runs as (the image uses `10001`; on Linux set your own `id -u` so `code` tasks can write mounted repos) |
+| `OVERMIND_AGENT_UID` / `OVERMIND_AGENT_GID` | Unprivileged uid/gid agent work runs as (the image uses `10001`). Earlier versions advised setting your own `id -u` so `code` tasks could write mounted repos; a run now works in a clone of its own, so leave it |
 | `OVERMIND_AGENT_HOME` | The agent's own writable `HOME` (the image: `/home/agent`) |
 | `OVERMIND_REPOS_DIR` | Where mounted repositories live, so a wrong workspace path gets an answer naming what is visible (the image: `/repos`) |
 | `OVERMIND_ECONOMY` | `key` or `subscription`: declare the economy instead of detecting it |
@@ -482,6 +483,29 @@ Every setting is optional; the defaults are the working path.
 Build args for the image: `CLAUDE_CODE_VERSION` (pinned agent CLI), `WADACHI_VERSION` (pinned memory provider), `EXTRA_APT_PACKAGES` (toolchains your agents need). `ANTHROPIC_API_KEY` is passed through to the container only when it exists on the host.
 
 <br/>
+
+## Security
+
+Overmind runs a real CLI on the machine that hosts it, so what it defends against is written down rather than implied: [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) lists every boundary it claims, the mechanism that holds it and the test that proves it. In short, what holds an agent:
+
+| Where Overmind runs | What holds an agent |
+|---|---|
+| macOS, native | a deny-by-default `sandbox-exec` profile per run. Not a boundary against a hostile agent: `~/.claude` stays writable, and a hook planted there runs as you ([ADR-0053](docs/adr/0053-the-cage-grants-nothing-the-host-runs.md)) |
+| Linux, native | Landlock, where the kernel has it |
+| The image, Docker on Linux | an unprivileged uid below the server, plus Landlock where the kernel has it |
+| The image, Docker Desktop | the unprivileged uid alone. Its kernel has no Landlock, so a run can reach another run's directory, though not list one. Measured on macOS; Windows is covered by the startup check, not by a measurement |
+
+In the image, on every row, an agent cannot read the database, the audit chain, the brains, the backups or your repositories, and has no credentials to push with. The server does not assume this: at startup it asks the kernel, as the agent's uid, and prints the answer on its `agent confinement:` line. Where the answer is no, agents are read-only and the line says why.
+
+**Check your install.** With Docker, where `overmind` is your container's name (`docker ps` shows it):
+
+```sh
+docker exec --user 10001 overmind sh -c 'cat /data/overmind.sqlite >/dev/null 2>&1 && echo EXPOSED || echo held'
+```
+
+`EXPOSED` means an agent on that instance can read Overmind's own data. That was true on Docker Desktop with the default compose file from v0.2.4 until the fix ([GHSA-cr22-mp4p-vj89](https://github.com/EliaCinti/overmind/security/advisories/GHSA-cr22-mp4p-vj89)). Update the image with `docker compose up -d --pull always`; your compose file can stay as it is. If that instance ran tasks you do not fully trust, updating closes the hole but does not undo what came through it: sign in again (or replace your API key), since the subscription token was in `./data`; check the audit chain from the product or with `GET /api/audit/verify`; and look for links an agent may have left, with `find ./data -type l` — the updated server refuses to cage a run while one sits where it keeps its own directories, and says which.
+
+Found a way across a boundary the threat model claims? Report it privately, as [SECURITY.md](SECURITY.md) says.
 
 ## Status
 

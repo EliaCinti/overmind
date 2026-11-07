@@ -189,8 +189,10 @@ pub async fn export(
     let folder = backup_dir(&config);
     if config.data_dir.starts_with(&folder) {
         // `OVERMIND_BACKUP_DIR=/data` is a reasonable thing to type and a
-        // disaster to obey: the folder is forced 0700, and the data dir is
-        // 0755 precisely so a caged agent can walk through it to its own run.
+        // disaster to obey: the folder is forced 0700, and where runs live in
+        // the data dir -- every install but the image (ADR-0054) -- it is 0755
+        // precisely so a caged agent can walk through it to its own run. And an
+        // archive written among the shelves it archives is no backup.
         return Err(ExportError::Config(format!(
             "OVERMIND_BACKUP_DIR ({}) holds the data directory: choose a folder of its own",
             folder.display()

@@ -86,6 +86,10 @@ struct TestEnv {
 /// Fresh in-memory Overmind + a real git repo + a stub agent script, wired
 /// through company -> project -> workspace -> goal -> task (status: todo).
 async fn setup(stub_script: &str) -> TestEnv {
+    setup_with_runs_dir(stub_script, None).await
+}
+
+async fn setup_with_runs_dir(stub_script: &str, runs_dir: Option<&str>) -> TestEnv {
     let root = std::env::temp_dir().join(format!("overmind-test-{}", uuid_like()));
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).expect("create repo dir");
@@ -101,6 +105,7 @@ async fn setup(stub_script: &str) -> TestEnv {
     let config = overmind_server::Config {
         agent_cmd: Some(format!("sh {}", script_path.display())),
         data_dir: root.join("data"),
+        runs_dir: runs_dir.map(|name| root.join(name)),
         ..overmind_server::Config::default()
     };
     let state = overmind_server::init_with("sqlite::memory:", config)
@@ -283,6 +288,29 @@ async fn agent_completes_task_in_isolated_worktree() {
     }
     let (_, report) = send(&env.app, "GET", "/api/audit/verify", None).await;
     assert_eq!(report["valid"], json!(true));
+}
+
+/// ADR-0054: where the image puts runs, away from what the agent must not reach.
+#[tokio::test]
+async fn a_run_lives_in_the_runs_dir_and_not_in_the_data_dir() {
+    let env = setup_with_runs_dir(HAPPY_STUB, Some("runs")).await;
+
+    let (status, started) = send(
+        &env.app,
+        "POST",
+        &format!("/api/tasks/{}/start", env.task_id),
+        Some(json!({ "agent_id": env.agent_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "start failed: {started}");
+    let session_id = started["session_id"].as_str().expect("session id");
+
+    let session = wait_for_session(&env.app, session_id).await;
+    assert_eq!(session["status"], "completed", "session: {session}");
+    let run_dir = PathBuf::from(session["workspace_path"].as_str().expect("workspace path"));
+    assert!(run_dir.starts_with(env.root.join("runs")), "{run_dir:?}");
+    assert!(run_dir.join("hello.txt").exists());
+    assert!(!env.root.join("data").join("worktrees").exists());
 }
 
 #[tokio::test]
