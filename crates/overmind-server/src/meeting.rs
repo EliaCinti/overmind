@@ -749,7 +749,7 @@ async fn run_meeting(state: &AppState, company_id: &str, meeting_id: &str) -> Re
 
     // One scratch dir for the whole meeting — agents deliberate here, they
     // don't produce files (that is what tasks are for).
-    let room = state.config.data_dir.join("meetings").join(meeting_id);
+    let room = state.config.runs_dir().join("meetings").join(meeting_id);
     tokio::fs::create_dir_all(&room)
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot create meeting dir: {e}")))?;

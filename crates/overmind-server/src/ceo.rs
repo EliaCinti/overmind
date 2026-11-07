@@ -694,7 +694,7 @@ async fn run_agent_turn_inner(
         );
         // Its own scratch and its own turn: the answer turn has not built
         // either yet, and a compaction is a spend of its own on the ledger.
-        let compact_scratch = state.config.data_dir.join("chat").join(new_id());
+        let compact_scratch = state.config.runs_dir().join("chat").join(new_id());
         tokio::fs::create_dir_all(&compact_scratch)
             .await
             .map_err(|e| CeoError::Invalid(format!("cannot create scratch dir: {e}")))?;
@@ -924,7 +924,7 @@ async fn run_agent_turn_inner(
     );
 
     // Run the adapter in a throwaway scratch dir.
-    let scratch = state.config.data_dir.join("chat").join(new_id());
+    let scratch = state.config.runs_dir().join("chat").join(new_id());
     tokio::fs::create_dir_all(&scratch)
         .await
         .map_err(|e| CeoError::Invalid(format!("cannot create scratch dir: {e}")))?;

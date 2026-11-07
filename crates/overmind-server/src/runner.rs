@@ -1226,11 +1226,11 @@ pub async fn start_task(
     let (branch, work_dir): (String, PathBuf) = match exec_kind {
         ExecutionKind::Code => (
             format!("overmind/task-{}-sess-{}", tag(task_id), session_id),
-            state.config.data_dir.join("worktrees").join(&session_id),
+            state.config.runs_dir().join("worktrees").join(&session_id),
         ),
         ExecutionKind::Knowledge => (
             String::new(),
-            state.config.data_dir.join("sessions").join(&session_id),
+            state.config.runs_dir().join("sessions").join(&session_id),
         ),
     };
     let work_dir_str = work_dir.to_string_lossy().into_owned();
@@ -1560,9 +1560,12 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
     // A link is gone too: the cage grants it nothing (ADR-0053), so a resume
     // there could only fail, later and with a worse sentence.
     let (owned, _) = owns(&mut *state.pool.acquire().await?, &task_id, session_id).await?;
-    if !owned || !files::is_own_dir(&ctx.worktree_dir) {
+    let left = left_in_data_dir(&state.config, &ctx.worktree_dir);
+    if !owned || left || !files::is_own_dir(&ctx.worktree_dir) {
         let error = if !owned {
             crate::i18n::run_not_resumed(&crate::i18n::company_language(state, &company_id).await)
+        } else if left {
+            format!("cannot resume: {LEFT_IN_DATA_DIR}")
         } else {
             "cannot resume: worktree is missing or has been replaced".to_string()
         };
@@ -2948,6 +2951,17 @@ async fn report_collisions(ctx: &SessionContext, collisions: &[crate::mcp::Colli
 
 /// Diff of everything the session changed (committed or not) against the
 /// commit its clone started from. Run in the run's cage (ADR-0052).
+/// A run directory the upgrade to `OVERMIND_RUNS_DIR` left in the data dir
+/// (ADR-0054). It stands behind the hold now, where the agent uid cannot reach
+/// it, so nothing that runs in the run's cage can read it again.
+fn left_in_data_dir(config: &crate::Config, run_dir: &Path) -> bool {
+    config.runs_dir() != config.data_dir.as_path() && run_dir.starts_with(&config.data_dir)
+}
+
+const LEFT_IN_DATA_DIR: &str = "this run is from before runs moved out of the data dir \
+    (ADR-0054): its directory stayed there, where the cage can no longer reach it. What it \
+    committed came back as its overmind/ branch";
+
 pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, RunnerError> {
     let row: Option<(String, Option<String>, String)> = sqlx::query_as(
         "SELECT workspace_path, base_sha, task_id FROM agent_task_sessions WHERE id = ?",
@@ -2962,6 +2976,9 @@ pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, 
         return Err(RunnerError::Invalid("session has not started yet".into()));
     };
     let run_dir = Path::new(&workspace_path);
+    if left_in_data_dir(&state.config, run_dir) {
+        return Err(RunnerError::Invalid(format!("no diff: {LEFT_IN_DATA_DIR}")));
+    }
     let from_before = git_dir_from_before(state, &task_id, session_id, run_dir).await;
     let readable: Vec<PathBuf> = from_before.iter().cloned().collect();
     let cage = crate::sandbox::Cage {
@@ -3364,6 +3381,36 @@ mod adapter_command_tests {
         let state = state_with(Some("sh /my/stub.sh".into())).await;
         assert_eq!(agent_command(&state, true, None, None), "sh /my/stub.sh");
         assert_eq!(agent_command(&state, false, None, None), "sh /my/stub.sh");
+    }
+}
+
+#[cfg(test)]
+mod left_in_data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn a_run_from_before_the_runs_moved_is_known_as_one() {
+        let apart = crate::Config {
+            data_dir: PathBuf::from("/data"),
+            runs_dir: Some(PathBuf::from("/runs")),
+            ..crate::Config::default()
+        };
+        assert!(left_in_data_dir(&apart, Path::new("/data/worktrees/s1")));
+        assert!(!left_in_data_dir(&apart, Path::new("/runs/worktrees/s1")));
+        // A name that only starts with the same letters is not inside it.
+        assert!(!left_in_data_dir(
+            &apart,
+            Path::new("/database/worktrees/s1")
+        ));
+
+        let together = crate::Config {
+            runs_dir: None,
+            ..apart
+        };
+        assert!(!left_in_data_dir(
+            &together,
+            Path::new("/data/worktrees/s1")
+        ));
     }
 }
 

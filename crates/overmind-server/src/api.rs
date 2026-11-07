@@ -1282,11 +1282,15 @@ async fn delete_company(
         );
     }
     for session_id in &session_ids {
-        for root in ["artifacts", "worktrees", "sessions"] {
+        debris.push(state.config.data_dir.join("artifacts").join(session_id));
+        for root in ["worktrees", "sessions"] {
+            debris.push(state.config.runs_dir().join(root).join(session_id));
+            // A run from before OVERMIND_RUNS_DIR stayed where it was.
             debris.push(state.config.data_dir.join(root).join(session_id));
         }
     }
     for meeting_id in &meeting_ids {
+        debris.push(state.config.runs_dir().join("meetings").join(meeting_id));
         debris.push(state.config.data_dir.join("meetings").join(meeting_id));
     }
     for dir in debris {
