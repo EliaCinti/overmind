@@ -80,6 +80,13 @@ An image derived from `overmind:main` with decision 1 and a `/runs` volume, bind
 - **A run can still reach a sibling's directory** on Docker Desktop, as the threat model already states. This ADR does not change that.
 - **The check can turn a working install read-only**, on a layout that was in fact exposed and has no Landlock. That is the intent, and the message has to say what to do.
 
+## Addendum — what the review changed (2026-11-07)
+
+`/code-review` on the implementation found ten defects, all fixed before the PR. Two change what the decisions above say:
+
+- **Decision 4 measures more than the data dir.** A canary goes in every place the server keeps something that exists: the data dir, the backup folder and the database's directory. A `/backups` bind mount, which the README suggests, would otherwise have been readable while the startup line claimed the cage. And a control runs first: if the agent uid cannot even start a shell, the measurement did not happen and the uid does not count, instead of reading as "refused".
+- **A code run interrupted by the update loses more than its diff.** It is resumed into the end of its run, whose bundle is made in the cage and is refused by the hold, so what it had committed does not come back as a branch. It stays in its directory under the data dir, and the session says so, with the path. A run that had already ended had its branch brought back then.
+
 ## Disclosure
 
 The repository is public and SECURITY.md puts this in scope. ADR, plan and branch stay local until the fix is ready. The public PR, the merge, the tagged release and publishing the advisory happen together, by the owner's hand. The cost is that the Linux half of CI only sees the change when the PR opens, so the smoke script runs by hand on Docker Desktop first.
