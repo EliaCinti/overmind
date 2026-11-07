@@ -174,6 +174,29 @@ pub fn run_not_resumed(code: &str) -> String {
     }
 }
 
+/// A run whose directory the move to `OVERMIND_RUNS_DIR` left in the data dir,
+/// where the cage cannot reach it (ADR-0054): why its diff does not open. It
+/// had ended, so what it committed came back then.
+pub fn run_left_in_data_dir_diff(code: &str) -> String {
+    match code {
+        "it" => "Nessun diff: questa esecuzione è di prima che le esecuzioni uscissero dalla cartella dei dati (ADR-0054). La sua cartella è rimasta lì, dove la gabbia non arriva più. Quello che aveva committato è tornato come il suo branch overmind/ quando è finita.".to_string(),
+        _ => "No diff: this run is from before runs moved out of the data dir (ADR-0054). Its directory stayed there, where the cage can no longer reach it. What it committed came back as its overmind/ branch when it ended.".to_string(),
+    }
+}
+
+/// The same run, interrupted by the update and not resumed: what it had
+/// committed never came back, and is still in its directory.
+pub fn run_left_in_data_dir_resume(code: &str, dir: &str) -> String {
+    match code {
+        "it" => format!(
+            "Questa esecuzione non è stata ripresa: è di prima che le esecuzioni uscissero dalla cartella dei dati (ADR-0054), e la gabbia non arriva più alla sua cartella. Quello che aveva committato non è tornato come branch: è ancora in {dir}, nella cartella dei dati."
+        ),
+        _ => format!(
+            "This run was not resumed: it is from before runs moved out of the data dir (ADR-0054), and the cage can no longer reach its directory. What it had committed did not come back as a branch: it is still in {dir}, in the data dir."
+        ),
+    }
+}
+
 /// Why a run stopped short of done, for its handoff (ADR-0050 §4).
 pub enum Stop {
     TimedOut(u64),

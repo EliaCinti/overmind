@@ -1565,7 +1565,10 @@ pub async fn resume_session(state: &AppState, session_id: &str) -> Result<(), Ru
         let error = if !owned {
             crate::i18n::run_not_resumed(&crate::i18n::company_language(state, &company_id).await)
         } else if left {
-            format!("cannot resume: {LEFT_IN_DATA_DIR}")
+            crate::i18n::run_left_in_data_dir_resume(
+                &crate::i18n::company_language(state, &company_id).await,
+                &ctx.worktree_dir.display().to_string(),
+            )
         } else {
             "cannot resume: worktree is missing or has been replaced".to_string()
         };
@@ -2949,19 +2952,24 @@ async fn report_collisions(ctx: &SessionContext, collisions: &[crate::mcp::Colli
     }
 }
 
-/// Diff of everything the session changed (committed or not) against the
-/// commit its clone started from. Run in the run's cage (ADR-0052).
 /// A run directory the upgrade to `OVERMIND_RUNS_DIR` left in the data dir
-/// (ADR-0054). It stands behind the hold now, where the agent uid cannot reach
-/// it, so nothing that runs in the run's cage can read it again.
+/// (ADR-0054). Where agent work runs as its own uid, it stands behind the hold
+/// now, and nothing that runs in the run's cage can read it again. Where it
+/// does not, nothing stands in the way and the run is read as before.
 fn left_in_data_dir(config: &crate::Config, run_dir: &Path) -> bool {
-    config.runs_dir() != config.data_dir.as_path() && run_dir.starts_with(&config.data_dir)
+    crate::sandbox::drops_to_agent_uid(config) && left_behind(config, run_dir)
 }
 
-const LEFT_IN_DATA_DIR: &str = "this run is from before runs moved out of the data dir \
-    (ADR-0054): its directory stayed there, where the cage can no longer reach it. What it \
-    committed came back as its overmind/ branch";
+/// [`left_in_data_dir`] without the question of who is asking.
+fn left_behind(config: &crate::Config, run_dir: &Path) -> bool {
+    let runs = config.runs_dir();
+    runs != config.data_dir.as_path()
+        && run_dir.starts_with(&config.data_dir)
+        && !run_dir.starts_with(runs)
+}
 
+/// Diff of everything the session changed (committed or not) against the
+/// commit its clone started from. Run in the run's cage (ADR-0052).
 pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, RunnerError> {
     let row: Option<(String, Option<String>, String)> = sqlx::query_as(
         "SELECT workspace_path, base_sha, task_id FROM agent_task_sessions WHERE id = ?",
@@ -2977,7 +2985,18 @@ pub async fn session_diff(state: &AppState, session_id: &str) -> Result<String, 
     };
     let run_dir = Path::new(&workspace_path);
     if left_in_data_dir(&state.config, run_dir) {
-        return Err(RunnerError::Invalid(format!("no diff: {LEFT_IN_DATA_DIR}")));
+        let company: Option<(String,)> =
+            sqlx::query_as("SELECT company_id FROM tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_optional(&state.pool)
+                .await?;
+        let lang = match company {
+            Some((company_id,)) => crate::i18n::company_language(state, &company_id).await,
+            None => String::new(),
+        };
+        return Err(RunnerError::Invalid(
+            crate::i18n::run_left_in_data_dir_diff(&lang),
+        ));
     }
     let from_before = git_dir_from_before(state, &task_id, session_id, run_dir).await;
     let readable: Vec<PathBuf> = from_before.iter().cloned().collect();
@@ -3395,22 +3414,23 @@ mod left_in_data_dir_tests {
             runs_dir: Some(PathBuf::from("/runs")),
             ..crate::Config::default()
         };
-        assert!(left_in_data_dir(&apart, Path::new("/data/worktrees/s1")));
-        assert!(!left_in_data_dir(&apart, Path::new("/runs/worktrees/s1")));
+        assert!(left_behind(&apart, Path::new("/data/worktrees/s1")));
+        assert!(!left_behind(&apart, Path::new("/runs/worktrees/s1")));
         // A name that only starts with the same letters is not inside it.
-        assert!(!left_in_data_dir(
-            &apart,
-            Path::new("/database/worktrees/s1")
-        ));
+        assert!(!left_behind(&apart, Path::new("/database/worktrees/s1")));
+
+        let nested = crate::Config {
+            runs_dir: Some(PathBuf::from("/data/runs")),
+            ..apart.clone()
+        };
+        assert!(!left_behind(&nested, Path::new("/data/runs/worktrees/s1")));
+        assert!(left_behind(&nested, Path::new("/data/worktrees/s1")));
 
         let together = crate::Config {
             runs_dir: None,
             ..apart
         };
-        assert!(!left_in_data_dir(
-            &together,
-            Path::new("/data/worktrees/s1")
-        ));
+        assert!(!left_behind(&together, Path::new("/data/worktrees/s1")));
     }
 }
 

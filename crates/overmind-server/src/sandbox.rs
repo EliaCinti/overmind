@@ -228,6 +228,12 @@ pub fn announce(config: &Config) -> String {
     )
 }
 
+/// Does agent work run as its own uid here? Only then can a path stand where the
+/// agent cannot reach it while the server can.
+pub(crate) fn drops_to_agent_uid(config: &Config) -> bool {
+    agent_user(config).is_some()
+}
+
 /// Does the agent uid hold on this filesystem? `Some(why)` when it does not.
 ///
 /// The modes the server sets only mean something where the filesystem keeps
