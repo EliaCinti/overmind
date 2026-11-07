@@ -80,11 +80,20 @@ services:
       # purpose, set OVERMIND_DATA to an absolute path, in a `.env` beside
       # this file or in your shell — absolute, or at least starting with
       # `./`: Compose reads a bare `mydata` as a *named volume*, which hands
-      # your instance back to `down -v`. It must also be a filesystem that
-      # honours ownership: the cage (ADR-0029) gives run directories to the
-      # agent uid with chown, and on exFAT, NTFS or a network share that is
-      # either decorative or an outright failure.
+      # your instance back to `down -v`.
+      #
+      # Mount it at /data and nowhere else. In the image /data is a link into a
+      # directory only the server can enter, and that directory is what keeps
+      # an agent out (ADR-0054): on Docker Desktop a bind mount shows every file
+      # as owned by whoever looks, so the modes on the files alone stop nobody.
+      # The server checks this at startup and says so if it does not hold.
       - ${OVERMIND_DATA:-./data}:/data
+      # Where runs work: one directory per run, handed to the agent uid. A
+      # volume, because a run directory needs ownership a bind mount on Docker
+      # Desktop does not keep. `docker compose down -v` deletes it, and with it
+      # the diffs of past sessions; what a run committed is already its branch,
+      # and what it delivered is in ./data. An archive does not carry it either.
+      - runs:/runs
       # The agent's credentials, kept across updates.
       #
       # The CLI writes its session under the agent's $HOME, which is not on
@@ -102,11 +111,11 @@ services:
       # not /Users/you/code/your-project. If you get that wrong the server now
       # tells you what it can actually see, rather than "not a directory".
       #
-      # On Linux the mounted files keep their host ownership, and the agent runs
-      # as uid 10001, so a `code` task may not be able to write them. Set
-      # OVERMIND_AGENT_UID (and _GID) below to your own `id -u` if so — the
-      # boundary is that the agent is not the *server*, and any unprivileged uid
-      # holds it.
+      # The agent never touches this mount: a `code` run works in a clone of
+      # its own and comes back as a branch (ADR-0052), and /repos sits behind
+      # the same directory as /data (ADR-0054). This file once told you to set
+      # OVERMIND_AGENT_UID to your own `id -u` so the agent could write here;
+      # there is no reason to any more, so do not.
 
     environment:
       # How the agent authenticates — and the order matters more than it looks.
@@ -128,10 +137,6 @@ services:
       # `date` read in your local time — it cannot fix (or break) a clock:
       # - TZ=Europe/Rome
       #
-      # Align the agent with your host user so it can write mounted repositories:
-      # - OVERMIND_AGENT_UID=1000
-      # - OVERMIND_AGENT_GID=1000
-      #
       # Organizational memory is ON by default: the image bakes in Wadachi
       # (semantic search, model included — ADR-0031) and each company gets its
       # own brain under /data (ADR-0024). To swap in another MCP memory
@@ -146,7 +151,11 @@ services:
       # - OVERMIND_MANAGED_BRAIN=off
     restart: unless-stopped
 
-# No `volumes:` block any more: nothing here is a Docker-managed volume.
+volumes:
+  # The only Docker-managed volume, and the only thing not in this folder: the
+  # run directories (ADR-0054). Compose names it after the project.
+  runs:
+
 # `./data` holds the database, every company's brain, the audit chain,
 # attachments, artifacts and the subscription token; `./agent` holds the agent
 # CLI's own sign-in — the one thing an archive does not carry, because it is
