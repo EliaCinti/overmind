@@ -461,6 +461,14 @@ pub struct Config {
     /// credentials and session state there, and the server's home is not the
     /// agent's to use even when it could reach it.
     pub agent_home: Option<PathBuf>,
+    /// The credentials the server's own environment carries, by variable name
+    /// (ADR-0051 decision 3): each becomes a read-only account at boot.
+    ///
+    /// Read once, here, rather than from the process environment per spawn, so
+    /// that what an agent receives is decided by the active account and nothing
+    /// else -- and so a test is not paying with whatever key the developer
+    /// happens to have exported.
+    pub env_credentials: crate::accounts::EnvCredentials,
     /// Declare the economy instead of detecting it (`OVERMIND_ECONOMY=key` or
     /// `subscription`, ADR-0030).
     ///
@@ -609,6 +617,7 @@ impl Default for Config {
             agent_uid: None,
             agent_gid: None,
             agent_home: None,
+            env_credentials: crate::accounts::EnvCredentials::default(),
             economy_override: None,
             repos_dir: None,
             managed_brain: true,
@@ -714,6 +723,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            env_credentials: crate::accounts::EnvCredentials::from_env(),
             // Only the two names mean anything; a typo leaves detection in
             // charge rather than silently picking one.
             economy_override: match std::env::var("OVERMIND_ECONOMY")
@@ -761,6 +771,10 @@ pub enum InitError {
     /// own door does not open it.
     #[error("cannot write the setup code that guards the first claim: {0}")]
     SetupCode(std::io::Error),
+    /// The accounts could not be read or carried over (ADR-0051). Refused
+    /// rather than run on the host's login with nobody having chosen it.
+    #[error("cannot read the accounts: {0}")]
+    Accounts(#[from] crate::accounts::AccountError),
 }
 
 /// The database file and the two SQLite keeps beside it in WAL mode.
@@ -842,6 +856,11 @@ pub async fn init_with(database_url: &str, mut config: Config) -> Result<AppStat
             }
         }
     }
+    // Before anything can spawn: who pays has to be known, and every secret
+    // registered with the scrubber, by the time the first run starts. A boot
+    // that cannot read its accounts refuses to come up rather than run every
+    // agent on whatever the host happens to be signed into.
+    crate::accounts::boot(&pool, &config).await?;
     // Those modes are a claim about the filesystem, and a bind mount on Docker
     // Desktop makes it false (ADR-0054). Measured here, once, before anything
     // can start a run.

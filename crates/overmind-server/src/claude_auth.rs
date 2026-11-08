@@ -227,72 +227,11 @@ fn find_token(raw: &str) -> Option<String> {
     best
 }
 
-/// Blot credentials out of text that is about to be logged or shown.
-///
-/// Learned the hard way (27 Aug 2026): "its last words" on a failed token
-/// scrape carried the token itself — the one the scraper had not recognized
-/// — into `docker compose logs` and a pasted bug report. Anything shaped
-/// like a long `sk-ant-…` run is replaced before the text leaves this
-/// module; a lost character or an unknown subtype must not defeat it, so
-/// the match is the shape, not an exact prefix list.
+/// Blot credentials out of text that is about to be logged or shown: every
+/// credential Overmind knows by value, and anything shaped like a token the
+/// CLI has printed and nobody has scraped yet (ADR-0051 decision 6).
 fn scrub_secrets(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let is_tok = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
-    let mut out = String::with_capacity(text.len());
-    let mut i = 0;
-    while i < chars.len() {
-        // A run of token characters containing "sk-ant" and long enough to
-        // be a credential is not for anyone's eyes.
-        if is_tok(chars[i]) {
-            let start = i;
-            while i < chars.len() && is_tok(chars[i]) {
-                i += 1;
-            }
-            let run: String = chars[start..i].iter().collect();
-            // How far a credential runs from here, following it across the
-            // whitespace a TUI redraw inserts. `strip_ansi` turns a carriage
-            // return mid-token into a newline, so the marker can land in a run
-            // far shorter than a secret while the body sits in the next one --
-            // and demanding length of THIS run alone printed the prefix, then
-            // printed the secret as a run with no marker in it.
-            // Bounded: a credential torn by a redraw is one or two pieces, not
-            // fifty. Without a cap, one `sk-ant` followed by a run of base64-ish
-            // lines would swallow all of them — and this text exists so somebody
-            // can read what went wrong, so a scrubber that eats the diagnostic
-            // has traded one failure for another.
-            const MAX_PIECES: usize = 4;
-            let mut end = i;
-            for _ in 0..MAX_PIECES {
-                let mut j = end;
-                while j < chars.len() && chars[j].is_whitespace() {
-                    j += 1;
-                }
-                let body = j;
-                while j < chars.len() && is_tok(chars[j]) {
-                    j += 1;
-                }
-                // A body has no spaces and is long; prose after a prefix is
-                // neither, which is what keeps "set sk-ant-… as the key" whole.
-                if j - body > 20 {
-                    end = j;
-                } else {
-                    break;
-                }
-            }
-            // Long enough to hold a secret, or trailed by something that is.
-            // `sk-ant-` alone is seven characters and a sentence, not a token.
-            if run.contains("sk-ant") && (run.len() > 10 || end > i) {
-                out.push_str("sk-ant-…[redacted]");
-                i = end;
-            } else {
-                out.push_str(&run);
-            }
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
+    crate::secrets::scrub(text)
 }
 
 /// How far this machine's clock is from the world's, in seconds — positive

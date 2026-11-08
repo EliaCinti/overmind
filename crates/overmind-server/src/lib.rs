@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod api;
 pub mod audit;
 pub mod auth;
@@ -36,6 +37,7 @@ pub mod runner_test_hooks {
 }
 pub mod sandbox;
 pub mod scheduler;
+pub mod secrets;
 pub mod ws;
 
 pub use api::app;

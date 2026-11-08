@@ -74,6 +74,18 @@ pub trait Provider: Send + Sync {
     /// The name this provider is configured and reported under.
     fn id(&self) -> &'static str;
 
+    /// Whose bill this CLI runs on: the provider an account belongs to in the
+    /// accounts panel (ADR-0051) -- `anthropic`, `openai`, `google`. Not
+    /// [`Provider::id`]: Google ships two CLIs, and both spend one account.
+    fn vendor(&self) -> &'static str;
+
+    /// The environment variable this CLI reads a credential of `kind` from.
+    ///
+    /// The whole of how an account reaches a run: Overmind sets this one and
+    /// removes every other this provider would read, so the active account is
+    /// the only one the CLI can find.
+    fn credential_var(&self, kind: crate::accounts::Kind) -> &'static str;
+
     /// The shell command that runs one turn.
     ///
     /// Returned as a string because the cage runs it through a shell
@@ -178,6 +190,12 @@ pub trait Provider: Send + Sync {
 /// it will stay.
 pub fn current() -> &'static dyn Provider {
     &claude_code::ClaudeCode
+}
+
+/// Every provider this build knows, configured or not: what the accounts panel
+/// lists and what the server's environment is read for.
+pub fn all() -> &'static [&'static dyn Provider] {
+    &[&claude_code::ClaudeCode]
 }
 
 pub mod claude_code;

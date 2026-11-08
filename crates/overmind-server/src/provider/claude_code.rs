@@ -25,6 +25,20 @@ impl Provider for ClaudeCode {
         "claude-code"
     }
 
+    fn vendor(&self) -> &'static str {
+        "anthropic"
+    }
+
+    /// `setup-token` prints a token meant for `CLAUDE_CODE_OAUTH_TOKEN` (M23);
+    /// a key is `ANTHROPIC_API_KEY`, and outranks the token when both are set
+    /// (memory #207), which is why the one not chosen is removed, not left.
+    fn credential_var(&self, kind: crate::accounts::Kind) -> &'static str {
+        match kind {
+            crate::accounts::Kind::Subscription => "CLAUDE_CODE_OAUTH_TOKEN",
+            crate::accounts::Kind::Key => "ANTHROPIC_API_KEY",
+        }
+    }
+
     fn invoke(&self, spec: &TurnSpec<'_>) -> String {
         build_command(spec)
     }

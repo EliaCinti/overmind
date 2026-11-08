@@ -316,6 +316,11 @@ pub mod perm {
 /// Audit event kinds. Centralized so the catalog of what gets audited is
 /// visible in one place.
 pub mod event_kind {
+    /// An account was linked, made the payer, or forgotten (ADR-0051 decision
+    /// 7). The payload names provider, kind and label -- never the secret.
+    pub const ACCOUNT_CONNECTED: &str = "account.connected";
+    pub const ACCOUNT_ACTIVATED: &str = "account.activated";
+    pub const ACCOUNT_DISCONNECTED: &str = "account.disconnected";
     pub const COMPANY_CREATED: &str = "company.created";
     pub const AGENT_HIRED: &str = "agent.hired";
     pub const AGENT_REASSIGNED: &str = "agent.reassigned";
