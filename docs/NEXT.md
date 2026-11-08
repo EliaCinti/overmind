@@ -16,25 +16,27 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 
 ## The order, and why
 
-> **28 Oct 2026 — where the work stands, in the order it should be finished.**
-> Replaces the block of 3 Sep, whose *Now* shipped as 0.2.4 and 0.2.5. Four
-> milestones are open at once (M25, M32, M34, M36a) against the roadmap's own
-> rule, so the rule governs again: *finish what is half done before opening
-> anything new.* Order agreed with the owner on 28 Oct.
+> **8 Nov 2026 — where the work stands, in the order it should be finished.**
+> Updates the block of 28 Oct, whose *Now* is done. M36a's four slices are on
+> `main` ([ADR-0050](adr/0050-a-loop-that-converges-and-a-stop-that-is-not-a-crash.md),
+> #110–#113); its week live on *TravelAgency* is paused on the owner's word,
+> not cancelled. **M25** closed on the owner's word, without the two-machine
+> walk, which stays in *A week of use* below; **M32** closed on its Accept, and
+> its slice C, the free graphical road, waits here to be decided on evidence
+> about who installs. Ahead of the plan, because the cage was found open: the
+> native instance no longer grants `~/.config` and `~/.local` (#116); on Docker
+> Desktop an agent could reach Overmind's own data, closed and released as
+> **0.3.0** with an advisory (#117, GHSA-cr22-mp4p-vj89); a meeting request is
+> read as the handoff is (#120). The cancelled task a run brings back is fixed
+> (#115); that the run itself goes on spending stays a debt (*Debts from the
+> attempts cap*, below).
 >
-> **Now — close what is half done.** M36a to the end: slice 2 with the brake
-> on the agent ([ADR-0050](adr/0050-a-loop-that-converges-and-a-stop-that-is-not-a-crash.md),
-> addendum of 28 Oct), slice 3 (`budget.low`), slice 4 (the handoff). Its week
-> live on *TravelAgency* needs no code, and during it: **M25** closes on the
-> owner's word; **M32** closes on its Accept, which slices A and B meet — slice
-> C, the free graphical road, moves back here, still to be decided on evidence
-> about who installs. The cancelled task a run brings back is fixed; that the
-> run itself goes on spending stays a debt (*Debts from the attempts cap*, below).
->
-> **Then — M34, through the accounts.** [ADR-0051](adr/0051-an-account-is-connected-not-configured.md)
+> **Now — M34, through the accounts.** [ADR-0051](adr/0051-an-account-is-connected-not-configured.md)
 > and [the plan of 28 Oct](plans/2026-10-28-more-than-one-mind.md) turn slice 4
-> into a store of accounts and a panel to connect them; then slice 5 (the
-> catalogue), Codex, Google.
+> into a store of accounts and a panel to connect them. The agent's own home on
+> the native instance comes with the panel ([ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md)),
+> which closes the last hole the cage states: `~/.claude`, writable today. Then
+> slice 5 (the catalogue), Codex, Google.
 >
 > **Then — M35, then M36b**, in the order ADR-0050 fixed: the check before the
 > triggers.
@@ -99,13 +101,13 @@ Also: a failed respawn leaves the killed flow in the slot advertising a dead URL
 **Designed in [ADR-0048](adr/0048-a-provider-is-a-capability-not-a-name.md), 4 Sep 2026.** The survey there supersedes the estimate below in two places: the seam is nine members rather than six, and the hard part is not the interface — it is that a provider which cannot report what a turn cost makes the budget cap silently stop applying, because `runner.rs` treats a missing cost as ordinary.
 *Asked 3 Sep 2026, after the payer gap below.* The owner wants agents on models other than Claude's — added with an API key, and where the provider allows it, with a subscription. The subscription question has a real answer, and it is more encouraging than expected; the engineering question has a harder one.
 
-**Who actually allows a subscription, checked 3 Sep 2026.** All three major agent CLIs do, which means Overmind's existing shape — drive a CLI, ask it who pays — is the right shape for all three rather than a Claude-only trick:
+**Who actually allows a subscription, checked 3 Sep 2026, corrected 28 Oct.** Two of the three major agent CLIs still do; Google's stopped on 18 Jun 2026 ([ADR-0051](adr/0051-an-account-is-connected-not-configured.md)). The shape holds for all three — drive a CLI, ask it who pays — since Google's key works headless:
 
 | Provider | Subscription path | API key |
 |---|---|---|
 | Claude Code | Pro / Max, via `setup-token` | yes — **already both, today** |
 | OpenAI Codex CLI | ChatGPT Plus, Pro, Business, Edu, Enterprise — browser login or `codex login --device-auth` | yes |
-| Gemini CLI | personal Google account (a free Code Assist licence) or a paid Code Assist subscription; `oauth-personal` is its default | yes |
+| Gemini CLI | **none since 18 Jun 2026**: it no longer serves personal Google accounts or Google AI Pro / Ultra, and Antigravity CLI, their successor, has no headless sign-in | yes — an AI Studio key, headless |
 | Everything else — DeepSeek, Mistral, xAI, local models | none | key only, through an OpenAI-shaped endpoint |
 
 One detail worth carrying over rather than rediscovering: Codex's ChatGPT sign-in **auto-creates an API key** in the selected org, which can then quietly become the payer. That is the same deception Overmind already names for Anthropic — a key silently overriding a login — so the `overrides_login` idea generalises, and the probe must ask each CLI, not assume.
