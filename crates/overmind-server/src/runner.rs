@@ -48,6 +48,9 @@ const MAX_INLINE_BYTES: u64 = 256 * 1024;
 const HANDOFF_FILE: &str = "HANDOFF.md";
 /// How much of a run's own handoff, and of its last words, a handoff keeps.
 const MAX_HANDOFF_CHARS: usize = 16_000;
+/// A meeting request is a topic, a reason and a few names; anything longer is
+/// not one.
+const MAX_MEETING_REQUEST_CHARS: usize = 16_000;
 const HANDOFF_TAIL_CHARS: usize = 2_000;
 
 /// Files attached to this task, as `(filename, mime, size, absolute path)`.
@@ -470,15 +473,34 @@ async fn previous_handoff(state: &AppState, task_id: &str, session_id: &str) -> 
     }
 }
 
-/// The run's own handoff, read without following a link anywhere on the way.
+/// The run's own handoff: `deliverables/HANDOFF.md` for a code run, the run
+/// dir's own for a knowledge run. See [`read_own_file`].
+async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Option<String> {
+    let dir = match kind {
+        ExecutionKind::Code => Some(DELIVERABLES_DIR),
+        ExecutionKind::Knowledge => None,
+    };
+    read_own_file(worktree, dir, HANDOFF_FILE, MAX_HANDOFF_CHARS).await
+}
+
+/// A file the run left for the server, read without following a link anywhere
+/// on the way.
 ///
 /// The file sits in a directory the agent owns, and the server reading it is
-/// not in the cage: a `HANDOFF.md` -- or a `deliverables/` -- planted as a link
-/// would otherwise carry `~/.ssh` or Overmind's own database into the drawer
-/// and the next prompt. So each step is opened `O_NOFOLLOW` from the one before
-/// (`openat`), leaving no gap between checking a name and opening it, and only
-/// a plain file is read -- the shape `backup.rs` uses for the same reason.
-async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Option<String> {
+/// not in the cage: a `HANDOFF.md`, a `MEETING_REQUEST.json` -- or a
+/// `deliverables/` -- planted as a link would otherwise carry `~/.ssh` or
+/// Overmind's own database into the drawer, the next prompt or a meeting. So
+/// each step is opened `O_NOFOLLOW` from the one before (`openat`), leaving no
+/// gap between checking a name and opening it; `O_NONBLOCK`, because a fifo
+/// would otherwise wait for a writer that never comes; only a plain file is
+/// read, and only so much of it -- the shape `backup.rs` uses for the same
+/// reason.
+async fn read_own_file(
+    worktree: &std::path::Path,
+    dir: Option<&'static str>,
+    name: &'static str,
+    max_chars: usize,
+) -> Option<String> {
     let worktree = worktree.to_path_buf();
     tokio::task::spawn_blocking(move || {
         use std::ffi::CString;
@@ -499,17 +521,17 @@ async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Op
             .open(&worktree)
             .ok()?
             .into();
-        let dir = match kind {
-            ExecutionKind::Code => open_at(
+        let dir = match dir {
+            Some(sub) => open_at(
                 &root,
-                DELIVERABLES_DIR,
+                sub,
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
             )?,
-            ExecutionKind::Knowledge => root,
+            None => root,
         };
         let fd = open_at(
             &dir,
-            HANDOFF_FILE,
+            name,
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )?;
         let file = std::fs::File::from(fd);
@@ -517,10 +539,10 @@ async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Op
             return None;
         }
         let mut text = String::new();
-        file.take((MAX_HANDOFF_CHARS * 4) as u64)
+        file.take((max_chars * 4) as u64)
             .read_to_string(&mut text)
             .ok()?;
-        let text: String = text.chars().take(MAX_HANDOFF_CHARS).collect();
+        let text: String = text.chars().take(max_chars).collect();
         (!text.trim().is_empty()).then_some(text)
     })
     .await
@@ -2826,32 +2848,41 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // Best-effort: a malformed request never fails an otherwise done session.
     // A run that no longer held its task asks for nothing: the call it hit is
     // about work the person took back.
-    let request_path = ctx.worktree_dir.join(MEETING_REQUEST_FILE);
-    if let Ok(text) = tokio::fs::read_to_string(&request_path).await {
-        // Remove it first, so it never lands in the diff or a resumed run.
-        let _ = tokio::fs::remove_file(&request_path).await;
-        if applied {
-            match serde_json::from_str::<Value>(&text)
-                .ok()
-                .as_ref()
-                .and_then(crate::meeting::Request::from_json)
-            {
-                Some(req) => {
-                    if let Err(e) =
-                        crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req)
-                            .await
-                    {
-                        eprintln!(
-                            "meeting requested by session {} refused: {e}",
-                            ctx.session_id
-                        );
-                    }
+    //
+    // Read as the handoff is (`read_own_file`): the run dir is the agent's, and
+    // a link, a fifo or a device planted under this name is the agent's too.
+    let request = read_own_file(
+        &ctx.worktree_dir,
+        None,
+        MEETING_REQUEST_FILE,
+        MAX_MEETING_REQUEST_CHARS,
+    )
+    .await;
+    // Removed whatever it was, so it never lands in the diff or a resumed run.
+    // `remove_file` takes a link away, never what it names.
+    let _ = tokio::fs::remove_file(ctx.worktree_dir.join(MEETING_REQUEST_FILE)).await;
+    if let Some(text) = request
+        && applied
+    {
+        match serde_json::from_str::<Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(crate::meeting::Request::from_json)
+        {
+            Some(req) => {
+                if let Err(e) =
+                    crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req).await
+                {
+                    eprintln!(
+                        "meeting requested by session {} refused: {e}",
+                        ctx.session_id
+                    );
                 }
-                None => eprintln!(
-                    "session {} left an unreadable {MEETING_REQUEST_FILE}",
-                    ctx.session_id
-                ),
             }
+            None => eprintln!(
+                "session {} left an unreadable {MEETING_REQUEST_FILE}",
+                ctx.session_id
+            ),
         }
     }
 
