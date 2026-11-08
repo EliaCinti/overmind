@@ -272,6 +272,11 @@ fn api_router() -> Router<AppState> {
         .route("/claude-auth/start", post(claude_auth_start))
         .route("/claude-auth/code", post(claude_auth_code))
         .route("/economy/pay-with", post(pay_with))
+        // The accounts Overmind holds (ADR-0051). Owner-only throughout: who
+        // pays is billing, and a label is somebody's e-mail.
+        .route("/accounts", get(list_accounts).post(connect_account))
+        .route("/accounts/{id}", delete(disconnect_account))
+        .route("/accounts/{id}/activate", post(activate_account))
         // The archive is the instance (ADR-0044): the owner's verb, on a
         // claimed instance only -- `require_owner` alone would let anyone on
         // the port of an unclaimed box fill the folder and download it.
@@ -472,8 +477,12 @@ struct PayWith {
 /// ADR-0030 exists to prevent that.
 async fn pay_with(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<PayWith>,
 ) -> Result<Json<Value>, ApiError> {
+    // Who pays is billing, and billing is the owner's (ADR-0051 decision 7).
+    // This route never asked before; it changes the payer all the same.
+    crate::auth::require_owner(&state, &headers).await?;
     let plan = match req.with.as_str() {
         "plan" => true,
         "detected" => false,
@@ -536,6 +545,115 @@ async fn pay_with(
     Ok(Json(json!({
         "economy": crate::economy::as_json(&economy),
         "pay_with": crate::economy::pay_with_slug(&state).await,
+    })))
+}
+
+impl From<crate::accounts::AccountError> for ApiError {
+    fn from(e: crate::accounts::AccountError) -> Self {
+        use crate::accounts::AccountError;
+        match e {
+            AccountError::NotFound => ApiError::NotFound("account"),
+            AccountError::FromEnvironment => ApiError::Conflict(e.to_string()),
+            AccountError::Invalid(why) => ApiError::Invalid(why),
+            AccountError::Db(e) => ApiError::Internal(e.into()),
+            AccountError::Io(e) => ApiError::Internal(e.into()),
+        }
+    }
+}
+
+/// Every account, and every provider this build can hold one for. Never a
+/// secret: a row is kind, label, source, active and a key's last four.
+async fn list_accounts(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    let accounts = crate::accounts::list(&state.pool).await?;
+    let mut providers: Vec<&str> = crate::provider::all().iter().map(|p| p.vendor()).collect();
+    providers.dedup();
+    Ok(Json(
+        json!({ "accounts": accounts, "providers": providers }),
+    ))
+}
+
+/// No `Debug`: one field is a key, and a `{:?}` in a future log line is all
+/// it would take.
+#[derive(Deserialize)]
+struct ConnectAccount {
+    provider: String,
+    kind: String,
+    key: String,
+}
+
+/// Connect an account by pasting a key (ADR-0051 decision 5, the *key* shape).
+///
+/// A subscription is never pasted: it is connected by signing in, so the
+/// token comes from the provider's own flow rather than from a text field
+/// somebody could fill with anything.
+async fn connect_account(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ConnectAccount>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    match crate::accounts::Kind::from_slug(&req.kind) {
+        Some(crate::accounts::Kind::Key) => {}
+        Some(crate::accounts::Kind::Subscription) => {
+            return Err(ApiError::Invalid(
+                "a subscription is connected by signing in, not by pasting its token".into(),
+            ));
+        }
+        None => {
+            return Err(ApiError::Invalid(format!(
+                "kind is \"key\" or \"subscription\", not \"{}\"",
+                req.kind
+            )));
+        }
+    }
+    let account = crate::accounts::link(
+        &state,
+        &req.provider,
+        crate::accounts::Kind::Key,
+        &req.key,
+        None,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!(account))))
+}
+
+/// Make this account its provider's payer, from the next spawn on.
+async fn activate_account(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    let account = crate::accounts::activate(&state, &id).await?;
+    // The economy follows the payer; asked again rather than assumed.
+    state.set_economy(crate::economy::detect_for(&state).await);
+    Ok(Json(json!(account)))
+}
+
+/// Forget an account and delete its secret -- and say what that cannot do: a
+/// subscription's token stays valid until it is revoked at the provider's own
+/// site (ADR-0051 decision 7). Said as data, for the interface to word.
+async fn disconnect_account(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    let all = crate::accounts::list(&state.pool).await?;
+    let kind = all
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.kind)
+        .ok_or(ApiError::NotFound("account"))?;
+    crate::accounts::disconnect(&state, &id).await?;
+    state.set_economy(crate::economy::detect_for(&state).await);
+    Ok(Json(json!({
+        "disconnected": id,
+        "still_valid_at_provider": kind == crate::accounts::Kind::Subscription,
     })))
 }
 
