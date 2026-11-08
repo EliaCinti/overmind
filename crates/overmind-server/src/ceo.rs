@@ -1454,23 +1454,43 @@ pub(crate) async fn run_adapter(
     // is what remains under the cap once *other* work in flight is counted, and
     // not this turn's own placeholder counted against itself.
     let ceiling = check.headroom();
-    let outcome = spawn_adapter(
-        state,
-        turn.activity_key,
-        cwd,
-        prompt,
-        traits,
-        memory_context,
-        ceiling,
-    )
-    .await;
+    // Who pays for the turn, decided once, before it starts (ADR-0051).
+    let (outcome, account_id) =
+        match crate::accounts::for_spawn(state, crate::provider::current()).await {
+            Ok(creds) => (
+                spawn_adapter(
+                    state,
+                    turn.activity_key,
+                    cwd,
+                    prompt,
+                    traits,
+                    memory_context,
+                    ceiling,
+                    &creds,
+                )
+                .await,
+                creds.account_id,
+            ),
+            Err(e) => (
+                Err(CeoError::Invalid(format!(
+                    "the active account cannot be read: {e}"
+                ))),
+                None,
+            ),
+        };
 
     // Whatever happened, the money is spent and the hold must go: a reservation
     // that outlives its turn is a leak only a restart would clear.
     let costed = match &outcome {
         Ok(output) => {
-            crate::governance::record_turn_cost(&state.pool, turn.company_id, turn.agent_id, output)
-                .await
+            crate::governance::record_turn_cost(
+                &state.pool,
+                turn.company_id,
+                turn.agent_id,
+                account_id.as_deref(),
+                output,
+            )
+            .await
         }
         Err(_) => false,
     };
@@ -1511,6 +1531,7 @@ async fn spawn_adapter(
     traits: &str,
     memory_context: Option<&str>,
     ceiling_cents: Option<i64>,
+    creds: &crate::accounts::Spawn,
 ) -> Result<String, CeoError> {
     // One definition of the adapter invocation, shared with task runs
     // (ADR-0021) — it used to exist here in a second copy that named no model.
@@ -1551,7 +1572,7 @@ async fn spawn_adapter(
         mcp.as_ref().map(|m| m.path.as_path()),
         ceiling_cents,
     );
-    let mut cmd = crate::sandbox::command(&state.config, &held, &agent_cmd);
+    let mut cmd = crate::sandbox::command(&state.config, &held, creds, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }

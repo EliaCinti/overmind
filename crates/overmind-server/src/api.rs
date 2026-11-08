@@ -483,8 +483,12 @@ async fn pay_with(
             )));
         }
     };
-    crate::economy::prefer_plan(&state.config, plan).map_err(|e| ApiError::Internal(e.into()))?;
-    let economy = crate::economy::detect(&state.config).await;
+    // A choice is now an activation (ADR-0051): the plan's account pays, or
+    // the key's does. Who paid before is kept so a refusal puts it back.
+    let before = crate::economy::prefer_plan(&state, plan)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    let economy = crate::economy::detect_for(&state).await;
     // Only one of the two ways this can fail is something Overmind can repair
     // from here, so the refusal says which — as a remedy the interface can act
     // on, not as English prose it would have to match against.
@@ -512,7 +516,8 @@ async fn pay_with(
         None
     };
     if let Some((why, remedy)) = refusal {
-        crate::economy::prefer_plan(&state.config, false)
+        crate::economy::restore_payer(&state, before)
+            .await
             .map_err(|e| ApiError::Internal(e.into()))?;
         return Err(match remedy {
             Some(kind) => ApiError::Remediable {
@@ -525,12 +530,12 @@ async fn pay_with(
     state.set_economy(economy.clone());
     eprintln!(
         "economy: chosen pay_with={} — now paying with {}",
-        crate::economy::pay_with_slug(&state.config),
+        crate::economy::pay_with_slug(&state).await,
         crate::economy::describe(&economy)
     );
     Ok(Json(json!({
         "economy": crate::economy::as_json(&economy),
-        "pay_with": crate::economy::pay_with_slug(&state.config),
+        "pay_with": crate::economy::pay_with_slug(&state).await,
     })))
 }
 
@@ -958,7 +963,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "economy": crate::economy::as_json(&state.economy()),
         // Whether the person chose who pays (ADR-0037): `plan` when they asked
         // the plan to, `detected` when the economy is whatever the probe found.
-        "pay_with": crate::economy::pay_with_slug(&state.config),
+        "pay_with": crate::economy::pay_with_slug(&state).await,
         // Where each of the plan's windows stands, as last reported. Empty
         // under an API key, where windows do not apply, and empty before the
         // first run says anything — a window we have not heard about is absent

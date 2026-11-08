@@ -331,7 +331,7 @@ async fn build(
         staging: staging.to_path_buf(),
         folder: folder.to_path_buf(),
         data_dir: config.data_dir.clone(),
-        marker: crate::economy::plan_marker(config),
+        marker: config.data_dir.join(crate::accounts::LEGACY_MARKER_FILE),
         brains,
         brain_mode,
         token: token.map(str::to_string),

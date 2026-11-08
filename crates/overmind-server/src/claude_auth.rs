@@ -405,7 +405,10 @@ pub fn start(state: &AppState) -> Result<(), String> {
 
     // Tethered to this server's life: see `tethered`.
     let argv = tethered(std::process::id(), "claude", &["setup-token"]);
-    let mut cmd = crate::sandbox::as_agent_std(&state.config, &argv[0]);
+    // With no account's credential: a sign-in that ran as the active account
+    // would be signing that account in again, or arguing with it.
+    let none = crate::accounts::Spawn::none(crate::provider::current());
+    let mut cmd = crate::sandbox::as_agent_std(&state.config, &none, &argv[0]);
     cmd.args(&argv[1..])
         .stdin(std::process::Stdio::from(
             slave.try_clone().map_err(|e| e.to_string())?,
@@ -712,7 +715,7 @@ pub async fn status(state: &AppState) -> serde_json::Value {
         Some((FlowState::Done, _, _, _, _, _)) => {
             // The proof is the economy, not the exit code: re-detect and let
             // the sign-in notice disappear because the CLI is now signed in.
-            let economy = crate::economy::detect(&state.config).await;
+            let economy = crate::economy::detect_for(state).await;
             state.set_economy(economy.clone());
             serde_json::json!({
                 "state": "done",

@@ -36,3 +36,7 @@ CREATE UNIQUE INDEX accounts_one_row_per_variable
 -- the next run, and the ledger has to say so truthfully across the switch.
 -- NULL for every row from before accounts, and for a run on the host's login.
 ALTER TABLE cost_events ADD COLUMN account_id TEXT;
+
+-- The same fact on the run itself, written when it is spawned: the cost event
+-- is written when it ends, and by then the active account may be another.
+ALTER TABLE agent_task_sessions ADD COLUMN account_id TEXT;

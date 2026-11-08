@@ -162,6 +162,16 @@ impl Spawn {
         }
     }
 
+    /// Every credential variable of every provider removed: for a command that
+    /// is no provider's, and must carry nobody's account.
+    pub fn nobody() -> Self {
+        Spawn {
+            account_id: None,
+            set: Vec::new(),
+            strip: credential_vars(),
+        }
+    }
+
     /// Apply to a command: strip first, then set, so the active account wins
     /// over anything the server's own environment would have passed on.
     pub fn apply(&self, cmd: &mut impl EnvTarget) {

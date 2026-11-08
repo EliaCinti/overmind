@@ -99,10 +99,13 @@ async fn a_declared_economy_is_reported_and_carries_its_meaning() {
 /// happens to be cheaper to implement.
 #[tokio::test]
 async fn a_custom_adapter_is_not_interrogated() {
-    let economy = overmind_server::economy::detect(&overmind_server::Config {
-        agent_cmd: Some("sh /somewhere/agent.sh".into()),
-        ..overmind_server::Config::default()
-    })
+    let economy = overmind_server::economy::detect(
+        &overmind_server::Config {
+            agent_cmd: Some("sh /somewhere/agent.sh".into()),
+            ..overmind_server::Config::default()
+        },
+        &overmind_server::accounts::Spawn::none(overmind_server::provider::current()),
+    )
     .await;
     match economy {
         overmind_server::economy::Economy::Unknown { kind, reason } => {
@@ -119,10 +122,13 @@ async fn a_custom_adapter_is_not_interrogated() {
 /// be producing this answer.
 #[tokio::test]
 async fn a_declaration_outranks_detection() {
-    let economy = overmind_server::economy::detect(&overmind_server::Config {
-        economy_override: Some(overmind_server::economy::Economy::Subscription { plan: None }),
-        ..overmind_server::Config::default()
-    })
+    let economy = overmind_server::economy::detect(
+        &overmind_server::Config {
+            economy_override: Some(overmind_server::economy::Economy::Subscription { plan: None }),
+            ..overmind_server::Config::default()
+        },
+        &overmind_server::accounts::Spawn::none(overmind_server::provider::current()),
+    )
     .await;
     assert_eq!(
         economy,
