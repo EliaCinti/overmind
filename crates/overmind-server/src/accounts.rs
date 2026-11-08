@@ -162,6 +162,16 @@ impl Spawn {
         }
     }
 
+    /// One credential and only that one: for asking a provider's probe who an
+    /// account is before it is an account at all.
+    pub(crate) fn with(provider: &dyn crate::provider::Provider, kind: Kind, secret: &str) -> Self {
+        let mut spawn = Spawn::none(provider);
+        spawn
+            .set
+            .push((provider.credential_var(kind), secret.to_string()));
+        spawn
+    }
+
     /// Every credential variable of every provider removed: for a command that
     /// is no provider's, and must carry nobody's account.
     pub fn nobody() -> Self {
@@ -229,6 +239,23 @@ fn known_provider(provider: &str) -> bool {
     crate::provider::all()
         .iter()
         .any(|p| p.vendor() == provider)
+}
+
+/// Does this data directory hold any credential Overmind wrote?
+///
+/// What the archive asks before it agrees to leave without a passphrase
+/// (ADR-0044, extended to every account by ADR-0051 decision 8). Read off the
+/// files rather than the rows: the files are what an archive would carry.
+pub fn holds_a_secret(config: &Config) -> bool {
+    let root = config.data_dir.join("credentials");
+    let Ok(providers) = std::fs::read_dir(&root) else {
+        return false;
+    };
+    providers.flatten().any(|p| {
+        std::fs::read_dir(p.path())
+            .map(|ids| ids.flatten().any(|id| id.path().join(SECRET_FILE).exists()))
+            .unwrap_or(false)
+    })
 }
 
 /// Where an account's secret is kept.

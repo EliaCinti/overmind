@@ -2,7 +2,7 @@
 //!
 //! Until now there was no boundary: `runner.rs` built a literal `claude -p …`
 //! and read Claude Code's own events back in seventy places, `economy.rs`
-//! probed `claude auth status --json`, and `claude_auth.rs` drove
+//! probed `claude auth status --json`, and `claude_auth.rs` (now `sign_in.rs`) drove
 //! `setup-token` on a pty. A second provider would have touched every one of
 //! them, and a third would have touched them again.
 //!
@@ -180,6 +180,17 @@ pub trait Provider: Send + Sync {
     /// `None` where the adapter names no session, which is a provider that
     /// cannot resume rather than an error.
     fn session_id(&self, output: &str) -> Option<String>;
+
+    /// How an account of `kind` is connected for this provider (ADR-0051
+    /// decision 5): a CLI driven on a pty, a pasted key, or unavailable with
+    /// its reason. The pty machinery is Overmind's (`sign_in.rs`); what the
+    /// CLI prints and means is the provider's.
+    fn sign_in(&self, kind: crate::accounts::Kind) -> crate::sign_in::SignIn;
+
+    /// Who the probe's answer says this account is -- an e-mail, an org --
+    /// for the panel's label. `None` when it does not say, and the label is
+    /// then `unknown`, never something somebody typed (ADR-0051 decision 1).
+    fn account_label(&self, status: &Value) -> Option<String>;
 }
 
 /// The provider this instance drives.

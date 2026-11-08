@@ -171,9 +171,10 @@ pub async fn export(
     passphrase: Option<&str>,
 ) -> Result<ExportReport, ExportError> {
     let config = state.config.clone();
-    let token = crate::claude_auth::stored_token(&config);
+    // Carried as accounts by the archive's next format; until then nothing.
+    let token: Option<String> = None;
     let passphrase = passphrase.map(str::trim).filter(|p| !p.is_empty());
-    if token.is_some() && passphrase.is_none() {
+    if crate::accounts::holds_a_secret(&config) && passphrase.is_none() {
         return Err(ExportError::PassphraseRequired);
     }
     if let Some(p) = passphrase {
@@ -990,8 +991,8 @@ pub async fn what_makes_the_instance_full(state: &AppState) -> Option<String> {
     if companies > 0 {
         return Some("it already holds companies".into());
     }
-    if crate::claude_auth::stored_token(&state.config).is_some() {
-        return Some("a subscription is signed in on it".into());
+    if crate::accounts::holds_a_secret(&state.config) {
+        return Some("an account is connected on it".into());
     }
     None
 }
@@ -1527,7 +1528,7 @@ async fn live_instance_is_still_empty(path: &Path, config: &Config) -> std::io::
         .await
         .map_err(std::io::Error::other)?;
     pool.close().await;
-    Ok(users == 0 && companies == 0 && crate::claude_auth::stored_token(config).is_none())
+    Ok(users == 0 && companies == 0 && !crate::accounts::holds_a_secret(config))
 }
 
 fn move_into_place(from: &Path, to: &Path) -> std::io::Result<()> {

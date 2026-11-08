@@ -469,6 +469,13 @@ pub struct Config {
     /// else -- and so a test is not paying with whatever key the developer
     /// happens to have exported.
     pub env_credentials: crate::accounts::EnvCredentials,
+    /// A program run in place of the provider's own sign-in command.
+    ///
+    /// For the test suites alone, and never read from the environment: tests
+    /// never spawn the real CLI, and the sign-in is the one path whose whole
+    /// behaviour is a conversation with it on a pty.
+    #[doc(hidden)]
+    pub sign_in_stub: Option<PathBuf>,
     /// Declare the economy instead of detecting it (`OVERMIND_ECONOMY=key` or
     /// `subscription`, ADR-0030).
     ///
@@ -618,6 +625,7 @@ impl Default for Config {
             agent_gid: None,
             agent_home: None,
             env_credentials: crate::accounts::EnvCredentials::default(),
+            sign_in_stub: None,
             economy_override: None,
             repos_dir: None,
             managed_brain: true,
@@ -724,6 +732,7 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
             env_credentials: crate::accounts::EnvCredentials::from_env(),
+            sign_in_stub: None,
             // Only the two names mean anything; a typo leaves detection in
             // charge rather than silently picking one.
             economy_override: match std::env::var("OVERMIND_ECONOMY")

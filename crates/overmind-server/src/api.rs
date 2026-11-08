@@ -268,13 +268,15 @@ fn api_router() -> Router<AppState> {
         .route("/auth/last-company", post(auth_last_company))
         // Signing the agent CLI into a Claude subscription, from the product
         // (M23). A setup surface: loopback-only like everything else today.
-        .route("/claude-auth", get(claude_auth_status))
+        .route("/claude-auth", get(sign_in_status))
         .route("/claude-auth/start", post(claude_auth_start))
-        .route("/claude-auth/code", post(claude_auth_code))
+        .route("/claude-auth/code", post(sign_in_code))
         .route("/economy/pay-with", post(pay_with))
         // The accounts Overmind holds (ADR-0051). Owner-only throughout: who
         // pays is billing, and a label is somebody's e-mail.
         .route("/accounts", get(list_accounts).post(connect_account))
+        .route("/accounts/sign-in", get(sign_in_status).post(sign_in_begin))
+        .route("/accounts/sign-in/code", post(sign_in_code))
         .route("/accounts/{id}", delete(disconnect_account))
         .route("/accounts/{id}/activate", post(activate_account))
         // The archive is the instance (ADR-0044): the owner's verb, on a
@@ -416,20 +418,67 @@ async fn auth_last_company(
     Ok(StatusCode::OK)
 }
 
-/// Where the subscription sign-in stands (M23). Polled by the interface.
-async fn claude_auth_status(State(state): State<AppState>) -> Json<Value> {
-    Json(crate::claude_auth::status(&state).await)
-}
-
-async fn claude_auth_start(
+/// Where the sign-in stands (M23). Polled by the interface; reads what the
+/// flow learned and runs nothing.
+async fn sign_in_status(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    // Billing is the owner's: connecting or replacing the subscription
-    // changes who pays, and that is not a member's call (M24 roles).
+) -> Result<Json<Value>, ApiError> {
     crate::auth::require_owner(&state, &headers).await?;
-    crate::claude_auth::start(&state).map_err(ApiError::Invalid)?;
-    Ok(StatusCode::ACCEPTED)
+    Ok(Json(crate::sign_in::status()))
+}
+
+/// The provider of this build that bills to `vendor`, for connecting one of
+/// its accounts. The first, while each vendor has one CLI here.
+fn provider_for(vendor: &str) -> Result<&'static dyn crate::provider::Provider, ApiError> {
+    crate::provider::all()
+        .iter()
+        .copied()
+        .find(|p| p.vendor() == vendor)
+        .ok_or_else(|| {
+            ApiError::Invalid(format!("no provider of this build bills to \"{vendor}\""))
+        })
+}
+
+#[derive(Deserialize)]
+struct BeginSignIn {
+    provider: String,
+    kind: String,
+}
+
+/// Begin connecting an account, in the shape its provider says (ADR-0051
+/// decision 5): a paste-back flow starts and is polled; a key answers that a
+/// field is wanted and runs nothing; an unavailable kind says why.
+async fn sign_in_begin(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<BeginSignIn>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Billing is the owner's: connecting an account changes who can pay, and
+    // that is not a member's call (M24 roles).
+    crate::auth::require_owner(&state, &headers).await?;
+    let provider = provider_for(&req.provider)?;
+    let kind = crate::accounts::Kind::from_slug(&req.kind).ok_or_else(|| {
+        ApiError::Invalid(format!(
+            "kind is \"key\" or \"subscription\", not \"{}\"",
+            req.kind
+        ))
+    })?;
+    begin_sign_in(&state, provider, kind)
+}
+
+fn begin_sign_in(
+    state: &AppState,
+    provider: &'static dyn crate::provider::Provider,
+    kind: crate::accounts::Kind,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use crate::sign_in::{BeginError, Begun};
+    match crate::sign_in::begin(state, provider, kind) {
+        Ok(Begun::PasteBack) => Ok((StatusCode::ACCEPTED, Json(json!({ "shape": "paste_back" })))),
+        Ok(Begun::Key) => Ok((StatusCode::OK, Json(json!({ "shape": "key" })))),
+        Err(BeginError::Unavailable(why)) => Err(ApiError::Conflict(why.into())),
+        Err(BeginError::Refused(why)) => Err(ApiError::Invalid(why)),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -437,7 +486,7 @@ struct AuthCode {
     code: String,
 }
 
-async fn claude_auth_code(
+async fn sign_in_code(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<AuthCode>,
@@ -446,8 +495,23 @@ async fn claude_auth_code(
     if req.code.trim().is_empty() {
         return Err(ApiError::Invalid("the code must not be empty".into()));
     }
-    crate::claude_auth::submit_code(&req.code).map_err(ApiError::Invalid)?;
+    crate::sign_in::submit_code(&req.code).map_err(ApiError::Invalid)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// The M23 route, onto the same flow, for one release (ADR-0051
+/// consequences): the interface still calls it until the accounts panel.
+async fn claude_auth_start(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    begin_sign_in(
+        &state,
+        crate::provider::current(),
+        crate::accounts::Kind::Subscription,
+    )
+    .map(|(status, _)| status)
 }
 
 /// Whether organizational memory (Wadachi/MCP) is wired up at all — for the UI
@@ -569,8 +633,28 @@ async fn list_accounts(
 ) -> Result<Json<Value>, ApiError> {
     crate::auth::require_owner(&state, &headers).await?;
     let accounts = crate::accounts::list(&state.pool).await?;
-    let mut providers: Vec<&str> = crate::provider::all().iter().map(|p| p.vendor()).collect();
-    providers.dedup();
+    // Each provider with how each kind is connected, so the panel draws a
+    // provider from what it says rather than from what the panel assumes --
+    // including a kind it cannot connect, and why.
+    let mut providers: Vec<Value> = Vec::new();
+    for p in crate::provider::all() {
+        if providers.iter().any(|v| v["provider"] == json!(p.vendor())) {
+            continue;
+        }
+        let mut kinds = serde_json::Map::new();
+        for kind in [
+            crate::accounts::Kind::Subscription,
+            crate::accounts::Kind::Key,
+        ] {
+            let how = p.sign_in(kind);
+            let mut entry = json!({ "shape": how.shape() });
+            if let crate::sign_in::SignIn::Unavailable(why) = how {
+                entry["reason"] = why.into();
+            }
+            kinds.insert(kind.slug().to_string(), entry);
+        }
+        providers.push(json!({ "provider": p.vendor(), "kinds": kinds }));
+    }
     Ok(Json(
         json!({ "accounts": accounts, "providers": providers }),
     ))
@@ -728,7 +812,7 @@ async fn list_backups(
         "archives": archives,
         // Whether an export will need a passphrase, so the interface can ask
         // for one only when there is a sign-in to seal -- and say why.
-        "sign_in_travels": crate::claude_auth::stored_token(&state.config).is_some(),
+        "sign_in_travels": crate::accounts::holds_a_secret(&state.config),
     })))
 }
 

@@ -4,7 +4,6 @@ pub mod audit;
 pub mod auth;
 pub mod backup;
 pub mod ceo;
-pub mod claude_auth;
 pub mod db;
 pub mod domain;
 pub mod economy;
@@ -38,6 +37,7 @@ pub mod runner_test_hooks {
 pub mod sandbox;
 pub mod scheduler;
 pub mod secrets;
+pub mod sign_in;
 pub mod ws;
 
 pub use api::app;

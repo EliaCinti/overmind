@@ -224,12 +224,28 @@ pub async fn detect(config: &Config, creds: &crate::accounts::Spawn) -> Economy 
     if let Some(declared) = declared(config) {
         return declared;
     }
-
-    // The command is the provider's; running it is ours (ADR-0048). As the
-    // agent and not as the server: in the image the server is root and the
-    // credentials live in the agent's home, so a probe run as the server
-    // answers confidently about the wrong home directory.
     let provider = crate::provider::current();
+    match probe(config, provider, creds).await {
+        Ok(status) => provider.read_economy(&status),
+        Err(reason) => Economy::Unknown {
+            kind: UnknownKind::Unreadable,
+            reason,
+        },
+    }
+}
+
+/// Run the provider's probe with `creds` and hand back its JSON answer, or
+/// why there is none.
+///
+/// The command is the provider's; running it is ours (ADR-0048). As the agent
+/// and not as the server: in the image the server is root and the credentials
+/// live in the agent's home, so a probe run as the server answers confidently
+/// about the wrong home directory.
+async fn probe(
+    config: &Config,
+    provider: &dyn crate::provider::Provider,
+    creds: &crate::accounts::Spawn,
+) -> Result<Value, String> {
     let (bin, args) = provider.economy_probe();
     let mut cmd = crate::sandbox::as_agent(config, creds, bin);
     cmd.args(args)
@@ -244,26 +260,31 @@ pub async fn detect(config: &Config, creds: &crate::accounts::Spawn) -> Economy 
 
     let out = match waited {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Economy::Unknown {
-                kind: UnknownKind::Unreadable,
-                reason: format!("could not run the agent CLI: {e}"),
-            };
-        }
-        Err(_) => {
-            return Economy::Unknown {
-                kind: UnknownKind::Unreadable,
-                reason: "the agent CLI did not answer within 20s".into(),
-            };
-        }
+        Ok(Err(e)) => return Err(format!("could not run the agent CLI: {e}")),
+        Err(_) => return Err("the agent CLI did not answer within 20s".into()),
     };
-    match serde_json::from_slice::<Value>(&out.stdout) {
-        Ok(status) => provider.read_economy(&status),
-        Err(e) => Economy::Unknown {
-            kind: UnknownKind::Unreadable,
-            reason: format!("the agent CLI's answer was not JSON: {e}"),
-        },
+    serde_json::from_slice::<Value>(&out.stdout)
+        .map_err(|e| format!("the agent CLI's answer was not JSON: {e}"))
+}
+
+/// Who a credential belongs to, as the provider's own probe says -- asked
+/// once, when the account is connected, with that credential and no other.
+///
+/// `None` when the probe cannot be asked (a declared economy, a custom
+/// adapter: the same honesty [`detect`] applies) or does not say; the label is
+/// then `unknown` rather than anything guessed.
+pub(crate) async fn label_for(
+    state: &AppState,
+    provider: &dyn crate::provider::Provider,
+    kind: Kind,
+    credential: &str,
+) -> Option<String> {
+    if declared(&state.config).is_some() {
+        return None;
     }
+    let creds = crate::accounts::Spawn::with(provider, kind, credential);
+    let status = probe(&state.config, provider, &creds).await.ok()?;
+    provider.account_label(&status)
 }
 
 /// Where a subscription stands in the window that is governing it right now.

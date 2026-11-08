@@ -417,8 +417,20 @@ fn agent_user(config: &Config) -> Option<AgentUser> {
 
 /// Which mechanisms hold this run.
 pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = cage_home(config, std::env::var_os("HOME").map(PathBuf::from));
     confinement_in(config, cage, home.as_deref())
+}
+
+/// Whose home the adapter's paths are granted in: the agent's, where one is
+/// configured, and only otherwise the server's.
+///
+/// In the image the server is root and the agent is `/home/agent`; reading
+/// the server's `HOME` granted `/root/.claude` to a process that never uses it
+/// while the agent's real one came in only through `agent_home`. On the native
+/// instance there is no agent home yet, and the host's is the one the CLI
+/// actually uses until it has its own (ADR-0053, M34 step 4).
+fn cage_home(config: &Config, server_home: Option<PathBuf>) -> Option<PathBuf> {
+    config.agent_home.clone().or(server_home)
 }
 
 /// [`confinement`] with the host's home as an argument, so what it grants there
@@ -1809,6 +1821,42 @@ probe write_cli_state write "$H/.claude/settings.json"
     fn key_is_removed(cmd: &std::process::Command) -> bool {
         cmd.get_envs()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none())
+    }
+
+    /// In the image the server is root and the agent is not: the adapter's
+    /// writable home is the agent's, `/home/agent`, and `/root/.claude` is
+    /// nobody's business. Reading the server's `HOME` granted exactly that
+    /// (NEXT, "the sign-in and the cage", one of the six that travel with
+    /// `sign_in`).
+    #[test]
+    fn the_cage_grants_the_agents_home_and_not_the_servers() {
+        let agent_home = fresh_data_dir().join("agent-home");
+        let cfg = Config {
+            data_dir: fresh_data_dir(),
+            agent_home: Some(agent_home.clone()),
+            ..Config::default()
+        };
+        let run = cfg.data_dir.join("run");
+        let home = cage_home(&cfg, Some(PathBuf::from("/root")));
+        let writable = writable_paths(&cfg, &Cage::new(&run), home.as_deref());
+        assert!(
+            writable.iter().any(|p| p.ends_with("agent-home/.claude")),
+            "the agent's own adapter state is writable: {writable:?}"
+        );
+        assert!(
+            !writable.iter().any(|p| p.starts_with("/root")),
+            "the server's home was granted: {writable:?}"
+        );
+        // And where no agent home is configured -- the native instance, until
+        // it gets one (M34 step 4) -- the host's home is still the one used.
+        let native = Config {
+            agent_home: None,
+            ..cfg.clone()
+        };
+        assert_eq!(
+            cage_home(&native, Some(PathBuf::from("/Users/someone"))),
+            Some(PathBuf::from("/Users/someone"))
+        );
     }
 
     /// ADR-0051: every command that runs as the agent — the probe, the caged
