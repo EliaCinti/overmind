@@ -327,12 +327,20 @@ pub(crate) async fn drain_narrating(
         if let Some(stdout) = stdout {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                // Before the line becomes anything -- narration, stored output,
+                // an error -- every credential Overmind knows is blotted out of
+                // it (ADR-0051 decision 6): an agent can print its own key, and
+                // a CLI's refusal sometimes echoes the one it refused.
+                let line = crate::secrets::scrub(&line);
                 if let Some(delta) = provider.text_delta(&line) {
                     if accum.len() < 64_000 {
                         accum.push_str(&delta);
                     }
                     if let Some(draft) = draft_reply(&accum) {
-                        let shown: String = draft.chars().take(12_000).collect();
+                        // Again on the whole draft: a key can arrive split
+                        // across two deltas, whole in neither line.
+                        let shown: String =
+                            crate::secrets::scrub(&draft).chars().take(12_000).collect();
                         state2.set_activity(
                             &key2,
                             serde_json::json!({ "kind": "draft", "text": shown }),
@@ -362,6 +370,7 @@ pub(crate) async fn drain_narrating(
         if let Some(stderr) = stderr {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                let line = crate::secrets::scrub(&line);
                 if let Ok(mut buf) = err_shared.lock() {
                     buf.push_str(&line);
                     buf.push('\n');
@@ -657,6 +666,9 @@ async fn handoff_text(ctx: &SessionContext, stop: &crate::i18n::Stop, output: &s
             said.push('\n');
         }
     }
+    // Every line was scrubbed on its way in, but deltas joined here can
+    // reassemble a key that no single line held whole.
+    let said = crate::secrets::scrub(&said);
     crate::i18n::handoff(
         &lang,
         &crate::i18n::Handoff {

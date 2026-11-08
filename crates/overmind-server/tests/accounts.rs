@@ -453,11 +453,13 @@ fn sh(dir: &Path, cmd: &str) {
     assert!(out.status.success(), "cmd failed: {cmd}");
 }
 
-/// Switching takes effect at the next spawn: a run already going finishes on
-/// the account it started with, and its cost is recorded against that one.
-#[tokio::test]
-async fn a_run_in_flight_is_billed_to_the_account_it_started_on() {
-    let root = unique_root("in-flight");
+/// An instance whose agent is the shell script `stub`, with a repository to
+/// work in. Every run here is the stub; nothing spawns the real CLI.
+async fn instance_with_stub(
+    tag: &str,
+    stub: &str,
+) -> (overmind_server::AppState, axum::Router, PathBuf) {
+    let root = unique_root(tag);
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).expect("mkdir");
     sh(&repo, "git init -q -b main");
@@ -465,16 +467,8 @@ async fn a_run_in_flight_is_billed_to_the_account_it_started_on() {
         &repo,
         "echo x > README.md && git add . && git -c user.email=t@t -c user.name=T commit -qm init",
     );
-    let gate = root.join("gate");
     let script = root.join("stub.sh");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.1; done\necho work > out.txt\necho '{{\"model\":\"stub\",\"session_id\":\"s\",\"total_cost_usd\":0.05,\"usage\":{{\"input_tokens\":10,\"output_tokens\":5}}}}'\n",
-            gate.display()
-        ),
-    )
-    .expect("write stub");
+    std::fs::write(&script, stub).expect("write stub");
     let state = overmind_server::init_with(
         "sqlite::memory:",
         overmind_server::Config {
@@ -487,14 +481,12 @@ async fn a_run_in_flight_is_billed_to_the_account_it_started_on() {
     .await
     .expect("init");
     let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
+    (state, app, root)
+}
 
-    let first = accounts::link(&state, "anthropic", Kind::Key, KEY_ONE, None)
-        .await
-        .expect("link");
-    let second = accounts::link(&state, "anthropic", Kind::Key, KEY_ODD, None)
-        .await
-        .expect("link");
-
+/// Found a company with one agent and one task, and start the task.
+async fn start_a_task(app: &axum::Router, root: &Path) -> String {
+    let repo = root.join("repo");
     let (_, co, _) = send(
         &app,
         "POST",
@@ -559,6 +551,31 @@ async fn a_run_in_flight_is_billed_to_the_account_it_started_on() {
     .await;
     assert_eq!(s, StatusCode::ACCEPTED, "{raw}");
 
+    task
+}
+
+/// Switching takes effect at the next spawn: a run already going finishes on
+/// the account it started with, and its cost is recorded against that one.
+#[tokio::test]
+async fn a_run_in_flight_is_billed_to_the_account_it_started_on() {
+    let gate = unique_root("gate");
+    let (state, app, root) = instance_with_stub(
+        "in-flight",
+        &format!(
+            "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.1; done\necho work > out.txt\necho '{{\"model\":\"stub\",\"session_id\":\"s\",\"total_cost_usd\":0.05,\"usage\":{{\"input_tokens\":10,\"output_tokens\":5}}}}'\n",
+            gate.display()
+        ),
+    )
+    .await;
+    let first = accounts::link(&state, "anthropic", Kind::Key, KEY_ONE, None)
+        .await
+        .expect("link");
+    let second = accounts::link(&state, "anthropic", Kind::Key, KEY_ODD, None)
+        .await
+        .expect("link");
+
+    let task = start_a_task(&app, &root).await;
+
     // Wait until the stub is actually running, then switch under it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
@@ -602,4 +619,49 @@ async fn a_run_in_flight_is_billed_to_the_account_it_started_on() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
     assert_eq!(billed, first.id, "billed to the account it started on");
+}
+
+/// An agent can print its own credential -- `env`, a CLI's error that echoes
+/// its key -- and what it prints becomes the run's stored output, its error
+/// and its live narration. Known by value, the key is gone from all of them,
+/// shaped like Anthropic's or not.
+#[tokio::test]
+async fn a_credential_an_agent_prints_never_reaches_the_record() {
+    let (state, app, root) = instance_with_stub(
+        "prints",
+        "#!/bin/sh\necho \"my key is $ANTHROPIC_API_KEY\"\necho \"refused: $ANTHROPIC_API_KEY\" >&2\nexit 1\n",
+    )
+    .await;
+    accounts::link(&state, "anthropic", Kind::Key, KEY_ODD, None)
+        .await
+        .expect("link");
+    let task = start_a_task(&app, &root).await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let (output, error) = loop {
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT output, last_error FROM agent_task_sessions WHERE task_id = ? AND finished_at IS NOT NULL",
+        )
+        .bind(&task)
+        .fetch_optional(&state.pool)
+        .await
+        .expect("poll");
+        if let Some((o, e)) = row {
+            break (o.unwrap_or_default(), e.unwrap_or_default());
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert!(output.contains("my key is"), "the run did speak: {output}");
+    assert!(
+        !output.contains(KEY_ODD),
+        "the stored output kept the key: {output}"
+    );
+    assert!(
+        !error.contains(KEY_ODD),
+        "the stored error kept the key: {error}"
+    );
 }
