@@ -620,6 +620,7 @@ async fn a_meeting_request_planted_as_a_symlink_is_not_followed() {
         link.symlink_metadata().is_err(),
         "the planted link is still in the run dir, where a diff or a resume would meet it"
     );
+    let _ = std::fs::remove_dir_all(&outside);
 }
 
 /// A request with a long reason -- a pasted log, say -- is still a request:
