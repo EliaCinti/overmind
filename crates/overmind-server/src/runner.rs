@@ -538,11 +538,16 @@ async fn read_own_file(
         if !file.metadata().ok()?.is_file() {
             return None;
         }
-        let mut text = String::new();
+        // Bytes, then text: the budget is four bytes a character, and a cut
+        // there can split one, which a strict decode would answer with nothing.
+        let mut bytes = Vec::new();
         file.take((max_chars * 4) as u64)
-            .read_to_string(&mut text)
+            .read_to_end(&mut bytes)
             .ok()?;
-        let text: String = text.chars().take(max_chars).collect();
+        let text: String = String::from_utf8_lossy(&bytes)
+            .chars()
+            .take(max_chars)
+            .collect();
         (!text.trim().is_empty()).then_some(text)
     })
     .await
@@ -3462,6 +3467,28 @@ mod left_in_data_dir_tests {
             ..apart
         };
         assert!(!left_behind(&together, Path::new("/data/worktrees/s1")));
+    }
+}
+
+#[cfg(test)]
+mod read_own_file_tests {
+    use super::*;
+
+    fn run_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("om-{name}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("run dir");
+        dir
+    }
+
+    /// The byte budget is four bytes a character, and a cut there can land in
+    /// the middle of one. That is a shorter text, not no text at all.
+    #[tokio::test]
+    async fn a_cut_inside_a_character_still_reads_the_text_before_it() {
+        let dir = run_dir("utf8");
+        // Eleven bytes of `a`, then `è` (two bytes) across byte twelve.
+        std::fs::write(dir.join("NOTE.md"), "aaaaaaaaaaaèèè").expect("write");
+        let text = read_own_file(&dir, None, "NOTE.md", 3).await;
+        assert_eq!(text.as_deref(), Some("aaa"));
     }
 }
 
