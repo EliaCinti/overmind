@@ -552,6 +552,126 @@ async fn an_agent_at_work_can_ask_for_a_meeting() {
     assert_eq!(report["valid"], json!(true));
 }
 
+/// The run directory of a task's only session, from the API.
+async fn run_dir_of(app: &axum::Router, task_id: &str) -> std::path::PathBuf {
+    let (_, list) = send(app, "GET", &format!("/api/tasks/{task_id}/sessions"), None).await;
+    let id = list["sessions"][0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no session: {list}"))
+        .to_string();
+    let (_, session) = send(app, "GET", &format!("/api/sessions/{id}"), None).await;
+    let path = session["workspace_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no run dir: {session}"));
+    std::path::PathBuf::from(path)
+}
+
+/// The request sits in a directory the agent owns, and the server that reads
+/// it is not in the cage. A link planted there would be followed as the
+/// server -- root, in the image -- and whatever it names parsed as a request.
+/// Here it names a valid request outside the run, so following it shows.
+#[tokio::test]
+async fn a_meeting_request_planted_as_a_symlink_is_not_followed() {
+    let outside = std::env::temp_dir().join(format!("om-outside-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&outside).expect("outside dir");
+    let request = outside.join("request.json");
+    std::fs::write(
+        &request,
+        r#"{"topic":"FROM-OUTSIDE-THE-RUN","reason":"followed a link","participants":["Guard"],"turn_cap":2}"#,
+    )
+    .expect("request");
+    let stub = format!(
+        "#!/bin/sh\necho 'Notes.' > ARTIFACT.md\nln -s '{}' MEETING_REQUEST.json\necho '{{\"total_cost_usd\":0.01,\"model\":\"stub\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}'\n",
+        request.display()
+    );
+    let env = setup(&stub).await;
+    let task_id = run_knowledge_task(
+        &env.app,
+        &env.company_id,
+        &env.specialist_id,
+        "Innocent work",
+    )
+    .await;
+
+    // The request is read after the run is recorded, so give it the time a
+    // real one takes to show up.
+    for _ in 0..40 {
+        let (_, list) = send(
+            &env.app,
+            "GET",
+            &format!("/api/companies/{}/meetings", env.company_id),
+            None,
+        )
+        .await;
+        let topics: Vec<&str> = list["meetings"]
+            .as_array()
+            .map(|m| m.iter().filter_map(|x| x["topic"].as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            !topics.contains(&"FROM-OUTSIDE-THE-RUN"),
+            "the server followed the link: {topics:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let link = run_dir_of(&env.app, &task_id)
+        .await
+        .join("MEETING_REQUEST.json");
+    assert!(
+        link.symlink_metadata().is_err(),
+        "the planted link is still in the run dir, where a diff or a resume would meet it"
+    );
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// A request with a long reason -- a pasted log, say -- is still a request:
+/// the server shortens its fields, it does not drop it. The read is capped so
+/// a planted device cannot read without end, and the cap must sit above any
+/// request worth reading.
+#[tokio::test]
+async fn a_long_meeting_request_still_reaches_you() {
+    let stub = "#!/bin/sh\necho 'Notes.' > ARTIFACT.md\nR=$(head -c 20000 /dev/zero | tr '\\0' x)\nprintf '{\"topic\":\"Long reason\",\"reason\":\"%s\",\"participants\":[\"Guard\"],\"turn_cap\":2}' \"$R\" > MEETING_REQUEST.json\necho '{\"total_cost_usd\":0.01,\"model\":\"stub\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n";
+    let env = setup(stub).await;
+    run_knowledge_task(&env.app, &env.company_id, &env.specialist_id, "Long work").await;
+    let meeting = wait_for_meeting(&env.app, &env.company_id).await;
+    assert_eq!(meeting["topic"], json!("Long reason"));
+}
+
+/// A fifo planted as the request: opening it to read waits for a writer that
+/// never comes, so finalize never got past it -- the run's memory was never
+/// stored, and the request never removed.
+#[tokio::test]
+async fn a_meeting_request_planted_as_a_fifo_does_not_hold_the_run() {
+    let stub = "#!/bin/sh\necho 'Notes.' > ARTIFACT.md\nmkfifo MEETING_REQUEST.json\necho '{\"total_cost_usd\":0.01,\"model\":\"stub\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n";
+    let env = setup(stub).await;
+    let task_id = run_knowledge_task(
+        &env.app,
+        &env.company_id,
+        &env.specialist_id,
+        "Innocent work",
+    )
+    .await;
+    let fifo = run_dir_of(&env.app, &task_id)
+        .await
+        .join("MEETING_REQUEST.json");
+    for _ in 0..60 {
+        if fifo.symlink_metadata().is_err() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Before failing, be the writer it is waiting for: a reader still blocked
+    // in a blocking thread would otherwise hold the runtime's shutdown, and a
+    // regression would hang the suite instead of failing this test.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo);
+    }
+    panic!("finalize is still waiting on the fifo it was handed");
+}
+
 #[tokio::test]
 async fn the_decision_follows_a_participant_into_its_next_task() {
     let env = setup(WORKING_AGENT_STUB).await;

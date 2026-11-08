@@ -48,6 +48,10 @@ const MAX_INLINE_BYTES: u64 = 256 * 1024;
 const HANDOFF_FILE: &str = "HANDOFF.md";
 /// How much of a run's own handoff, and of its last words, a handoff keeps.
 const MAX_HANDOFF_CHARS: usize = 16_000;
+/// How much of a meeting request is read. Far above any request -- the server
+/// shortens a long reason itself (`clamp_agent_text`) -- and still a ceiling,
+/// so a device planted under the name cannot be read without end.
+const MAX_MEETING_REQUEST_CHARS: usize = 256_000;
 const HANDOFF_TAIL_CHARS: usize = 2_000;
 
 /// Files attached to this task, as `(filename, mime, size, absolute path)`.
@@ -470,15 +474,34 @@ async fn previous_handoff(state: &AppState, task_id: &str, session_id: &str) -> 
     }
 }
 
-/// The run's own handoff, read without following a link anywhere on the way.
+/// The run's own handoff: `deliverables/HANDOFF.md` for a code run, the run
+/// dir's own for a knowledge run. See [`read_own_file`].
+async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Option<String> {
+    let dir = match kind {
+        ExecutionKind::Code => Some(DELIVERABLES_DIR),
+        ExecutionKind::Knowledge => None,
+    };
+    read_own_file(worktree, dir, HANDOFF_FILE, MAX_HANDOFF_CHARS).await
+}
+
+/// A file the run left for the server, read without following a link anywhere
+/// on the way.
 ///
 /// The file sits in a directory the agent owns, and the server reading it is
-/// not in the cage: a `HANDOFF.md` -- or a `deliverables/` -- planted as a link
-/// would otherwise carry `~/.ssh` or Overmind's own database into the drawer
-/// and the next prompt. So each step is opened `O_NOFOLLOW` from the one before
-/// (`openat`), leaving no gap between checking a name and opening it, and only
-/// a plain file is read -- the shape `backup.rs` uses for the same reason.
-async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Option<String> {
+/// not in the cage: a `HANDOFF.md`, a `MEETING_REQUEST.json` -- or a
+/// `deliverables/` -- planted as a link would otherwise carry `~/.ssh` or
+/// Overmind's own database into the drawer, the next prompt or a meeting. So
+/// each step is opened `O_NOFOLLOW` from the one before (`openat`), leaving no
+/// gap between checking a name and opening it; `O_NONBLOCK`, because a fifo
+/// would otherwise wait for a writer that never comes; only a plain file with
+/// one name is read, and only so much of it -- the shape `backup.rs` uses for the same
+/// reason.
+async fn read_own_file(
+    worktree: &std::path::Path,
+    dir: Option<&'static str>,
+    name: &'static str,
+    max_chars: usize,
+) -> Option<String> {
     let worktree = worktree.to_path_buf();
     tokio::task::spawn_blocking(move || {
         use std::ffi::CString;
@@ -499,33 +522,67 @@ async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Op
             .open(&worktree)
             .ok()?
             .into();
-        let dir = match kind {
-            ExecutionKind::Code => open_at(
+        let dir = match dir {
+            Some(sub) => open_at(
                 &root,
-                DELIVERABLES_DIR,
+                sub,
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
             )?,
-            ExecutionKind::Knowledge => root,
+            None => root,
         };
         let fd = open_at(
             &dir,
-            HANDOFF_FILE,
+            name,
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )?;
         let file = std::fs::File::from(fd);
-        if !file.metadata().ok()?.is_file() {
+        let meta = file.metadata().ok()?;
+        // A plain file with one name: `O_NOFOLLOW` stops a symbolic link, and
+        // a hard link to a file outside the run would be that file.
+        if !meta.is_file() || std::os::unix::fs::MetadataExt::nlink(&meta) != 1 {
             return None;
         }
-        let mut text = String::new();
-        file.take((MAX_HANDOFF_CHARS * 4) as u64)
-            .read_to_string(&mut text)
+        // Bytes, then text: the budget is four bytes a character, and a cut
+        // there can split one, which a strict decode would answer with nothing.
+        let mut bytes = Vec::new();
+        file.take((max_chars * 4) as u64)
+            .read_to_end(&mut bytes)
             .ok()?;
-        let text: String = text.chars().take(MAX_HANDOFF_CHARS).collect();
+        let text: String = String::from_utf8_lossy(&bytes)
+            .chars()
+            .take(max_chars)
+            .collect();
         (!text.trim().is_empty()).then_some(text)
     })
     .await
     .ok()
     .flatten()
+}
+
+/// Take away a name the run left in its own directory, as [`read_own_file`]
+/// reads one: through the directory opened without following a link, so a run
+/// dir swapped for a link loses nothing anywhere else.
+async fn remove_own_file(worktree: &std::path::Path, name: &'static str) {
+    let worktree = worktree.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Ok(root) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&worktree)
+        else {
+            return;
+        };
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return;
+        };
+        // SAFETY: `root` is an open directory and `name` a valid C string.
+        // `unlinkat` without AT_REMOVEDIR takes a link away, never what it
+        // names, and refuses a directory.
+        unsafe { libc::unlinkat(root.as_raw_fd(), name.as_ptr(), 0) };
+    })
+    .await;
 }
 
 /// The last `n` characters of `s`, on a character boundary.
@@ -2826,32 +2883,45 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // Best-effort: a malformed request never fails an otherwise done session.
     // A run that no longer held its task asks for nothing: the call it hit is
     // about work the person took back.
-    let request_path = ctx.worktree_dir.join(MEETING_REQUEST_FILE);
-    if let Ok(text) = tokio::fs::read_to_string(&request_path).await {
-        // Remove it first, so it never lands in the diff or a resumed run.
-        let _ = tokio::fs::remove_file(&request_path).await;
-        if applied {
-            match serde_json::from_str::<Value>(&text)
-                .ok()
-                .as_ref()
-                .and_then(crate::meeting::Request::from_json)
-            {
-                Some(req) => {
-                    if let Err(e) =
-                        crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req)
-                            .await
-                    {
-                        eprintln!(
-                            "meeting requested by session {} refused: {e}",
-                            ctx.session_id
-                        );
-                    }
+    //
+    // Read as the handoff is (`read_own_file`): the run dir is the agent's, and
+    // a link, a fifo or a device planted under this name is the agent's too.
+    let request = read_own_file(
+        &ctx.worktree_dir,
+        None,
+        MEETING_REQUEST_FILE,
+        MAX_MEETING_REQUEST_CHARS,
+    )
+    .await;
+    // Removed whatever it was, so it never lands in the diff or a resumed run.
+    remove_own_file(&ctx.worktree_dir, MEETING_REQUEST_FILE).await;
+    if let Some(text) = request
+        && applied
+    {
+        match serde_json::from_str::<Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(crate::meeting::Request::from_json)
+        {
+            Some(req) => {
+                if let Err(e) =
+                    crate::meeting::request(&ctx.state, &ctx.company_id, &ctx.agent_id, &req).await
+                {
+                    eprintln!(
+                        "meeting requested by session {} refused: {e}",
+                        ctx.session_id
+                    );
                 }
-                None => eprintln!(
-                    "session {} left an unreadable {MEETING_REQUEST_FILE}",
-                    ctx.session_id
-                ),
             }
+            None if text.chars().count() >= MAX_MEETING_REQUEST_CHARS => eprintln!(
+                "session {} left a {MEETING_REQUEST_FILE} too long to be one \
+                 (read up to {MAX_MEETING_REQUEST_CHARS} characters)",
+                ctx.session_id
+            ),
+            None => eprintln!(
+                "session {} left an unreadable {MEETING_REQUEST_FILE}",
+                ctx.session_id
+            ),
         }
     }
 
@@ -3431,6 +3501,58 @@ mod left_in_data_dir_tests {
             ..apart
         };
         assert!(!left_behind(&together, Path::new("/data/worktrees/s1")));
+    }
+}
+
+#[cfg(test)]
+mod read_own_file_tests {
+    use super::*;
+
+    fn run_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("om-{name}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).expect("run dir");
+        dir
+    }
+
+    /// A run dir that is a link names someone else's directory, and a name
+    /// removed through it would be removed there.
+    #[tokio::test]
+    async fn a_run_dir_swapped_for_a_link_loses_nothing_elsewhere() {
+        let dir = run_dir("swapped");
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::fs::write(elsewhere.join("MEETING_REQUEST.json"), "{}").expect("write");
+        let link = dir.join("run");
+        std::os::unix::fs::symlink(&elsewhere, &link).expect("link");
+
+        remove_own_file(&link, "MEETING_REQUEST.json").await;
+        assert!(elsewhere.join("MEETING_REQUEST.json").exists());
+    }
+
+    /// `O_NOFOLLOW` stops a symbolic link, not a hard one: a second name for
+    /// a file outside the run, made where the agent can write, is the same
+    /// file. One the agent wrote has one name.
+    #[tokio::test]
+    async fn a_hard_link_to_a_file_outside_the_run_is_not_read() {
+        let dir = run_dir("hard");
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, "PRIVATE").expect("outside");
+        let run = dir.join("run");
+        std::fs::create_dir_all(&run).expect("run");
+        std::fs::hard_link(&outside, run.join("HANDOFF.md")).expect("hard link");
+
+        assert_eq!(read_own_file(&run, None, "HANDOFF.md", 100).await, None);
+    }
+
+    /// The byte budget is four bytes a character, and a cut there can land in
+    /// the middle of one. That is a shorter text, not no text at all.
+    #[tokio::test]
+    async fn a_cut_inside_a_character_still_reads_the_text_before_it() {
+        let dir = run_dir("utf8");
+        // Eleven bytes of `a`, then `è` (two bytes) across byte twelve.
+        std::fs::write(dir.join("NOTE.md"), "aaaaaaaaaaaèèè").expect("write");
+        let text = read_own_file(&dir, None, "NOTE.md", 3).await;
+        assert_eq!(text.as_deref(), Some("aaa"));
     }
 }
 
