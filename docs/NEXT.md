@@ -16,31 +16,36 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 
 ## The order, and why
 
-> **3 Sep 2026 — where the work stands, in the order it should be finished.**
-> Written after the owner said development had slowed and asked for a plan to
-> follow. Three horizons, and the rule that governs them: *finish what is half
-> done before opening anything new.*
+> **28 Oct 2026 — where the work stands, in the order it should be finished.**
+> Replaces the block of 3 Sep, whose *Now* shipped as 0.2.4 and 0.2.5. Four
+> milestones are open at once (M25, M32, M34, M36a) against the roadmap's own
+> rule, so the rule governs again: *finish what is half done before opening
+> anything new.* Order agreed with the owner on 28 Oct.
 >
-> **Now.** PR #91 (M33, and M32's script) → tag **0.2.4**, which is the release
-> that publishes the new compose file *and* the stamped installers → the nginx
-> redirect for `/install.sh` on the VPS, **ahead of the SPA's catch-all**, or
-> `curl` pipes the landing page into a shell → then, and only then, move the
-> docs to the release asset URL, which until that tag still serves 0.2.3's
-> compose and its named volumes.
+> **Now — close what is half done.** M36a to the end: slice 2 with the brake
+> on the agent ([ADR-0050](adr/0050-a-loop-that-converges-and-a-stop-that-is-not-a-crash.md),
+> addendum of 28 Oct), slice 3 (`budget.low`), slice 4 (the handoff). Its week
+> live on *TravelAgency* needs no code, and during it: **M25** closes on the
+> owner's word; **M32** closes on its Accept, which slices A and B meet — slice
+> C, the free graphical road, moves back here, still to be decided on evidence
+> about who installs. The cancelled task a run brings back is fixed; that the
+> run itself goes on spending stays a debt (*Debts from the attempts cap*, below).
 >
-> **Then**, the debt already measured and written down: *Updating, and the way
-> back* (below); the `ClaimedOwner` extractor (below, now defence in depth
-> rather than a hole, since M32 slice A closed the wall); and M32's slice C,
-> the free graphical road, to be **decided on evidence about who actually
-> installs it** rather than on taste.
+> **Then — M34, through the accounts.** [ADR-0051](adr/0051-an-account-is-connected-not-configured.md)
+> and [the plan of 28 Oct](plans/2026-10-28-more-than-one-mind.md) turn slice 4
+> into a store of accounts and a panel to connect them; then slice 5 (the
+> catalogue), Codex, Google.
 >
-> **After that**, the queue below in its existing order: from diff to landed,
-> the browser walk in CI, the chain seen, Overmind in your pocket, the door on
-> the open internet.
+> **Then — M35, then M36b**, in the order ADR-0050 fixed: the check before the
+> triggers.
 >
-> **And the owner's own:** raise the cap that is holding *TravelAgency* — one
-> agent at €50.38 against €50.00, six refused starts in two hours — and say the
-> word on M25, open since 29 August.
+> **After that**, the two debts that protect the owner's data first — *Updating,
+> and the way back* and *A way back in for the owner who forgot the password*,
+> both small and both already bitten — then the queue below in its existing
+> order: from diff to landed, the browser walk in CI, the chain seen, Overmind
+> in your pocket, the door on the open internet. The `ClaimedOwner` extractor
+> and the order of `pay_with` travel with whichever of these next touches the
+> door or the cage.
 
 
 > **23 Aug:** *Tools in the agent's hand* jumped the queue as **M28** — a real need named it (a Blender company for the owner's house, ADR-0036), which is exactly the rule at the bottom of this file. The milestones below keep their names; their numbers shift by one when they open.
