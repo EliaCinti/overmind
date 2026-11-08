@@ -658,6 +658,16 @@ async fn a_meeting_request_planted_as_a_fifo_does_not_hold_the_run() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // Before failing, be the writer it is waiting for: a reader still blocked
+    // in a blocking thread would otherwise hold the runtime's shutdown, and a
+    // regression would hang the suite instead of failing this test.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo);
+    }
     panic!("finalize is still waiting on the fifo it was handed");
 }
 
