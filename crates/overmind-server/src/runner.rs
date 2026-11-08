@@ -48,9 +48,10 @@ const MAX_INLINE_BYTES: u64 = 256 * 1024;
 const HANDOFF_FILE: &str = "HANDOFF.md";
 /// How much of a run's own handoff, and of its last words, a handoff keeps.
 const MAX_HANDOFF_CHARS: usize = 16_000;
-/// A meeting request is a topic, a reason and a few names; anything longer is
-/// not one.
-const MAX_MEETING_REQUEST_CHARS: usize = 16_000;
+/// How much of a meeting request is read. Far above any request -- the server
+/// shortens a long reason itself (`clamp_agent_text`) -- and still a ceiling,
+/// so a device planted under the name cannot be read without end.
+const MAX_MEETING_REQUEST_CHARS: usize = 256_000;
 const HANDOFF_TAIL_CHARS: usize = 2_000;
 
 /// Files attached to this task, as `(filename, mime, size, absolute path)`.
@@ -2909,6 +2910,11 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
                     );
                 }
             }
+            None if text.chars().count() >= MAX_MEETING_REQUEST_CHARS => eprintln!(
+                "session {} left a {MEETING_REQUEST_FILE} too long to be one \
+                 (read up to {MAX_MEETING_REQUEST_CHARS} characters)",
+                ctx.session_id
+            ),
             None => eprintln!(
                 "session {} left an unreadable {MEETING_REQUEST_FILE}",
                 ctx.session_id

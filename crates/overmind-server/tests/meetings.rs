@@ -622,6 +622,19 @@ async fn a_meeting_request_planted_as_a_symlink_is_not_followed() {
     );
 }
 
+/// A request with a long reason -- a pasted log, say -- is still a request:
+/// the server shortens its fields, it does not drop it. The read is capped so
+/// a planted device cannot read without end, and the cap must sit above any
+/// request worth reading.
+#[tokio::test]
+async fn a_long_meeting_request_still_reaches_you() {
+    let stub = "#!/bin/sh\necho 'Notes.' > ARTIFACT.md\nR=$(head -c 20000 /dev/zero | tr '\\0' x)\nprintf '{\"topic\":\"Long reason\",\"reason\":\"%s\",\"participants\":[\"Guard\"],\"turn_cap\":2}' \"$R\" > MEETING_REQUEST.json\necho '{\"total_cost_usd\":0.01,\"model\":\"stub\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n";
+    let env = setup(stub).await;
+    run_knowledge_task(&env.app, &env.company_id, &env.specialist_id, "Long work").await;
+    let meeting = wait_for_meeting(&env.app, &env.company_id).await;
+    assert_eq!(meeting["topic"], json!("Long reason"));
+}
+
 /// A fifo planted as the request: opening it to read waits for a writer that
 /// never comes, so finalize never got past it -- the run's memory was never
 /// stored, and the request never removed.
