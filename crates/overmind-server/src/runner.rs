@@ -555,6 +555,32 @@ async fn read_own_file(
     .flatten()
 }
 
+/// Take away a name the run left in its own directory, as [`read_own_file`]
+/// reads one: through the directory opened without following a link, so a run
+/// dir swapped for a link loses nothing anywhere else.
+async fn remove_own_file(worktree: &std::path::Path, name: &'static str) {
+    let worktree = worktree.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Ok(root) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(&worktree)
+        else {
+            return;
+        };
+        let Ok(name) = std::ffi::CString::new(name) else {
+            return;
+        };
+        // SAFETY: `root` is an open directory and `name` a valid C string.
+        // `unlinkat` without AT_REMOVEDIR takes a link away, never what it
+        // names, and refuses a directory.
+        unsafe { libc::unlinkat(root.as_raw_fd(), name.as_ptr(), 0) };
+    })
+    .await;
+}
+
 /// The last `n` characters of `s`, on a character boundary.
 fn tail_chars(s: &str, n: usize) -> &str {
     match s.char_indices().rev().nth(n.saturating_sub(1)) {
@@ -2864,8 +2890,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     )
     .await;
     // Removed whatever it was, so it never lands in the diff or a resumed run.
-    // `remove_file` takes a link away, never what it names.
-    let _ = tokio::fs::remove_file(ctx.worktree_dir.join(MEETING_REQUEST_FILE)).await;
+    remove_own_file(&ctx.worktree_dir, MEETING_REQUEST_FILE).await;
     if let Some(text) = request
         && applied
     {
@@ -3478,6 +3503,21 @@ mod read_own_file_tests {
         let dir = std::env::temp_dir().join(format!("om-{name}-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).expect("run dir");
         dir
+    }
+
+    /// A run dir that is a link names someone else's directory, and a name
+    /// removed through it would be removed there.
+    #[tokio::test]
+    async fn a_run_dir_swapped_for_a_link_loses_nothing_elsewhere() {
+        let dir = run_dir("swapped");
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::fs::write(elsewhere.join("MEETING_REQUEST.json"), "{}").expect("write");
+        let link = dir.join("run");
+        std::os::unix::fs::symlink(&elsewhere, &link).expect("link");
+
+        remove_own_file(&link, "MEETING_REQUEST.json").await;
+        assert!(elsewhere.join("MEETING_REQUEST.json").exists());
     }
 
     /// The byte budget is four bytes a character, and a cut there can land in
