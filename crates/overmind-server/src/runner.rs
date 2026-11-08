@@ -493,8 +493,8 @@ async fn read_own_handoff(worktree: &std::path::Path, kind: ExecutionKind) -> Op
 /// Overmind's own database into the drawer, the next prompt or a meeting. So
 /// each step is opened `O_NOFOLLOW` from the one before (`openat`), leaving no
 /// gap between checking a name and opening it; `O_NONBLOCK`, because a fifo
-/// would otherwise wait for a writer that never comes; only a plain file is
-/// read, and only so much of it -- the shape `backup.rs` uses for the same
+/// would otherwise wait for a writer that never comes; only a plain file with
+/// one name is read, and only so much of it -- the shape `backup.rs` uses for the same
 /// reason.
 async fn read_own_file(
     worktree: &std::path::Path,
@@ -536,7 +536,10 @@ async fn read_own_file(
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
         )?;
         let file = std::fs::File::from(fd);
-        if !file.metadata().ok()?.is_file() {
+        let meta = file.metadata().ok()?;
+        // A plain file with one name: `O_NOFOLLOW` stops a symbolic link, and
+        // a hard link to a file outside the run would be that file.
+        if !meta.is_file() || std::os::unix::fs::MetadataExt::nlink(&meta) != 1 {
             return None;
         }
         // Bytes, then text: the budget is four bytes a character, and a cut
@@ -3524,6 +3527,21 @@ mod read_own_file_tests {
 
         remove_own_file(&link, "MEETING_REQUEST.json").await;
         assert!(elsewhere.join("MEETING_REQUEST.json").exists());
+    }
+
+    /// `O_NOFOLLOW` stops a symbolic link, not a hard one: a second name for
+    /// a file outside the run, made where the agent can write, is the same
+    /// file. One the agent wrote has one name.
+    #[tokio::test]
+    async fn a_hard_link_to_a_file_outside_the_run_is_not_read() {
+        let dir = run_dir("hard");
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, "PRIVATE").expect("outside");
+        let run = dir.join("run");
+        std::fs::create_dir_all(&run).expect("run");
+        std::fs::hard_link(&outside, run.join("HANDOFF.md")).expect("hard link");
+
+        assert_eq!(read_own_file(&run, None, "HANDOFF.md", 100).await, None);
     }
 
     /// The byte budget is four bytes a character, and a cut there can land in
