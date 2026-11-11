@@ -1218,8 +1218,7 @@ fn restore_secrets(staging: &Path, opened: &str) -> Result<(), RestoreError> {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     };
     for (key, secret) in bundle {
-        let Some((provider, id)) = key.split_once('/').filter(|(p, i)| plain(p) && plain(i))
-        else {
+        let Some((provider, id)) = key.split_once('/').filter(|(p, i)| plain(p) && plain(i)) else {
             return Err(RestoreError::Refused(format!(
                 "the archive's sealed accounts name one as \"{key}\", which is not an account"
             )));

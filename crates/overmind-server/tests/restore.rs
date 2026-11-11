@@ -562,10 +562,18 @@ async fn assert_the_account_came_back(restored: &overmind_server::AppState) {
         .expect("accounts");
     assert_eq!(all.len(), 1, "{all:?}");
     assert!(all[0].active, "the payer came back as the payer");
-    let secret = overmind_server::accounts::credential_dir(&restored.config, "anthropic", &all[0].id)
-        .join("secret");
-    assert_eq!(std::fs::read_to_string(&secret).expect("secret").trim(), TOKEN);
-    let mode = std::fs::metadata(&secret).expect("stat").permissions().mode() & 0o777;
+    let secret =
+        overmind_server::accounts::credential_dir(&restored.config, "anthropic", &all[0].id)
+            .join("secret");
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("secret").trim(),
+        TOKEN
+    );
+    let mode = std::fs::metadata(&secret)
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(mode, 0o600);
 }
 
@@ -641,7 +649,10 @@ async fn as_format_one(archive: &[u8]) -> Vec<u8> {
     all[db_at].1 = std::fs::read(&scratch).expect("read scratch");
 
     // The token sealed alone, the way format 1 sealed it.
-    let created_at = manifest["created_at"].as_str().expect("created_at").to_string();
+    let created_at = manifest["created_at"]
+        .as_str()
+        .expect("created_at")
+        .to_string();
     let aad = format!("overmind-backup/1/instance/{created_at}");
     let salt = [7u8; 16];
     let nonce = [9u8; 24];

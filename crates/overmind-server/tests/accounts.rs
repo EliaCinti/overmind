@@ -487,16 +487,10 @@ async fn instance_with_stub(
 /// Found a company with one agent and one task, and start the task.
 async fn start_a_task(app: &axum::Router, root: &Path) -> String {
     let repo = root.join("repo");
-    let (_, co, _) = send(
-        &app,
-        "POST",
-        "/api/companies",
-        Some(json!({ "name": "Co" })),
-    )
-    .await;
+    let (_, co, _) = send(app, "POST", "/api/companies", Some(json!({ "name": "Co" }))).await;
     let company = co["id"].as_str().expect("id").to_string();
     let (_, pr, _) = send(
-        &app,
+        app,
         "POST",
         &format!("/api/companies/{company}/projects"),
         Some(json!({ "title": "P" })),
@@ -504,14 +498,14 @@ async fn start_a_task(app: &axum::Router, root: &Path) -> String {
     .await;
     let project = pr["id"].as_str().expect("id").to_string();
     send(
-        &app,
+        app,
         "POST",
         &format!("/api/projects/{project}/workspaces"),
         Some(json!({ "name": "main", "cwd": repo.to_string_lossy() })),
     )
     .await;
     let (_, goal, _) = send(
-        &app,
+        app,
         "POST",
         &format!("/api/projects/{project}/goals"),
         Some(json!({ "title": "G" })),
@@ -519,7 +513,7 @@ async fn start_a_task(app: &axum::Router, root: &Path) -> String {
     .await;
     let goal = goal["id"].as_str().expect("id").to_string();
     let (s, agent, raw) = send(
-        &app,
+        app,
         "POST",
         &format!("/api/companies/{company}/agents"),
         Some(json!({ "name": "A", "archetype": "builder", "traits": { "monthly_budget_cents": 1000 } })),
@@ -528,7 +522,7 @@ async fn start_a_task(app: &axum::Router, root: &Path) -> String {
     assert_eq!(s, StatusCode::CREATED, "{raw}");
     let agent = agent["id"].as_str().expect("id").to_string();
     let (_, task, _) = send(
-        &app,
+        app,
         "POST",
         &format!("/api/companies/{company}/tasks"),
         Some(json!({ "title": "T", "goal_id": goal })),
@@ -536,14 +530,14 @@ async fn start_a_task(app: &axum::Router, root: &Path) -> String {
     .await;
     let task = task["id"].as_str().expect("id").to_string();
     send(
-        &app,
+        app,
         "POST",
         &format!("/api/tasks/{task}/transition"),
         Some(json!({ "to": "todo" })),
     )
     .await;
     let (s, _, raw) = send(
-        &app,
+        app,
         "POST",
         &format!("/api/tasks/{task}/start"),
         Some(json!({ "agent_id": agent })),

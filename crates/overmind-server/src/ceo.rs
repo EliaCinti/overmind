@@ -1523,6 +1523,7 @@ pub(crate) async fn run_adapter(
 }
 
 /// The spawn itself, with no opinion about budgets.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_adapter(
     state: &AppState,
     activity_key: &str,

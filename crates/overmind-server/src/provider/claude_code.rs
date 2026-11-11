@@ -91,7 +91,7 @@ impl Provider for ClaudeCode {
             crate::accounts::Kind::Subscription => SignIn::PasteBack(PasteBack {
                 program: "claude",
                 args: &["setup-token"],
-                is_auth_url: is_auth_url,
+                is_auth_url,
                 find_credential: find_token,
                 exchange_verdict,
                 clock_reference: "https://api.anthropic.com/",
