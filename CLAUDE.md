@@ -20,7 +20,7 @@ next and why. `CONTRIBUTING.md` is the rulebook; this file is the short form.
   `agent_cmd: Some("/usr/bin/true")`, the runner suites with a stub script.
 - **Security is held by tests.** Every claim in `docs/THREAT-MODEL.md` names the
   test that holds it; a change to the door (`auth.rs`), the cage (`sandbox.rs`,
-  `landlock.rs`), credentials (`claude_auth.rs`, `scrub_secrets`), the audit
+  `landlock.rs`), credentials (`accounts.rs`, `secrets.rs`, `sign_in.rs`), the audit
   chain (`audit.rs`) or anything that moves data out of `/data` updates both the
   test and the threat model.
 - **UX is a pillar** (`docs/UX.md`): progressive disclosure, click first / type
@@ -65,7 +65,7 @@ invent other checks; do not skip these.
    tracked override this way; the review found both.
 3. `/security-review` when the diff touches the door (`auth.rs`,
    `governance.rs`), the cage (`sandbox.rs`, `landlock.rs`), credentials
-   (`claude_auth.rs`, `scrub_secrets`), the audit chain, the compose or the
+   (`accounts.rs`, `secrets.rs`, `sign_in.rs`), the audit chain, the compose or the
    image, or anything that moves data in or out of `/data` (backup, export,
    attachments).
 4. The PR body says the reviews ran and what came of them.
@@ -91,8 +91,8 @@ invent other checks; do not skip these.
 ## What not to do
 
 - No `unwrap()`/`expect()` outside tests; no panics on user input.
-- No credential in a log line, an error message or a UI tail — everything the
-  sign-in flow emits passes `scrub_secrets`.
+- No credential in a log line, an error message or a UI tail — everything an
+  adapter or sign-in flow emits passes `secrets::scrub`.
 - No `0.0.0.0` binding, no widening of the cage, no new path out of `/data`
   without an ADR and a threat-model line.
 - No new check, tool or dependency "for convenience" without saying so in the

@@ -4,6 +4,14 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+### Added
+
+- **An account is a first-class thing Overmind holds, with one active payer per provider** ([ADR-0051](docs/adr/0051-an-account-is-connected-not-configured.md), M34 step 3). Instead of reading a single subscription token file and an environment variable beside the database, Overmind now manages an account store (`accounts` table, migration 0036). An account is `(provider, kind, source, label, active)`, with credentials stored in `0600` files under `credentials/<provider>/<id>/` (`0700` directories). Exactly one active account per provider is enforced by a partial unique database index. The server environment is imported at boot as read-only accounts; an agent spawn strips all provider credential variables and sets only the active account's. The owner manages accounts via `/api/accounts` (list, connect key, activate, disconnect) and the provider-driven sign-in flow (`/api/accounts/sign-in`), with audit events on every change. Cost events record the `account_id` resolved at spawn. Archive format 2 bundles all stored credentials into `secrets/accounts.enc` sealed with a passphrase; format 1 remains importable.
+
+### Security
+
+- **Credentials printed by an agent or adapter are redacted by value across all output streams** ([ADR-0051](docs/adr/0051-an-account-is-connected-not-configured.md) decision 6). A CLI error or an agent running `env` could echo a secret into live narration or the audit record. Secrets are now registered by value in `secrets::register` upon link or boot, and scrubbed via `secrets::scrub` across all stdout/stderr streams in `drain_narrating` (for both task runs and CEO turns), as well as on handoff text and drafts where token splitting across deltas could otherwise leak credentials.
+
 ### Fixed
 
 - **A meeting request planted as a link was followed by the server, and one planted as a fifo held the end of the run forever.** `finalize` read `MEETING_REQUEST.json` with a plain read, in a directory the agent owns, as the server — root, in the image. A link under that name was followed, and a valid request it named became a meeting the agent never asked for in its own run; a fifo waited for a writer that never came, so the run's memory was never stored; a link to a device would have read without end. Both reproduced by tests first. The request is now read the way the handoff is — `O_NOFOLLOW` at every step, `O_NONBLOCK`, a plain file with one name, capped well above any real request — and removed through the run dir, never through a link to it. Reviewing the shared reader also fixed it for the handoff: a long handoff cut inside a multi-byte character used to read as no handoff at all, and a hard link to a file outside the run was read like any other.
