@@ -203,7 +203,6 @@ async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() 
         b"# the plan\n",
     )
     .expect("artifact");
-    std::fs::write(dir.join("pay-with-plan"), b"plan\n").expect("marker");
 
     let (s, report) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::OK, "{report}");
@@ -222,7 +221,7 @@ async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() 
     let entries = entries(&on_disk);
     assert_eq!(entries[0].0, "MANIFEST.json", "the manifest comes first");
     let manifest: Value = serde_json::from_slice(&entries[0].1).expect("manifest json");
-    assert_eq!(manifest["format"], 1);
+    assert_eq!(manifest["format"], json!(overmind_server::backup::FORMAT));
     assert_eq!(manifest["scope"], "instance");
     assert_eq!(manifest["overmind_version"], env!("CARGO_PKG_VERSION"));
 
@@ -235,7 +234,6 @@ async fn an_export_is_a_consistent_snapshot_that_carries_its_own_chain_report() 
         assert_eq!(claimed, sha256_hex(bytes), "hash of {path}");
     }
     assert!(hashes.contains_key("artifacts/s1/ARTIFACT.md"));
-    assert!(hashes.contains_key("pay-with-plan"));
     assert!(hashes.contains_key("overmind.sqlite"));
     assert!(
         !hashes
@@ -362,11 +360,24 @@ async fn the_backup_folder_is_the_servers_alone() {
 
 const TOKEN: &str = "sk-ant-oat01-THIS-IS-THE-SUBSCRIPTION-TOKEN-0123456789abcdefghijklmnopqrstuv";
 
+/// A connected subscription: the credential the archive's seal exists for.
+async fn connect(state: &overmind_server::AppState) -> overmind_server::accounts::Account {
+    overmind_server::accounts::link(
+        state,
+        "anthropic",
+        overmind_server::accounts::Kind::Subscription,
+        TOKEN,
+        None,
+    )
+    .await
+    .expect("connect an account")
+}
+
 #[tokio::test]
 async fn a_token_on_the_box_needs_a_passphrase_to_travel() {
-    let (app, _state, dir) = setup().await;
+    let (app, state, dir) = setup().await;
     let cookie = claim(&app, &dir).await;
-    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    connect(&state).await;
     let (s, v) = export(&app, &cookie, json!({})).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
     assert!(
@@ -383,7 +394,7 @@ async fn no_credential_is_readable_in_the_archive_bytes() {
     let (app, state, dir) = setup().await;
     let cookie = claim(&app, &dir).await;
     let company = found(&app, &cookie, "Acme").await;
-    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    connect(&state).await;
 
     // An editor's integration token, and a run in flight holding its bearer.
     let integration = "integration-token-that-must-not-travel-9f8e7d6c";
@@ -494,15 +505,22 @@ async fn no_credential_is_readable_in_the_archive_bytes() {
             .expect("live session row");
     assert_eq!(live_bearer.as_deref(), Some(bearer));
 
-    // The sealed token opens with the passphrase, and with nothing else.
+    // The sealed accounts open with the passphrase, and with nothing else.
     let manifest: Value = serde_json::from_slice(&entries[0].1).expect("manifest");
+    assert_eq!(manifest["format"], json!(2));
     let (_, sealed) = entries
         .iter()
-        .find(|(p, _)| p == "secrets/claude-oauth-token.enc")
-        .expect("sealed token entry");
+        .find(|(p, _)| p == "secrets/accounts.enc")
+        .expect("sealed accounts entry");
     let opened = overmind_server::backup::unseal(&manifest, sealed, "correct horse battery")
         .expect("the passphrase opens it");
-    assert_eq!(opened, TOKEN);
+    let bundle: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&opened).expect("a bundle of accounts");
+    assert_eq!(bundle.values().collect::<Vec<_>>(), vec![TOKEN]);
+    assert!(
+        bundle.keys().all(|k| k.starts_with("anthropic/")),
+        "{bundle:?}"
+    );
     assert!(overmind_server::backup::unseal(&manifest, sealed, "wrong").is_err());
     let mut tampered = sealed.clone();
     tampered[0] ^= 0x01;
@@ -563,18 +581,19 @@ async fn the_room_an_agent_works_in_stays_out_of_the_archive() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
-    let (app, _state, dir) = setup().await;
+    let (app, state, dir) = setup().await;
     let cookie = claim(&app, &dir).await;
     // The credential the whole seal exists to keep out of an archive.
-    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    let account = connect(&state).await;
+    let secret = overmind_server::accounts::credential_dir(&state.config, "anthropic", &account.id)
+        .join("secret");
     let shelf = dir.join("artifacts").join("s1");
     std::fs::create_dir_all(&shelf).expect("shelf");
     std::fs::write(shelf.join("ARTIFACT.md"), b"# a real deliverable\n").expect("artifact");
-    std::os::unix::fs::symlink(dir.join("claude-oauth-token"), shelf.join("notes.md"))
-        .expect("symlink");
-    // The who-pays marker was the one entry still copied by name.
-    std::os::unix::fs::symlink(dir.join("claude-oauth-token"), dir.join("pay-with-plan"))
-        .expect("marker symlink");
+    std::os::unix::fs::symlink(&secret, shelf.join("notes.md")).expect("symlink");
+    // The who-pays marker was once the one entry copied by name; it is not
+    // copied at all now, and a link planted in its place must stay behind.
+    std::os::unix::fs::symlink(&secret, dir.join("pay-with-plan")).expect("marker symlink");
 
     let (s, report) = export(
         &app,
@@ -613,9 +632,9 @@ async fn a_symlink_planted_in_a_copied_shelf_is_not_followed() {
 
 #[tokio::test]
 async fn a_passphrase_that_leaves_the_machine_has_a_floor() {
-    let (app, _state, dir) = setup().await;
+    let (app, state, dir) = setup().await;
     let cookie = claim(&app, &dir).await;
-    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    connect(&state).await;
     // The door refuses under eight characters for a password that never
     // leaves the box; this one is carried away on a disk, where nothing
     // rate-limits an attempt on it.
@@ -672,13 +691,13 @@ async fn a_backup_folder_that_holds_the_data_dir_is_refused() {
 
 #[tokio::test]
 async fn the_listing_says_whether_a_sign_in_would_travel() {
-    let (app, _state, dir) = setup().await;
+    let (app, state, dir) = setup().await;
     let cookie = claim(&app, &dir).await;
     let (s, before) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(before["sign_in_travels"], false);
 
-    std::fs::write(dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token file");
+    connect(&state).await;
     let (_, after) = send(&app, "GET", "/api/backups", None, Some(&cookie)).await;
     assert_eq!(after["sign_in_travels"], true);
 }

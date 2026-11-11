@@ -619,6 +619,29 @@ async fn the_first_user_owns_and_billing_is_the_owners() {
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "billing is not a member's call");
 
+    // Nor is any other way of changing who pays, or seeing whose accounts
+    // they are (ADR-0051 decision 7). `pay-with` asked nobody before accounts.
+    for (method, uri, body) in [
+        ("GET", "/api/accounts", None),
+        (
+            "POST",
+            "/api/accounts",
+            Some(
+                json!({ "provider": "anthropic", "kind": "key", "key": "sk-ant-api03-member-0123456789" }),
+            ),
+        ),
+        ("POST", "/api/accounts/any/activate", None),
+        ("DELETE", "/api/accounts/any", None),
+        (
+            "POST",
+            "/api/economy/pay-with",
+            Some(json!({ "with": "plan" })),
+        ),
+    ] {
+        let (s, _, _) = send_raw(&app, method, uri, body, Some(&member_cookie)).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{method} {uri} is the owner's");
+    }
+
     // The owner passes the role gate -- and meets the next honest refusal:
     // this suite runs with a custom agent command, and a custom adapter is
     // not the Claude CLI, so there is no subscription to sign into. Measured

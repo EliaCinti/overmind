@@ -245,10 +245,14 @@ pub async fn reserve_turn(
 ///
 /// Best-effort: an adapter that prints no cost envelope is not an error, and
 /// losing the accounting for one turn must not lose the turn.
+///
+/// `account_id` is the account the turn was spawned on (ADR-0051), `None` on
+/// the host's own login.
 pub async fn record_turn_cost(
     pool: &sqlx::SqlitePool,
     company_id: &str,
     agent_id: &str,
+    account_id: Option<&str>,
     output: &str,
 ) -> bool {
     let Some(cost) = crate::provider::current().cost(output) else {
@@ -257,8 +261,9 @@ pub async fn record_turn_cost(
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         "INSERT INTO cost_events (id, company_id, agent_id, task_id, session_id, provider, model,
-         input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at)
-         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+         input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at,
+         account_id)
+         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(uuid::Uuid::now_v7().to_string())
     .bind(company_id)
@@ -271,6 +276,7 @@ pub async fn record_turn_cost(
     .bind(cost.cost_cents)
     .bind(&now)
     .bind(&now)
+    .bind(account_id)
     .execute(pool)
     .await
     .is_ok()

@@ -133,8 +133,15 @@ async fn an_instance_worth_restoring() -> (Instance, Vec<u8>) {
         b"# the dollhouse, v7\n",
     )
     .expect("artifact");
-    std::fs::write(source.dir.join("claude-oauth-token"), format!("{TOKEN}\n")).expect("token");
-    std::fs::write(source.dir.join("pay-with-plan"), b"plan\n").expect("marker");
+    overmind_server::accounts::link(
+        &source.state,
+        "anthropic",
+        overmind_server::accounts::Kind::Subscription,
+        TOKEN,
+        None,
+    )
+    .await
+    .expect("connect an account");
 
     let (s, report) = send(
         &source.app,
@@ -328,13 +335,9 @@ async fn an_archive_restores_into_an_empty_instance_and_the_chain_still_verifies
             .expect("artifact"),
         "# the dollhouse, v7\n"
     );
-    assert_eq!(
-        std::fs::read_to_string(target.dir.join("claude-oauth-token"))
-            .expect("token")
-            .trim(),
-        TOKEN
-    );
-    assert!(target.dir.join("pay-with-plan").is_file());
+    // The account comes back as it was -- connected, the payer -- with its
+    // secret where it expects it, and only the server able to read it.
+    assert_the_account_came_back(&restored).await;
 
     // The staging tree does not outlive the swap.
     let leftovers = std::fs::read_dir(&target.dir)
@@ -526,15 +529,161 @@ async fn a_restore_without_the_sign_in_leaves_nothing_claiming_the_plan_pays() {
     swap(&target).await.expect("pending");
 
     assert!(
-        !target.dir.join("claude-oauth-token").exists(),
-        "the token came back without a passphrase"
+        !overmind_server::accounts::holds_a_secret(&target.state.config),
+        "a credential came back without a passphrase"
     );
-    // The marker without the token would leave every agent command with
-    // neither credential, while the health card said the plan pays.
+    // An account row without its secret would be a payer that pays with
+    // nothing, while the health card said it pays.
+    let restored = overmind_server::init_with(
+        &target.db_url,
+        overmind_server::Config {
+            data_dir: target.dir.clone(),
+            agent_cmd: Some("/usr/bin/true".into()),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init on restored data");
+    let accounts = overmind_server::accounts::list(&restored.pool)
+        .await
+        .expect("accounts");
     assert!(
-        !target.dir.join("pay-with-plan").exists(),
-        "the who-pays marker outlived the sign-in it points at"
+        accounts.is_empty(),
+        "an account outlived the secret it pays with: {accounts:?}"
     );
+}
+
+/// What a restored instance must hold: the one subscription, active, its
+/// secret 0600 under `credentials/`, and handed to an agent as it was.
+async fn assert_the_account_came_back(restored: &overmind_server::AppState) {
+    use std::os::unix::fs::PermissionsExt;
+    let all = overmind_server::accounts::list(&restored.pool)
+        .await
+        .expect("accounts");
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].active, "the payer came back as the payer");
+    let secret =
+        overmind_server::accounts::credential_dir(&restored.config, "anthropic", &all[0].id)
+            .join("secret");
+    assert_eq!(
+        std::fs::read_to_string(&secret).expect("secret").trim(),
+        TOKEN
+    );
+    let mode = std::fs::metadata(&secret)
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+/// A format-1 archive -- written before accounts, one sealed token -- still
+/// restores, and the boot that follows carries its token into an account.
+#[tokio::test]
+async fn an_archive_from_before_accounts_still_restores_into_one() {
+    let (_source, archive) = an_instance_worth_restoring().await;
+    let legacy = as_format_one(&archive).await;
+    let target = instance().await;
+
+    let (s, v) = restore(
+        &target.app,
+        &target.dir,
+        &legacy,
+        &[("passphrase", PASSPHRASE)],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["token"], "restored");
+    target.state.pool.close().await;
+    swap(&target).await.expect("pending");
+
+    let restored = overmind_server::init_with(
+        &target.db_url,
+        overmind_server::Config {
+            data_dir: target.dir.clone(),
+            agent_cmd: Some("/usr/bin/true".into()),
+            ..overmind_server::Config::default()
+        },
+    )
+    .await
+    .expect("init on restored data");
+    assert!(!target.dir.join("claude-oauth-token").exists());
+    assert_the_account_came_back(&restored).await;
+}
+
+/// Rewrite a format-2 archive as format 1 wrote it: no accounts in the
+/// database, and the token sealed alone as `secrets/claude-oauth-token.enc`
+/// under format 1's associated data.
+async fn as_format_one(archive: &[u8]) -> Vec<u8> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+    use sha2::Digest;
+
+    let mut all = entries(archive);
+    let manifest_at = all
+        .iter()
+        .position(|(p, _)| p == "MANIFEST.json")
+        .expect("manifest");
+    let mut manifest: Value = serde_json::from_slice(&all[manifest_at].1).expect("manifest json");
+
+    // The database as format 1 had it: no account rows yet.
+    let db_at = all
+        .iter()
+        .position(|(p, _)| p == "overmind.sqlite")
+        .expect("database");
+    let scratch = std::env::temp_dir().join(format!(
+        "overmind-format-one-{}.sqlite",
+        uuid::Uuid::now_v7().simple()
+    ));
+    std::fs::write(&scratch, &all[db_at].1).expect("scratch db");
+    {
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", scratch.display()))
+            .await
+            .expect("open scratch");
+        sqlx::query("DELETE FROM accounts")
+            .execute(&pool)
+            .await
+            .expect("forget accounts");
+        pool.close().await;
+    }
+    all[db_at].1 = std::fs::read(&scratch).expect("read scratch");
+
+    // The token sealed alone, the way format 1 sealed it.
+    let created_at = manifest["created_at"]
+        .as_str()
+        .expect("created_at")
+        .to_string();
+    let aad = format!("overmind-backup/1/instance/{created_at}");
+    let salt = [7u8; 16];
+    let nonce = [9u8; 24];
+    let params = argon2::Params::new(64 * 1024, 3, 1, Some(32)).expect("params");
+    let mut key = [0u8; 32];
+    argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+        .hash_password_into(PASSPHRASE.as_bytes(), &salt, &mut key)
+        .expect("kdf");
+    let sealed = XChaCha20Poly1305::new(Key::from_slice(&key))
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: TOKEN.as_bytes(),
+                aad: aad.as_bytes(),
+            },
+        )
+        .expect("seal");
+    all.retain(|(p, _)| p != "secrets/accounts.enc");
+    all.push(("secrets/claude-oauth-token.enc".into(), sealed));
+
+    let hashes: serde_json::Map<String, Value> = all
+        .iter()
+        .filter(|(p, _)| p != "MANIFEST.json")
+        .map(|(p, b)| (p.clone(), json!(hex::encode(sha2::Sha256::digest(b)))))
+        .collect();
+    manifest["format"] = json!(1);
+    manifest["entries"] = Value::Object(hashes);
+    manifest["token"]["salt"] = json!(hex::encode(salt));
+    manifest["token"]["nonce"] = json!(hex::encode(nonce));
+    all[manifest_at].1 = serde_json::to_vec_pretty(&manifest).expect("manifest bytes");
+    rebuild(&all)
 }
 
 #[tokio::test]
@@ -843,7 +992,7 @@ async fn a_manifest_asking_the_kdf_for_a_terabyte_is_refused_before_it_is_spent(
     // since the API layer collapses every unseal failure to one message.
     let (_, sealed) = archive_entries
         .iter()
-        .find(|(p, _)| p == "secrets/claude-oauth-token.enc")
+        .find(|(p, _)| p == "secrets/accounts.enc")
         .expect("sealed entry");
     let err = overmind_server::backup::unseal(&parsed, sealed, PASSPHRASE)
         .expect_err("a terabyte request must not be honoured");

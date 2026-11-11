@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use super::{Bound, ParsedCost, Provider, TurnSpec};
 use crate::economy::{Economy, PlanHealth, PlanWindow, UnknownKind};
+use crate::sign_in::{ExchangeVerdict, PasteBack, SignIn};
 
 /// The provider itself holds nothing: every answer is a pure function of the
 /// bytes the CLI produced.
@@ -23,6 +24,20 @@ pub struct ClaudeCode;
 impl Provider for ClaudeCode {
     fn id(&self) -> &'static str {
         "claude-code"
+    }
+
+    fn vendor(&self) -> &'static str {
+        "anthropic"
+    }
+
+    /// `setup-token` prints a token meant for `CLAUDE_CODE_OAUTH_TOKEN` (M23);
+    /// a key is `ANTHROPIC_API_KEY`, and outranks the token when both are set
+    /// (memory #207), which is why the one not chosen is removed, not left.
+    fn credential_var(&self, kind: crate::accounts::Kind) -> &'static str {
+        match kind {
+            crate::accounts::Kind::Subscription => "CLAUDE_CODE_OAUTH_TOKEN",
+            crate::accounts::Kind::Key => "ANTHROPIC_API_KEY",
+        }
     }
 
     fn invoke(&self, spec: &TurnSpec<'_>) -> String {
@@ -68,6 +83,278 @@ impl Provider for ClaudeCode {
 
     fn session_id(&self, output: &str) -> Option<String> {
         parse_adapter_session_id(output)
+    }
+
+    /// A subscription is `setup-token`'s paste-back (M23); a key is pasted.
+    fn sign_in(&self, kind: crate::accounts::Kind) -> SignIn {
+        match kind {
+            crate::accounts::Kind::Subscription => SignIn::PasteBack(PasteBack {
+                program: "claude",
+                args: &["setup-token"],
+                is_auth_url,
+                find_credential: find_token,
+                exchange_verdict,
+                clock_reference: "https://api.anthropic.com/",
+            }),
+            crate::accounts::Kind::Key => SignIn::Key,
+        }
+    }
+
+    /// `auth status --json` names the account it is signed in as: an `email`,
+    /// and an `orgName` (measured on 2.1.280, 8 Nov 2026). The e-mail is what
+    /// a person recognises; the org is the fallback for a key, which has none.
+    fn account_label(&self, status: &Value) -> Option<String> {
+        ["email", "orgName"].iter().find_map(|k| {
+            status[*k]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+    }
+}
+
+// ---------- the sign-in: `setup-token`'s own words (M23) ----------
+
+/// The OAuth page `setup-token` prints, and not some other link it mentions.
+fn is_auth_url(url: &str) -> bool {
+    url.contains("claude.ai") || url.contains("claude.com") || url.contains("anthropic.com")
+}
+
+/// Scrape the token out of the CLI's **raw** output.
+///
+/// The whole transcript is walked as escape-free runs of token characters —
+/// an escape sequence anywhere (including INSIDE the `sk-ant-` prefix) is
+/// skipped, never allowed to end the run or eat a character. Twice burned:
+/// the ANSI stripper ate the `o` of `oat01` on the first live sign-in, and
+/// on the first fresh-machine sign-in (27 Aug 2026) the anchor `sk-ant-oat`
+/// itself failed to match — a redraw had landed inside it, the CLI said
+/// "token created successfully", and the flow reported failure over a token
+/// it was holding. So: no long anchor in the raw bytes, any `sk-ant-*`
+/// subtype, longest qualifying run wins.
+///
+/// The `sk-ant-` anchor is Anthropic's and belongs here, with its provider.
+/// Redaction no longer leans on it: a token scraped is registered by value.
+fn find_token(raw: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut run = String::new();
+    let mut chars = raw.chars().peekable();
+    let consider = |run: &mut String, best: &mut Option<String>| {
+        // The prefix may sit mid-run: a cursor-positioned label glued to the
+        // token by a skipped escape ("token" ESC[5C "sk-ant-…") must not
+        // hide it.
+        if let Some(pos) = run.find("sk-ant-") {
+            let tok = &run[pos..];
+            if tok.len() > 40 && best.as_ref().map(|b| tok.len() > b.len()).unwrap_or(true) {
+                *best = Some(tok.to_string());
+            }
+        }
+        run.clear();
+    };
+    while let Some(c) = chars.next() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            run.push(c);
+        } else if c == '\u{1b}' {
+            // A redraw mid-run: skip the sequence, keep collecting.
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for d in chars.by_ref() {
+                        if ('@'..='~').contains(&d) {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+        } else {
+            consider(&mut run, &mut best);
+        }
+    }
+    consider(&mut run, &mut best);
+    best
+}
+
+/// Do these CLI words mean "that code was not accepted, try again"?
+/// Matched against the words the setup-token flow actually prints; broad on
+/// purpose — a false positive re-offers the paste box, a false negative is
+/// an eternal spinner.
+fn code_rejected_in(chunk: &str) -> bool {
+    let lower = chunk.to_lowercase();
+    [
+        "invalid",
+        "not valid",
+        "expired",
+        "try again",
+        "denied",
+        "error",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+}
+
+/// Lowercased, letters and digits only. The TUI positions words with cursor
+/// moves instead of spaces, so after the ANSI strip a real transcript reads
+/// "PressEntertoretry." — matching must not depend on whitespace (measured
+/// 27 Aug 2026, verbatim from a friend's install).
+fn squash(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Decide from everything the CLI printed since the code went in. Reading
+/// the accumulated text (not the arriving chunk) matters twice over: the
+/// error line and the retry prompt can land in different reads, and an
+/// "OAuth error" seen alone must WAIT for its retry prompt rather than be
+/// mistaken for the same-url re-prompt shape.
+///
+/// "Invalid code…" re-prompts on the same url; "OAuth error: … Press Enter to
+/// retry." regenerates the PKCE challenge, so the old url is dead.
+fn exchange_verdict(since: &str) -> ExchangeVerdict {
+    let q = squash(since);
+    if q.contains("oautherror") {
+        if q.contains("entertoretry") {
+            ExchangeVerdict::Restart
+        } else {
+            ExchangeVerdict::Wait
+        }
+    } else if code_rejected_in(since) {
+        ExchangeVerdict::Rejected
+    } else {
+        ExchangeVerdict::Wait
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::{ClaudeCode, code_rejected_in, exchange_verdict, find_token};
+    use crate::provider::Provider;
+    use crate::sign_in::{ExchangeVerdict, SignIn};
+
+    /// The clock OAuth codes are judged by is the provider's to name; the
+    /// engine no longer hardcodes Anthropic's API for every provider.
+    #[test]
+    fn the_subscription_is_a_paste_back_judged_by_anthropics_clock() {
+        match ClaudeCode.sign_in(crate::accounts::Kind::Subscription) {
+            SignIn::PasteBack(spec) => {
+                assert_eq!(spec.clock_reference, "https://api.anthropic.com/");
+                assert_eq!((spec.program, spec.args), ("claude", &["setup-token"][..]));
+            }
+            other => panic!("expected a paste-back, got {}", other.shape()),
+        }
+        assert!(matches!(
+            ClaudeCode.sign_in(crate::accounts::Kind::Key),
+            SignIn::Key
+        ));
+    }
+
+    /// The label is what the probe says, e-mail first.
+    #[test]
+    fn the_label_is_the_email_the_probe_reports() {
+        let status = serde_json::json!({ "email": "someone@example.com", "orgName": "Org" });
+        assert_eq!(
+            ClaudeCode.account_label(&status).as_deref(),
+            Some("someone@example.com")
+        );
+        let key = serde_json::json!({ "orgName": "Org", "email": "" });
+        assert_eq!(ClaudeCode.account_label(&key).as_deref(), Some("Org"));
+        assert_eq!(ClaudeCode.account_label(&serde_json::json!({})), None);
+    }
+
+    /// Measured 27 Aug 2026: a wrong code left the CLI re-prompting on an
+    /// open pty; without recognizing its words the flow spun forever and
+    /// Retry adopted the zombie.
+    #[test]
+    fn a_rejected_code_is_recognized_and_a_prompt_is_not() {
+        assert!(code_rejected_in(
+            "Invalid authorization code. Please try again:"
+        ));
+        assert!(code_rejected_in("OAuth error: code expired"));
+        assert!(!code_rejected_in("Paste the code from the browser:"));
+        assert!(!code_rejected_in("Browser didn't open? Use the url below"));
+    }
+
+    /// Verbatim from a friend's install (27 Aug 2026), spaces already eaten
+    /// by the TUI's cursor-positioned redraw: an OAuth 400 offers "Press
+    /// Enter to retry", and the retry mints a FRESH url — this must restart
+    /// the scrape, never re-offer the old link (which loops on 400 forever).
+    #[test]
+    fn an_oauth_error_with_a_retry_prompt_restarts_the_flow() {
+        assert_eq!(
+            exchange_verdict("OAuth error: Requstfailed withstatus code 400\nPressEntertoretry."),
+            ExchangeVerdict::Restart
+        );
+        // The error line can arrive a read before its retry prompt: wait for
+        // the prompt instead of misreading the shape as a same-url re-prompt.
+        assert_eq!(
+            exchange_verdict("OAuth error: Request failed with status code 400"),
+            ExchangeVerdict::Wait
+        );
+    }
+
+    /// The same-url shape stays a rejection, and the CLI's own prompts stay
+    /// nothing at all.
+    #[test]
+    fn an_invalid_code_reoffers_the_same_url_and_a_prompt_does_nothing() {
+        assert_eq!(
+            exchange_verdict("Invalid code. Please make sure the full code was copied"),
+            ExchangeVerdict::Rejected
+        );
+        assert_eq!(
+            exchange_verdict("Paste code here if prompted > "),
+            ExchangeVerdict::Wait
+        );
+    }
+
+    /// The shape that corrupted the first stored token, reconstructed: a CSI
+    /// sequence landing mid-token must be skipped, not allowed to end the
+    /// run or eat a character.
+    #[test]
+    fn a_redraw_inside_the_token_does_not_corrupt_it() {
+        let raw = "token: sk-ant-oat01-abc\u{1b}[2Kdef-ghi_jkl0123456789012345678901234567890 done";
+        assert_eq!(
+            find_token(raw).as_deref(),
+            Some("sk-ant-oat01-abcdef-ghi_jkl0123456789012345678901234567890")
+        );
+    }
+
+    /// Too-short matches (fragments of a wrapped echo) are refused rather
+    /// than stored as a credential that will 401 later.
+    #[test]
+    fn a_fragment_is_not_a_token() {
+        assert_eq!(find_token("sk-ant-oat01-tooshort"), None);
+    }
+
+    /// The first fresh-machine sign-in (27 Aug 2026): the CLI said "token
+    /// created successfully", but a redraw had landed INSIDE the old anchor
+    /// and the subtype differed — the flow declared failure over a token it
+    /// was holding. Escapes inside the prefix, unknown subtypes, and a label
+    /// glued on by a cursor move must all still yield the credential.
+    #[test]
+    fn a_token_survives_a_redraw_inside_its_own_prefix_and_any_subtype() {
+        let tail = "3BrYJsbWQSRjWgqoWSud8cWu6nFBNIqo9F19xKrQsFBZ";
+        // A redraw between "sk-ant-" and the subtype.
+        let raw = format!("token:\nsk-ant-\u{1b}[2Kat01-{tail}\nStore this");
+        assert_eq!(
+            find_token(&raw).as_deref(),
+            Some(&*format!("sk-ant-at01-{tail}"))
+        );
+        // The eaten-character shape: the escape lands mid-"oat01".
+        let raw = format!("sk-ant-o\u{1b}[0mat01-{tail} done");
+        assert_eq!(
+            find_token(&raw).as_deref(),
+            Some(&*format!("sk-ant-oat01-{tail}"))
+        );
+        // A cursor-positioned label glued straight onto the token.
+        let raw = format!("token\u{1b}[5Csk-ant-at01-{tail}\n");
+        assert_eq!(
+            find_token(&raw).as_deref(),
+            Some(&*format!("sk-ant-at01-{tail}"))
+        );
     }
 }
 

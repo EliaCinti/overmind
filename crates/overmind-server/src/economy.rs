@@ -38,7 +38,8 @@
 
 use serde_json::Value;
 
-use crate::db::Config;
+use crate::accounts::{Kind, Source};
+use crate::db::{AppState, Config};
 
 /// Which economy this Overmind is running in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,49 +99,114 @@ impl Economy {
     }
 }
 
-// ---------- who pays, when both could (ADR-0037) ----------
+// ---------- who pays, when both could (ADR-0037, over ADR-0051's accounts) ----------
 
-/// Where the person's choice to let the plan pay is kept.
+/// The vendor ADR-0037's switch was about: the one the configured CLI bills.
+fn vendor() -> &'static str {
+    crate::provider::current().vendor()
+}
+
+/// The choice as the API words it, read off the accounts: `plan` while a key
+/// is linked and is not the one paying, `detected` otherwise (ADR-0030's rule
+/// -- whatever the probe found, which with a key present is the key).
 ///
-/// A file in the data dir, like the stored OAuth token, and for the same
-/// reasons: it has to survive a restart, it is read per spawn so revoking it
-/// takes effect on the next run rather than the next boot, and it needs no
-/// migration. Its presence is the whole setting.
-pub fn plan_marker(config: &Config) -> std::path::PathBuf {
-    config.data_dir.join("pay-with-plan")
-}
-
-/// Has the person asked for the plan to pay?
-pub fn plan_is_preferred(config: &Config) -> bool {
-    plan_marker(config).exists()
-}
-
-/// Record (or withdraw) the choice. The consequence lives in
-/// [`crate::sandbox`]: while the marker exists, no command that runs as the
-/// agent carries `ANTHROPIC_API_KEY`, and the CLI — with nothing overriding
-/// its login — bills the plan.
-pub fn prefer_plan(config: &Config, on: bool) -> std::io::Result<()> {
-    let marker = plan_marker(config);
-    if on {
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&marker, "plan\n")
-    } else {
-        match std::fs::remove_file(&marker) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        }
-    }
-}
-
-/// The choice as the API words it: `plan` when chosen, `detected` otherwise
-/// (ADR-0030's rule — the economy is whatever the probe found).
-pub fn pay_with_slug(config: &Config) -> &'static str {
-    if plan_is_preferred(config) {
+/// Answered from the database, not from a marker beside it: the marker could
+/// disagree with what an agent is actually handed, and the accounts are what
+/// it is handed.
+pub async fn pay_with_slug(state: &AppState) -> &'static str {
+    let Ok(all) = crate::accounts::list(&state.pool).await else {
+        return "detected";
+    };
+    let mine = || all.iter().filter(|a| a.provider == vendor());
+    let a_key_is_linked = mine().any(|a| a.kind == Kind::Key);
+    let a_key_pays = mine().any(|a| a.kind == Kind::Key && a.active);
+    if a_key_is_linked && !a_key_pays {
         "plan"
     } else {
         "detected"
+    }
+}
+
+/// Record the choice by activating an account, and say who paid before so a
+/// refused choice can be put back exactly.
+///
+/// `plan`: the most recently linked subscription pays; with none linked,
+/// nobody does, and the CLI falls back on the host's login -- the plan
+/// ADR-0037 meant before accounts existed, kept until the accounts panel
+/// replaces it (M34 step 4). `detected`: the key pays, the environment's
+/// first; with no key, a subscription.
+pub async fn prefer_plan(
+    state: &AppState,
+    plan: bool,
+) -> Result<Option<String>, crate::accounts::AccountError> {
+    let all = crate::accounts::list(&state.pool).await?;
+    let mine: Vec<_> = all.iter().filter(|a| a.provider == vendor()).collect();
+    let before = mine.iter().find(|a| a.active).map(|a| a.id.clone());
+    let newest = |kind: Kind| {
+        mine.iter()
+            .filter(|a| a.kind == kind)
+            .max_by_key(|a| &a.created_at)
+    };
+    let pick = if plan {
+        newest(Kind::Subscription)
+    } else {
+        mine.iter()
+            .find(|a| a.kind == Kind::Key && a.source == Source::Environment)
+            .or_else(|| newest(Kind::Key))
+            .or_else(|| newest(Kind::Subscription))
+    };
+    match pick {
+        Some(a) if !a.active => {
+            crate::accounts::activate(state, &a.id).await?;
+        }
+        Some(_) => {}
+        None if plan => crate::accounts::deactivate_provider(state, vendor()).await?,
+        None => {}
+    }
+    Ok(before)
+}
+
+/// Put back whoever paid before a choice that had to be refused.
+pub async fn restore_payer(
+    state: &AppState,
+    before: Option<String>,
+) -> Result<(), crate::accounts::AccountError> {
+    match before {
+        Some(id) => crate::accounts::activate(state, &id).await.map(|_| ()),
+        None => crate::accounts::deactivate_provider(state, vendor()).await,
+    }
+}
+
+/// An economy that is declared rather than asked: an override, or a custom
+/// adapter nobody can interrogate.
+fn declared(config: &Config) -> Option<Economy> {
+    if let Some(declared) = &config.economy_override {
+        return Some(declared.clone());
+    }
+    // A custom adapter is not necessarily Claude Code, and `auth status` is not
+    // a contract any adapter signed. Better to not know than to run somebody
+    // else's binary with arguments we invented.
+    config.agent_cmd.as_ref().map(|_| Economy::Unknown {
+        kind: UnknownKind::CustomAdapter,
+        reason: "a custom OVERMIND_AGENT_CMD is configured, so Overmind cannot ask it how it pays"
+            .into(),
+    })
+}
+
+/// [`detect`], asked with the credential an agent would be spawned with now.
+///
+/// The probe has to see exactly what a run will see: asked with any other
+/// credential it answers about an account nobody is paying with.
+pub async fn detect_for(state: &AppState) -> Economy {
+    if let Some(declared) = declared(&state.config) {
+        return declared;
+    }
+    match crate::accounts::for_spawn(state, crate::provider::current()).await {
+        Ok(creds) => detect(&state.config, &creds).await,
+        Err(e) => Economy::Unknown {
+            kind: UnknownKind::Unreadable,
+            reason: format!("the active account cannot be read: {e}"),
+        },
     }
 }
 
@@ -154,29 +220,34 @@ pub fn pay_with_slug(config: &Config) -> &'static str {
 /// Not caged: this is our own command with our own arguments, like `git` and
 /// the memory server, which [ADR-0023](../../docs/adr/0023-os-level-sandboxing.md)
 /// leaves outside on the same reasoning.
-pub async fn detect(config: &Config) -> Economy {
-    if let Some(declared) = &config.economy_override {
-        return declared.clone();
+pub async fn detect(config: &Config, creds: &crate::accounts::Spawn) -> Economy {
+    if let Some(declared) = declared(config) {
+        return declared;
     }
-    // A custom adapter is not necessarily Claude Code, and `auth status` is not
-    // a contract any adapter signed. Better to not know than to run somebody
-    // else's binary with arguments we invented.
-    if config.agent_cmd.is_some() {
-        return Economy::Unknown {
-            kind: UnknownKind::CustomAdapter,
-            reason:
-                "a custom OVERMIND_AGENT_CMD is configured, so Overmind cannot ask it how it pays"
-                    .into(),
-        };
-    }
-
-    // The command is the provider's; running it is ours (ADR-0048). As the
-    // agent and not as the server: in the image the server is root and the
-    // credentials live in the agent's home, so a probe run as the server
-    // answers confidently about the wrong home directory.
     let provider = crate::provider::current();
+    match probe(config, provider, creds).await {
+        Ok(status) => provider.read_economy(&status),
+        Err(reason) => Economy::Unknown {
+            kind: UnknownKind::Unreadable,
+            reason,
+        },
+    }
+}
+
+/// Run the provider's probe with `creds` and hand back its JSON answer, or
+/// why there is none.
+///
+/// The command is the provider's; running it is ours (ADR-0048). As the agent
+/// and not as the server: in the image the server is root and the credentials
+/// live in the agent's home, so a probe run as the server answers confidently
+/// about the wrong home directory.
+async fn probe(
+    config: &Config,
+    provider: &dyn crate::provider::Provider,
+    creds: &crate::accounts::Spawn,
+) -> Result<Value, String> {
     let (bin, args) = provider.economy_probe();
-    let mut cmd = crate::sandbox::as_agent(config, bin);
+    let mut cmd = crate::sandbox::as_agent(config, creds, bin);
     cmd.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -189,26 +260,31 @@ pub async fn detect(config: &Config) -> Economy {
 
     let out = match waited {
         Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Economy::Unknown {
-                kind: UnknownKind::Unreadable,
-                reason: format!("could not run the agent CLI: {e}"),
-            };
-        }
-        Err(_) => {
-            return Economy::Unknown {
-                kind: UnknownKind::Unreadable,
-                reason: "the agent CLI did not answer within 20s".into(),
-            };
-        }
+        Ok(Err(e)) => return Err(format!("could not run the agent CLI: {e}")),
+        Err(_) => return Err("the agent CLI did not answer within 20s".into()),
     };
-    match serde_json::from_slice::<Value>(&out.stdout) {
-        Ok(status) => provider.read_economy(&status),
-        Err(e) => Economy::Unknown {
-            kind: UnknownKind::Unreadable,
-            reason: format!("the agent CLI's answer was not JSON: {e}"),
-        },
+    serde_json::from_slice::<Value>(&out.stdout)
+        .map_err(|e| format!("the agent CLI's answer was not JSON: {e}"))
+}
+
+/// Who a credential belongs to, as the provider's own probe says -- asked
+/// once, when the account is connected, with that credential and no other.
+///
+/// `None` when the probe cannot be asked (a declared economy, a custom
+/// adapter: the same honesty [`detect`] applies) or does not say; the label is
+/// then `unknown` rather than anything guessed.
+pub(crate) async fn label_for(
+    state: &AppState,
+    provider: &dyn crate::provider::Provider,
+    kind: Kind,
+    credential: &str,
+) -> Option<String> {
+    if declared(&state.config).is_some() {
+        return None;
     }
+    let creds = crate::accounts::Spawn::with(provider, kind, credential);
+    let status = probe(&state.config, provider, &creds).await.ok()?;
+    provider.account_label(&status)
 }
 
 /// Where a subscription stands in the window that is governing it right now.

@@ -268,10 +268,17 @@ fn api_router() -> Router<AppState> {
         .route("/auth/last-company", post(auth_last_company))
         // Signing the agent CLI into a Claude subscription, from the product
         // (M23). A setup surface: loopback-only like everything else today.
-        .route("/claude-auth", get(claude_auth_status))
+        .route("/claude-auth", get(sign_in_status))
         .route("/claude-auth/start", post(claude_auth_start))
-        .route("/claude-auth/code", post(claude_auth_code))
+        .route("/claude-auth/code", post(sign_in_code))
         .route("/economy/pay-with", post(pay_with))
+        // The accounts Overmind holds (ADR-0051). Owner-only throughout: who
+        // pays is billing, and a label is somebody's e-mail.
+        .route("/accounts", get(list_accounts).post(connect_account))
+        .route("/accounts/sign-in", get(sign_in_status).post(sign_in_begin))
+        .route("/accounts/sign-in/code", post(sign_in_code))
+        .route("/accounts/{id}", delete(disconnect_account))
+        .route("/accounts/{id}/activate", post(activate_account))
         // The archive is the instance (ADR-0044): the owner's verb, on a
         // claimed instance only -- `require_owner` alone would let anyone on
         // the port of an unclaimed box fill the folder and download it.
@@ -411,20 +418,67 @@ async fn auth_last_company(
     Ok(StatusCode::OK)
 }
 
-/// Where the subscription sign-in stands (M23). Polled by the interface.
-async fn claude_auth_status(State(state): State<AppState>) -> Json<Value> {
-    Json(crate::claude_auth::status(&state).await)
-}
-
-async fn claude_auth_start(
+/// Where the sign-in stands (M23). Polled by the interface; reads what the
+/// flow learned and runs nothing.
+async fn sign_in_status(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    // Billing is the owner's: connecting or replacing the subscription
-    // changes who pays, and that is not a member's call (M24 roles).
+) -> Result<Json<Value>, ApiError> {
     crate::auth::require_owner(&state, &headers).await?;
-    crate::claude_auth::start(&state).map_err(ApiError::Invalid)?;
-    Ok(StatusCode::ACCEPTED)
+    Ok(Json(crate::sign_in::status()))
+}
+
+/// The provider of this build that bills to `vendor`, for connecting one of
+/// its accounts. The first, while each vendor has one CLI here.
+fn provider_for(vendor: &str) -> Result<&'static dyn crate::provider::Provider, ApiError> {
+    crate::provider::all()
+        .iter()
+        .copied()
+        .find(|p| p.vendor() == vendor)
+        .ok_or_else(|| {
+            ApiError::Invalid(format!("no provider of this build bills to \"{vendor}\""))
+        })
+}
+
+#[derive(Deserialize)]
+struct BeginSignIn {
+    provider: String,
+    kind: String,
+}
+
+/// Begin connecting an account, in the shape its provider says (ADR-0051
+/// decision 5): a paste-back flow starts and is polled; a key answers that a
+/// field is wanted and runs nothing; an unavailable kind says why.
+async fn sign_in_begin(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<BeginSignIn>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Billing is the owner's: connecting an account changes who can pay, and
+    // that is not a member's call (M24 roles).
+    crate::auth::require_owner(&state, &headers).await?;
+    let provider = provider_for(&req.provider)?;
+    let kind = crate::accounts::Kind::from_slug(&req.kind).ok_or_else(|| {
+        ApiError::Invalid(format!(
+            "kind is \"key\" or \"subscription\", not \"{}\"",
+            req.kind
+        ))
+    })?;
+    begin_sign_in(&state, provider, kind)
+}
+
+fn begin_sign_in(
+    state: &AppState,
+    provider: &'static dyn crate::provider::Provider,
+    kind: crate::accounts::Kind,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use crate::sign_in::{BeginError, Begun};
+    match crate::sign_in::begin(state, provider, kind) {
+        Ok(Begun::PasteBack) => Ok((StatusCode::ACCEPTED, Json(json!({ "shape": "paste_back" })))),
+        Ok(Begun::Key) => Ok((StatusCode::OK, Json(json!({ "shape": "key" })))),
+        Err(BeginError::Unavailable(why)) => Err(ApiError::Conflict(why.into())),
+        Err(BeginError::Refused(why)) => Err(ApiError::Invalid(why)),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -432,7 +486,7 @@ struct AuthCode {
     code: String,
 }
 
-async fn claude_auth_code(
+async fn sign_in_code(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<AuthCode>,
@@ -441,8 +495,23 @@ async fn claude_auth_code(
     if req.code.trim().is_empty() {
         return Err(ApiError::Invalid("the code must not be empty".into()));
     }
-    crate::claude_auth::submit_code(&req.code).map_err(ApiError::Invalid)?;
+    crate::sign_in::submit_code(&req.code).map_err(ApiError::Invalid)?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// The M23 route, onto the same flow, for one release (ADR-0051
+/// consequences): the interface still calls it until the accounts panel.
+async fn claude_auth_start(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    begin_sign_in(
+        &state,
+        crate::provider::current(),
+        crate::accounts::Kind::Subscription,
+    )
+    .map(|(status, _)| status)
 }
 
 /// Whether organizational memory (Wadachi/MCP) is wired up at all — for the UI
@@ -472,8 +541,12 @@ struct PayWith {
 /// ADR-0030 exists to prevent that.
 async fn pay_with(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<PayWith>,
 ) -> Result<Json<Value>, ApiError> {
+    // Who pays is billing, and billing is the owner's (ADR-0051 decision 7).
+    // This route never asked before; it changes the payer all the same.
+    crate::auth::require_owner(&state, &headers).await?;
     let plan = match req.with.as_str() {
         "plan" => true,
         "detected" => false,
@@ -483,8 +556,12 @@ async fn pay_with(
             )));
         }
     };
-    crate::economy::prefer_plan(&state.config, plan).map_err(|e| ApiError::Internal(e.into()))?;
-    let economy = crate::economy::detect(&state.config).await;
+    // A choice is now an activation (ADR-0051): the plan's account pays, or
+    // the key's does. Who paid before is kept so a refusal puts it back.
+    let before = crate::economy::prefer_plan(&state, plan)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    let economy = crate::economy::detect_for(&state).await;
     // Only one of the two ways this can fail is something Overmind can repair
     // from here, so the refusal says which — as a remedy the interface can act
     // on, not as English prose it would have to match against.
@@ -512,7 +589,8 @@ async fn pay_with(
         None
     };
     if let Some((why, remedy)) = refusal {
-        crate::economy::prefer_plan(&state.config, false)
+        crate::economy::restore_payer(&state, before)
+            .await
             .map_err(|e| ApiError::Internal(e.into()))?;
         return Err(match remedy {
             Some(kind) => ApiError::Remediable {
@@ -525,12 +603,141 @@ async fn pay_with(
     state.set_economy(economy.clone());
     eprintln!(
         "economy: chosen pay_with={} — now paying with {}",
-        crate::economy::pay_with_slug(&state.config),
+        crate::economy::pay_with_slug(&state).await,
         crate::economy::describe(&economy)
     );
     Ok(Json(json!({
         "economy": crate::economy::as_json(&economy),
-        "pay_with": crate::economy::pay_with_slug(&state.config),
+        "pay_with": crate::economy::pay_with_slug(&state).await,
+    })))
+}
+
+impl From<crate::accounts::AccountError> for ApiError {
+    fn from(e: crate::accounts::AccountError) -> Self {
+        use crate::accounts::AccountError;
+        match e {
+            AccountError::NotFound => ApiError::NotFound("account"),
+            AccountError::FromEnvironment => ApiError::Conflict(e.to_string()),
+            AccountError::Invalid(why) => ApiError::Invalid(why),
+            AccountError::Db(e) => ApiError::Internal(e.into()),
+            AccountError::Io(e) => ApiError::Internal(e.into()),
+        }
+    }
+}
+
+/// Every account, and every provider this build can hold one for. Never a
+/// secret: a row is kind, label, source, active and a key's last four.
+async fn list_accounts(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    let accounts = crate::accounts::list(&state.pool).await?;
+    // Each provider with how each kind is connected, so the panel draws a
+    // provider from what it says rather than from what the panel assumes --
+    // including a kind it cannot connect, and why.
+    let mut providers: Vec<Value> = Vec::new();
+    for p in crate::provider::all() {
+        if providers.iter().any(|v| v["provider"] == json!(p.vendor())) {
+            continue;
+        }
+        let mut kinds = serde_json::Map::new();
+        for kind in [
+            crate::accounts::Kind::Subscription,
+            crate::accounts::Kind::Key,
+        ] {
+            let how = p.sign_in(kind);
+            let mut entry = json!({ "shape": how.shape() });
+            if let crate::sign_in::SignIn::Unavailable(why) = how {
+                entry["reason"] = why.into();
+            }
+            kinds.insert(kind.slug().to_string(), entry);
+        }
+        providers.push(json!({ "provider": p.vendor(), "kinds": kinds }));
+    }
+    Ok(Json(
+        json!({ "accounts": accounts, "providers": providers }),
+    ))
+}
+
+/// No `Debug`: one field is a key, and a `{:?}` in a future log line is all
+/// it would take.
+#[derive(Deserialize)]
+struct ConnectAccount {
+    provider: String,
+    kind: String,
+    key: String,
+}
+
+/// Connect an account by pasting a key (ADR-0051 decision 5, the *key* shape).
+///
+/// A subscription is never pasted: it is connected by signing in, so the
+/// token comes from the provider's own flow rather than from a text field
+/// somebody could fill with anything.
+async fn connect_account(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ConnectAccount>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    match crate::accounts::Kind::from_slug(&req.kind) {
+        Some(crate::accounts::Kind::Key) => {}
+        Some(crate::accounts::Kind::Subscription) => {
+            return Err(ApiError::Invalid(
+                "a subscription is connected by signing in, not by pasting its token".into(),
+            ));
+        }
+        None => {
+            return Err(ApiError::Invalid(format!(
+                "kind is \"key\" or \"subscription\", not \"{}\"",
+                req.kind
+            )));
+        }
+    }
+    let account = crate::accounts::link(
+        &state,
+        &req.provider,
+        crate::accounts::Kind::Key,
+        &req.key,
+        None,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(json!(account))))
+}
+
+/// Make this account its provider's payer, from the next spawn on.
+async fn activate_account(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    let account = crate::accounts::activate(&state, &id).await?;
+    // The economy follows the payer; asked again rather than assumed.
+    state.set_economy(crate::economy::detect_for(&state).await);
+    Ok(Json(json!(account)))
+}
+
+/// Forget an account and delete its secret -- and say what that cannot do: a
+/// subscription's token stays valid until it is revoked at the provider's own
+/// site (ADR-0051 decision 7). Said as data, for the interface to word.
+async fn disconnect_account(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    crate::auth::require_owner(&state, &headers).await?;
+    let all = crate::accounts::list(&state.pool).await?;
+    let kind = all
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.kind)
+        .ok_or(ApiError::NotFound("account"))?;
+    crate::accounts::disconnect(&state, &id).await?;
+    state.set_economy(crate::economy::detect_for(&state).await);
+    Ok(Json(json!({
+        "disconnected": id,
+        "still_valid_at_provider": kind == crate::accounts::Kind::Subscription,
     })))
 }
 
@@ -605,7 +812,7 @@ async fn list_backups(
         "archives": archives,
         // Whether an export will need a passphrase, so the interface can ask
         // for one only when there is a sign-in to seal -- and say why.
-        "sign_in_travels": crate::claude_auth::stored_token(&state.config).is_some(),
+        "sign_in_travels": crate::accounts::holds_a_secret(&state.config),
     })))
 }
 
@@ -958,7 +1165,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "economy": crate::economy::as_json(&state.economy()),
         // Whether the person chose who pays (ADR-0037): `plan` when they asked
         // the plan to, `detected` when the economy is whatever the probe found.
-        "pay_with": crate::economy::pay_with_slug(&state.config),
+        "pay_with": crate::economy::pay_with_slug(&state).await,
         // Where each of the plan's windows stands, as last reported. Empty
         // under an API key, where windows do not apply, and empty before the
         // first run says anything — a window we have not heard about is absent

@@ -417,8 +417,20 @@ fn agent_user(config: &Config) -> Option<AgentUser> {
 
 /// Which mechanisms hold this run.
 pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = cage_home(config, std::env::var_os("HOME").map(PathBuf::from));
     confinement_in(config, cage, home.as_deref())
+}
+
+/// Whose home the adapter's paths are granted in: the agent's, where one is
+/// configured, and only otherwise the server's.
+///
+/// In the image the server is root and the agent is `/home/agent`; reading
+/// the server's `HOME` granted `/root/.claude` to a process that never uses it
+/// while the agent's real one came in only through `agent_home`. On the native
+/// instance there is no agent home yet, and the host's is the one the CLI
+/// actually uses until it has its own (ADR-0053, M34 step 4).
+fn cage_home(config: &Config, server_home: Option<PathBuf>) -> Option<PathBuf> {
+    config.agent_home.clone().or(server_home)
 }
 
 /// [`confinement`] with the host's home as an argument, so what it grants there
@@ -682,70 +694,26 @@ pub fn caged(config: &Config, cage: &Cage<'_>) -> bool {
     confinement(config, cage).is_real()
 }
 
-/// Build the command that runs `script`, caged when we can cage it.
+/// Build the command that runs `script`, caged when we can cage it, carrying
+/// the credential of the account this run was spawned on and no other.
 ///
 /// Falls back to a bare `sh -c` when sandboxing is off, unavailable, or the
 /// profile cannot be expressed — and those are the only three cases, each of
 /// them a decision rather than an accident.
-/// A subscription's long-lived token rides the environment, like a key.
 ///
-/// Injected wherever the adapter runs (caged work, probes): the CLI reads
-/// `CLAUDE_CODE_OAUTH_TOKEN`, and the file it comes from is the server's,
-/// 0600 under the data dir (M23). An explicit variable already in the
-/// environment wins -- the operator outranks the stored token.
-fn inject_oauth_token<C: CommandEnv>(config: &Config, cmd: &mut C) {
-    if std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN").is_none()
-        && let Some(tok) = crate::claude_auth::stored_token(config)
-    {
-        cmd.set_env("CLAUDE_CODE_OAUTH_TOKEN", &tok);
-    }
-}
-
-/// Who pays (ADR-0037): while the person has chosen the plan, the key stays
-/// out of the agent's environment. The server never calls the API itself, so
-/// it loses nothing; the CLI, with nothing overriding its login, bills the
-/// plan. Applied to every command that runs *as the agent* — the probe, the
-/// caged run, the blocking sign-in — because a single path that still
-/// carried the key would be a single path that still billed it.
-fn keep_key_away<C: CommandEnv>(config: &Config, cmd: &mut C) {
-    if crate::economy::plan_is_preferred(config) {
-        cmd.remove_env("ANTHROPIC_API_KEY");
-    }
-}
-
-/// Everything a command needs to run with the agent's credentials and not one
-/// credential more.
-fn credentials<C: CommandEnv>(config: &Config, cmd: &mut C) {
-    inject_oauth_token(config, cmd);
-    keep_key_away(config, cmd);
-}
-
-/// The two Command types, one env call. A trait beats duplicating the
-/// injection rule until the copies disagree.
-trait CommandEnv {
-    fn set_env(&mut self, k: &str, v: &str);
-    fn remove_env(&mut self, k: &str);
-}
-impl CommandEnv for Command {
-    fn set_env(&mut self, k: &str, v: &str) {
-        self.env(k, v);
-    }
-    fn remove_env(&mut self, k: &str) {
-        self.env_remove(k);
-    }
-}
-impl CommandEnv for std::process::Command {
-    fn set_env(&mut self, k: &str, v: &str) {
-        self.env(k, v);
-    }
-    fn remove_env(&mut self, k: &str) {
-        self.env_remove(k);
-    }
-}
-
-pub fn command(config: &Config, held: &Confinement, script: &str) -> Command {
+/// Who pays is `creds`' to say (ADR-0051): it strips every variable the
+/// provider reads a credential from and sets the active account's. Resolved by
+/// the caller, once, at spawn, so a switch of account mid-run cannot reach a
+/// run that already started -- and so the cost event can name the account the
+/// run was actually given.
+pub fn command(
+    config: &Config,
+    held: &Confinement,
+    creds: &crate::accounts::Spawn,
+    script: &str,
+) -> Command {
     let mut cmd = caged_shell(config, held, script);
-    credentials(config, &mut cmd);
+    creds.apply(&mut cmd);
     cmd
 }
 
@@ -755,12 +723,11 @@ pub fn command(config: &Config, held: &Confinement, script: &str) -> Command {
 /// The cage is the agent's; the token is not needed. A command an agent
 /// planted for that git to run -- a clean filter, say -- would otherwise read
 /// the subscription token from its environment every time someone opened a
-/// diff. Both are removed rather than merely not added: the server's own
-/// environment may carry either.
+/// diff. Every credential variable is removed rather than merely not added:
+/// the server's own environment may carry any of them.
 pub fn command_without_credentials(config: &Config, held: &Confinement, script: &str) -> Command {
     let mut cmd = caged_shell(config, held, script);
-    cmd.env_remove("CLAUDE_CODE_OAUTH_TOKEN")
-        .env_remove("ANTHROPIC_API_KEY");
+    crate::accounts::Spawn::nobody().apply(&mut cmd);
     cmd
 }
 
@@ -836,12 +803,12 @@ fn drop_to(_cmd: &mut Command, _config: &Config, _user: AgentUser) {
 /// server: this is our own program with our own arguments, not agent-controlled
 /// work. The uid is not a cage here either — it is how we ask the question from
 /// the right place.
-pub fn as_agent(config: &Config, program: &str) -> Command {
+pub fn as_agent(config: &Config, creds: &crate::accounts::Spawn, program: &str) -> Command {
     let mut cmd = Command::new(program);
     if let Some(user) = agent_user(config) {
         drop_to(&mut cmd, config, user);
     }
-    credentials(config, &mut cmd);
+    creds.apply(&mut cmd);
     cmd
 }
 
@@ -850,7 +817,11 @@ pub fn as_agent(config: &Config, program: &str) -> Command {
 /// The sign-in flow needs a *blocking* child wired to a pty, which is
 /// `std::process` territory; everything `as_agent` promises -- same uid, same
 /// `HOME` -- holds here for the same reasons.
-pub fn as_agent_std(config: &Config, program: &str) -> std::process::Command {
+pub fn as_agent_std(
+    config: &Config,
+    creds: &crate::accounts::Spawn,
+    program: &str,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     #[cfg(unix)]
     if let Some(user) = agent_user(config) {
@@ -860,7 +831,7 @@ pub fn as_agent_std(config: &Config, program: &str) -> std::process::Command {
             cmd.env("HOME", home);
         }
     }
-    credentials(config, &mut cmd);
+    creds.apply(&mut cmd);
     cmd
 }
 
@@ -1833,7 +1804,8 @@ probe write_cli_state write "$H/.claude/settings.json"
             ..Config::default()
         };
         let cage = Cage::new(Path::new("/tmp/x"));
-        let cmd = command(&cfg, &confinement(&cfg, &cage), "echo hi");
+        let none = crate::accounts::Spawn::none(crate::provider::current());
+        let cmd = command(&cfg, &confinement(&cfg, &cage), &none, "echo hi");
         assert_eq!(cmd.as_std().get_program(), "sh");
     }
 
@@ -1851,37 +1823,64 @@ probe write_cli_state write "$H/.claude/settings.json"
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v.is_none())
     }
 
-    /// ADR-0037: once the person chose the plan, every command that runs as
-    /// the agent — the probe, the caged run, the blocking sign-in — starts
-    /// without the key. The choice is a file in the data dir, read per spawn
-    /// like the stored token, so it survives a restart and needs no migration.
+    /// In the image the server is root and the agent is not: the adapter's
+    /// writable home is the agent's, `/home/agent`, and `/root/.claude` is
+    /// nobody's business. Reading the server's `HOME` granted exactly that
+    /// (NEXT, "the sign-in and the cage", one of the six that travel with
+    /// `sign_in`).
     #[test]
-    fn when_the_plan_is_chosen_the_key_stays_out_of_the_agents_hands() {
+    fn the_cage_grants_the_agents_home_and_not_the_servers() {
+        let agent_home = fresh_data_dir().join("agent-home");
         let cfg = Config {
-            sandbox: false,
             data_dir: fresh_data_dir(),
+            agent_home: Some(agent_home.clone()),
             ..Config::default()
         };
-        crate::economy::prefer_plan(&cfg, true).expect("choose the plan");
-        assert!(key_is_removed(as_agent(&cfg, "claude").as_std()));
-        assert!(key_is_removed(&as_agent_std(&cfg, "claude")));
         let run = cfg.data_dir.join("run");
-        assert!(key_is_removed(
-            command(&cfg, &confinement(&cfg, &Cage::new(&run)), "true").as_std()
-        ));
+        let home = cage_home(&cfg, Some(PathBuf::from("/root")));
+        let writable = writable_paths(&cfg, &Cage::new(&run), home.as_deref());
+        assert!(
+            writable.iter().any(|p| p.ends_with("agent-home/.claude")),
+            "the agent's own adapter state is writable: {writable:?}"
+        );
+        assert!(
+            !writable.iter().any(|p| p.starts_with("/root")),
+            "the server's home was granted: {writable:?}"
+        );
+        // And where no agent home is configured -- the native instance, until
+        // it gets one (M34 step 4) -- the host's home is still the one used.
+        let native = Config {
+            agent_home: None,
+            ..cfg.clone()
+        };
+        assert_eq!(
+            cage_home(&native, Some(PathBuf::from("/Users/someone"))),
+            Some(PathBuf::from("/Users/someone"))
+        );
     }
 
+    /// ADR-0051: every command that runs as the agent — the probe, the caged
+    /// run, the blocking sign-in — carries the spawn it was given, and a key
+    /// the server's environment holds never rides along on its own. A single
+    /// path that still carried it would be a single path that still billed it.
     #[test]
-    fn without_the_choice_the_environment_is_left_alone() {
+    fn every_way_of_running_as_the_agent_carries_only_the_account_it_was_given() {
         let cfg = Config {
             sandbox: false,
             data_dir: fresh_data_dir(),
             ..Config::default()
         };
-        assert!(!key_is_removed(as_agent(&cfg, "claude").as_std()));
-        crate::economy::prefer_plan(&cfg, true).expect("choose");
-        crate::economy::prefer_plan(&cfg, false).expect("and change your mind");
-        assert!(!key_is_removed(as_agent(&cfg, "claude").as_std()));
+        let none = crate::accounts::Spawn::none(crate::provider::current());
+        assert!(key_is_removed(as_agent(&cfg, &none, "claude").as_std()));
+        assert!(key_is_removed(&as_agent_std(&cfg, &none, "claude")));
+        let run = cfg.data_dir.join("run");
+        assert!(key_is_removed(
+            command(&cfg, &confinement(&cfg, &Cage::new(&run)), &none, "true").as_std()
+        ));
+        assert!(key_is_removed(
+            command_without_credentials(&cfg, &confinement(&cfg, &Cage::new(&run)), "true")
+                .as_std()
+        ));
     }
     /// A run directory belongs to the agent, and on a retry it already holds
     /// whatever the previous attempt put there. The hand-over used to recurse

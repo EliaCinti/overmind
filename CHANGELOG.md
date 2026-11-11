@@ -4,6 +4,15 @@ All notable changes to Overmind are recorded here, newest first. Overmind is dev
 
 ## [Unreleased]
 
+### Added
+
+- **An account is something Overmind holds, and exactly one pays for each provider** ([ADR-0051](docs/adr/0051-an-account-is-connected-not-configured.md), M34). There used to be one subscription token, one key read from the environment and a switch between them. Now any number of accounts can be linked — subscriptions and keys — with one active per provider, and an agent is given that account's credential and no other. A key in the server's environment shows up as an account you can see but not remove. Upgrading keeps whoever paid before. Each cost in the ledger names the account it was billed to, and an archive carries every account, sealed by its passphrase; archives made before this still restore. The panel to manage them comes next; for now it is `/api/accounts`, owner-only and audited.
+
+### Security
+
+- **A credential an agent prints is redacted by its value, whatever it looks like** ([ADR-0051](docs/adr/0051-an-account-is-connected-not-configured.md)). Redaction used to recognise a secret by Anthropic's `sk-ant` prefix, so another vendor's key — or an agent running `env` — went into the run's narration and its record in the clear. Every credential Overmind holds is now known by value and removed from everything a run or a CEO turn prints, even when it arrives split across two pieces of output.
+- **A member could change who pays.** `/economy/pay-with` asked for a signed-in user, not the owner. It, and every account route, now refuse a member.
+
 ### Fixed
 
 - **A meeting request planted as a link was followed by the server, and one planted as a fifo held the end of the run forever.** `finalize` read `MEETING_REQUEST.json` with a plain read, in a directory the agent owns, as the server — root, in the image. A link under that name was followed, and a valid request it named became a meeting the agent never asked for in its own run; a fifo waited for a writer that never came, so the run's memory was never stored; a link to a device would have read without end. Both reproduced by tests first. The request is now read the way the handoff is — `O_NOFOLLOW` at every step, `O_NONBLOCK`, a plain file with one name, capped well above any real request — and removed through the run dir, never through a link to it. Reviewing the shared reader also fixed it for the handoff: a long handoff cut inside a multi-byte character used to read as no handoff at all, and a hard link to a file outside the run was read like any other.

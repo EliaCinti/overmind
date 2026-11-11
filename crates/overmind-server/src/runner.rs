@@ -327,12 +327,20 @@ pub(crate) async fn drain_narrating(
         if let Some(stdout) = stdout {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                // Before the line becomes anything -- narration, stored output,
+                // an error -- every credential Overmind knows is blotted out of
+                // it (ADR-0051 decision 6): an agent can print its own key, and
+                // a CLI's refusal sometimes echoes the one it refused.
+                let line = crate::secrets::scrub(&line);
                 if let Some(delta) = provider.text_delta(&line) {
                     if accum.len() < 64_000 {
                         accum.push_str(&delta);
                     }
                     if let Some(draft) = draft_reply(&accum) {
-                        let shown: String = draft.chars().take(12_000).collect();
+                        // Again on the whole draft: a key can arrive split
+                        // across two deltas, whole in neither line.
+                        let shown: String =
+                            crate::secrets::scrub(&draft).chars().take(12_000).collect();
                         state2.set_activity(
                             &key2,
                             serde_json::json!({ "kind": "draft", "text": shown }),
@@ -362,6 +370,7 @@ pub(crate) async fn drain_narrating(
         if let Some(stderr) = stderr {
             let mut lines = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                let line = crate::secrets::scrub(&line);
                 if let Ok(mut buf) = err_shared.lock() {
                     buf.push_str(&line);
                     buf.push('\n');
@@ -657,6 +666,9 @@ async fn handoff_text(ctx: &SessionContext, stop: &crate::i18n::Stop, output: &s
             said.push('\n');
         }
     }
+    // Every line was scrubbed on its way in, but deltas joined here can
+    // reassemble a key that no single line held whole.
+    let said = crate::secrets::scrub(&said);
     crate::i18n::handoff(
         &lang,
         &crate::i18n::Handoff {
@@ -2222,10 +2234,34 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
         None
     };
 
+    // Who pays for this run is decided now, once (ADR-0051): a switch of
+    // account while it runs takes effect at the next spawn, and the session
+    // records the one it was given so its cost event can say so truthfully.
+    let creds = match crate::accounts::for_spawn(&ctx.state, crate::provider::current()).await {
+        Ok(c) => c,
+        Err(e) => {
+            return Outcome::Infra {
+                error: format!("the active account cannot be read: {e}"),
+                release: false,
+            };
+        }
+    };
+    if let Err(e) = sqlx::query("UPDATE agent_task_sessions SET account_id = ? WHERE id = ?")
+        .bind(&creds.account_id)
+        .bind(&ctx.session_id)
+        .execute(&ctx.state.pool)
+        .await
+    {
+        return Outcome::Infra {
+            error: format!("cannot record which account pays for this run: {e}"),
+            release: false,
+        };
+    }
+
     // Caged: the agent may write its own run directory and nothing else
     // (ADR-0023). `~/.ssh`, the browser profile and Overmind's own database
     // are unreachable from in there.
-    let mut cmd = crate::sandbox::command(&ctx.state.config, &held, &agent_cmd);
+    let mut cmd = crate::sandbox::command(&ctx.state.config, &held, &creds, &agent_cmd);
     for (k, v) in crate::sandbox::git_isolation() {
         cmd.env(k, v);
     }
@@ -2809,17 +2845,20 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
     // an error — the session already carries the full output.
     let mut costed: Option<String> = None;
     if let Some(cost) = crate::provider::current().cost(&f.output) {
-        let agent_id: Option<(String,)> =
-            sqlx::query_as("SELECT agent_id FROM agent_task_sessions WHERE id = ?")
+        // The account is the one the run was spawned on, read off the session
+        // rather than asked of the accounts now: it may have changed since.
+        let session: Option<(String, Option<String>)> =
+            sqlx::query_as("SELECT agent_id, account_id FROM agent_task_sessions WHERE id = ?")
                 .bind(&ctx.session_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-        if let Some((agent_id,)) = agent_id {
+        if let Some((agent_id, account_id)) = session {
             costed = Some(agent_id.clone());
             sqlx::query(
                 "INSERT INTO cost_events (id, company_id, agent_id, task_id, session_id, provider, model,
-                 input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 input_tokens, cached_input_tokens, output_tokens, cost_cents, occurred_at, created_at,
+                 account_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(uuid::Uuid::now_v7().to_string())
             .bind(&ctx.company_id)
@@ -2834,6 +2873,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             .bind(cost.cost_cents)
             .bind(now())
             .bind(now())
+            .bind(&account_id)
             .execute(&mut *tx)
             .await?;
         }
