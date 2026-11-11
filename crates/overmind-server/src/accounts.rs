@@ -584,6 +584,24 @@ pub async fn disconnect(state: &AppState, id: &str) -> Result<(), AccountError> 
     }
 }
 
+/// Every stored account's secret, as `(provider, id, secret)`: what the
+/// archive seals (ADR-0051 decision 8). An unreadable one is an error, never
+/// skipped -- an archive that silently left one behind would restore an
+/// account that pays with nothing.
+pub async fn stored_secrets(
+    pool: &sqlx::SqlitePool,
+    config: &Config,
+) -> Result<Vec<(String, String, String)>, AccountError> {
+    let mut out = Vec::new();
+    for a in list(pool).await? {
+        if a.source == Source::Stored {
+            let secret = read_secret(config, &a)?;
+            out.push((a.provider, a.id, secret));
+        }
+    }
+    Ok(out)
+}
+
 pub async fn list(pool: &sqlx::SqlitePool) -> Result<Vec<Account>, sqlx::Error> {
     let rows: Vec<Row> = sqlx::query_as(&format!(
         "SELECT {COLUMNS} FROM accounts ORDER BY provider, created_at"

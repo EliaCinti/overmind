@@ -32,11 +32,19 @@ use crate::db::{AppState, Config};
 
 /// The archive format this server writes. A restore refuses a format it does
 /// not know rather than guessing at it.
-pub const FORMAT: u32 = 1;
+///
+/// 2 since accounts (ADR-0051 decision 8): every stored credential travels in
+/// one sealed bundle, `secrets/accounts.enc`. A format-1 archive -- one
+/// sealed `claude-oauth-token` -- is still read, and its token is carried
+/// into an account by the boot that follows the restore.
+pub const FORMAT: u32 = 2;
 
 const SCOPE_INSTANCE: &str = "instance";
 const DB_ENTRY: &str = "overmind.sqlite";
 const MANIFEST_ENTRY: &str = "MANIFEST.json";
+/// Every stored account's credential, sealed together (format 2).
+const ACCOUNTS_ENTRY: &str = "secrets/accounts.enc";
+/// The one sealed token of a format-1 archive, read and never written.
 const TOKEN_ENTRY: &str = "secrets/claude-oauth-token.enc";
 const BRAIN_DB: &str = "brain.db";
 const TOKEN_FILE: &str = "claude-oauth-token";
@@ -125,8 +133,8 @@ pub enum ExportError {
     /// A token is on the box and no passphrase came with the request. Said
     /// before anything is written.
     #[error(
-        "a subscription token is stored on this instance: give a passphrase to seal it, \
-         or remove the sign-in first"
+        "an account's credential is stored on this instance: give a passphrase to seal it, \
+         or disconnect the account first"
     )]
     PassphraseRequired,
     #[error(
@@ -171,10 +179,23 @@ pub async fn export(
     passphrase: Option<&str>,
 ) -> Result<ExportReport, ExportError> {
     let config = state.config.clone();
-    // Carried as accounts by the archive's next format; until then nothing.
-    let token: Option<String> = None;
+    // Every credential Overmind holds, as one bundle to seal: `<provider>/<id>`
+    // to secret. An unreadable one fails the export rather than leaving an
+    // account behind that the restored instance could not pay with.
+    let held = crate::accounts::stored_secrets(&state.pool, &config)
+        .await
+        .map_err(|e| ExportError::Seal(format!("reading the accounts: {e}")))?;
+    let token: Option<String> = if held.is_empty() {
+        None
+    } else {
+        let bundle: BTreeMap<String, String> = held
+            .into_iter()
+            .map(|(provider, id, secret)| (format!("{provider}/{id}"), secret))
+            .collect();
+        Some(serde_json::to_string(&bundle)?)
+    };
     let passphrase = passphrase.map(str::trim).filter(|p| !p.is_empty());
-    if crate::accounts::holds_a_secret(&config) && passphrase.is_none() {
+    if token.is_some() && passphrase.is_none() {
         return Err(ExportError::PassphraseRequired);
     }
     if let Some(p) = passphrase {
@@ -332,7 +353,6 @@ async fn build(
         staging: staging.to_path_buf(),
         folder: folder.to_path_buf(),
         data_dir: config.data_dir.clone(),
-        marker: config.data_dir.join(crate::accounts::LEGACY_MARKER_FILE),
         brains,
         brain_mode,
         token: token.map(str::to_string),
@@ -351,7 +371,6 @@ struct Assembly {
     staging: PathBuf,
     folder: PathBuf,
     data_dir: PathBuf,
-    marker: PathBuf,
     /// `(source brain directory, its place in the staging tree)`.
     brains: Vec<(PathBuf, PathBuf)>,
     brain_mode: &'static str,
@@ -366,7 +385,6 @@ fn assemble(job: Assembly) -> Result<ExportReport, ExportError> {
         staging,
         folder,
         data_dir,
-        marker,
         brains,
         brain_mode,
         token,
@@ -396,25 +414,17 @@ fn assemble(job: Assembly) -> Result<ExportReport, ExportError> {
             copy_tree(&src, &staging.join(name), &|_| true)?;
         }
     }
-    // The marker gets the same treatment as everything else: a link in its
-    // place would otherwise be read through, as `pay-with-plan`, by the
-    // server.
-    if marker
-        .symlink_metadata()
-        .map(|m| m.file_type().is_file())
-        .unwrap_or(false)
-    {
-        copy_file_nofollow(&marker, &staging.join("pay-with-plan"))?;
-    }
+    // Who pays rides in the database now, as each account's active flag; the
+    // `pay-with-plan` marker is gone with ADR-0037's switch.
 
-    // The token, sealed — never in the clear.
+    // The accounts' credentials, sealed — never in the clear.
     let scope = SCOPE_INSTANCE.to_string();
     let created_at_text = created_at.to_rfc3339();
     let mut seal = None;
     if let (Some(token), Some(passphrase)) = (&token, &passphrase) {
         let aad = associated_data(FORMAT, &scope, &created_at_text);
         let (params, sealed) = seal_token(token, passphrase, aad.as_bytes())?;
-        let path = staging.join(TOKEN_ENTRY);
+        let path = staging.join(ACCOUNTS_ENTRY);
         if let Some(parent) = path.parent() {
             private_dir(parent)?;
         }
@@ -1098,7 +1108,9 @@ async fn stage(
     }
 
     // The sign-in: opened here, where a retry is still free, or refused whole.
-    let sealed_path = staging.join(TOKEN_ENTRY);
+    // A format-1 archive sealed one token; a format-2 one, every account.
+    let legacy = manifest.entries.contains_key(TOKEN_ENTRY);
+    let sealed_path = staging.join(if legacy { TOKEN_ENTRY } else { ACCOUNTS_ENTRY });
     let token = match (&manifest.token, skip_token) {
         (None, _) => "none",
         (Some(_), true) => {
@@ -1107,6 +1119,16 @@ async fn stage(
             // leave every agent command without a credential and the health
             // card claiming otherwise.
             let _ = std::fs::remove_file(staging.join(MARKER_FILE));
+            // And an account row whose secret stayed behind is an account that
+            // pays with nothing: the restored instance forgets it, and the
+            // owner connects it again.
+            if !legacy {
+                forget_stored_accounts(&snapshot).await.map_err(|e| {
+                    RestoreError::Refused(format!(
+                        "the archive's accounts could not be set aside: {e}"
+                    ))
+                })?;
+            }
             "skipped"
         }
         (Some(_), false) => {
@@ -1127,9 +1149,14 @@ async fn stage(
                         .into(),
                 )
             })?;
-            let path = staging.join(TOKEN_FILE);
-            std::fs::write(&path, opened)?;
-            keep_private(&path)?;
+            if legacy {
+                // The next boot carries it into an account (ADR-0051).
+                let path = staging.join(TOKEN_FILE);
+                std::fs::write(&path, opened)?;
+                keep_private(&path)?;
+            } else {
+                restore_secrets(staging, &opened)?;
+            }
             let _ = std::fs::remove_file(&sealed_path);
             let _ = std::fs::remove_dir(staging.join("secrets"));
             "restored"
@@ -1175,6 +1202,57 @@ async fn stage(
     })
 }
 
+/// Put each sealed credential back where its account expects it:
+/// `credentials/<provider>/<id>/secret`, every level 0700, the file 0600.
+///
+/// The keys come out of an archive, which is somebody's file: each part must
+/// be a plain name -- letters, digits, `-` and `_` -- so no key can climb out
+/// of the tree it is written into.
+fn restore_secrets(staging: &Path, opened: &str) -> Result<(), RestoreError> {
+    use std::io::Write;
+    let bundle: BTreeMap<String, String> = serde_json::from_str(opened)?;
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    for (key, secret) in bundle {
+        let Some((provider, id)) = key.split_once('/').filter(|(p, i)| plain(p) && plain(i))
+        else {
+            return Err(RestoreError::Refused(format!(
+                "the archive's sealed accounts name one as \"{key}\", which is not an account"
+            )));
+        };
+        let credentials = staging.join("credentials");
+        let dir = credentials.join(provider).join(id);
+        for level in [&credentials, &credentials.join(provider), &dir] {
+            private_dir(level)?;
+        }
+        let mut f = open_private(&dir.join("secret"))?;
+        f.write_all(secret.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Drop the stored accounts from a staged database whose secrets were left
+/// behind on purpose. The audit chain is untouched: accounts are state, and
+/// the chain says when each was connected.
+async fn forget_stored_accounts(snapshot: &Path) -> Result<(), sqlx::Error> {
+    let options = SqliteConnectOptions::new()
+        .filename(snapshot)
+        .foreign_keys(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    sqlx::query("DELETE FROM accounts WHERE source = 'stored'")
+        .execute(&pool)
+        .await?;
+    pool.close().await;
+    Ok(())
+}
+
 impl From<serde_json::Error> for RestoreError {
     fn from(e: serde_json::Error) -> Self {
         RestoreError::Refused(format!("the archive's manifest is not readable: {e}"))
@@ -1208,9 +1286,9 @@ fn unpack_checked(archive: &Path, staging: &Path) -> Result<Manifest, RestoreErr
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes)?;
             let parsed: Manifest = serde_json::from_slice(&bytes)?;
-            if parsed.format != FORMAT {
+            if parsed.format == 0 || parsed.format > FORMAT {
                 return Err(RestoreError::Refused(format!(
-                    "this archive is format {}, and this server reads format {FORMAT}",
+                    "this archive is format {}, and this server reads formats 1 to {FORMAT}",
                     parsed.format
                 )));
             }
