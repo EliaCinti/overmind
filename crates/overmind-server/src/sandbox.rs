@@ -1129,8 +1129,10 @@ mod tests {
 
     /// The host runs `~/.local/bin`, so the agent may run it too and never
     /// replace it. And only the adapter's corner of `~/.local/share`, where
-    /// every other tool's data is. `~/.claude` stays writable, which is the
-    /// hole ADR-0053 states rather than closes.
+    /// every other tool's data is.
+    /// Updated in M34 step 4: the home passed here is the agent's own home,
+    /// so the agent's .claude is writable there, while the operator's home
+    /// is never granted (asserted in `the_cage_grants_nothing_under_the_owners_home`).
     #[test]
     fn the_adapters_install_is_readable_and_never_writable() {
         let home = Path::new(NO_ONES_HOME);
@@ -1427,13 +1429,57 @@ probe write_cli_state write "$H/.claude/settings.json"
             .nth(2)
             .expect("the credential read stanza exists");
         let write_stanza = text.split("(allow file*\n").nth(1).expect("write stanza");
-        if let Some(home) = std::env::var_os("HOME") {
-            let kc = format!("{}/Library/Keychains", home.to_string_lossy());
-            if std::path::Path::new(&kc).exists() {
-                assert!(read_stanza.contains("Library/Keychains"), "{text}");
-                assert!(!write_stanza.contains("Library/Keychains"), "{text}");
-            }
-        }
+        // Updated in M34 step 4: the agent has its own home under data_dir,
+        // so the host operator's login Keychain is never granted.
+        assert!(!read_stanza.contains("Library/Keychains"), "{text}");
+        assert!(!write_stanza.contains("Library/Keychains"), "{text}");
+    }
+
+    /// On a native instance (no OVERMIND_AGENT_HOME set), the agent's home
+    /// defaults to `<data_dir>/agent-home`, created 0700 under data_dir, and
+    /// never falls back to the server/owner's HOME (ADR-0053, M34 step 4).
+    #[test]
+    fn on_a_native_instance_the_agent_has_a_home_of_its_own() {
+        let data = PathBuf::from("/srv/overmind-data");
+        let cfg = Config {
+            data_dir: data.clone(),
+            agent_home: None, // as when OVERMIND_AGENT_HOME is unset
+            ..config(Vec::new())
+        };
+        let server_home = PathBuf::from("/Users/operator");
+        let home = cage_home(&cfg, Some(server_home));
+        assert_eq!(
+            home,
+            Some(data.join("agent-home")),
+            "agent home must be under data_dir, never the operator's HOME"
+        );
+    }
+
+    /// The cage grants nothing under the owner's HOME: neither .claude nor
+    /// .claude.json writable, nor Library/Keychains readable.
+    /// Closes the hole ADR-0053 stated and M34 step 4 closes.
+    #[test]
+    fn the_cage_grants_nothing_under_the_owners_home() {
+        let owner_home = Path::new("/Users/operator");
+        let agent_home = Path::new("/srv/overmind-data/agent-home");
+        let cfg = Config {
+            agent_home: Some(agent_home.to_path_buf()),
+            ..config(Vec::new())
+        };
+        let cage = Cage::new(Path::new("/tmp/run-x"));
+        let text = super::profile(&cfg, &cage, Some(agent_home)).expect("profile");
+        let (read, write) = stanzas(&text);
+
+        // Nothing under the owner's home is granted, readable or writable.
+        assert!(!read.contains("/Users/operator"), "{text}");
+        assert!(!write.contains("/Users/operator"), "{text}");
+
+        // The agent's own home is granted where it needs it:
+        assert!(write.contains("(subpath \"/srv/overmind-data/agent-home/.claude\")"), "{text}");
+        assert!(write.contains("(subpath \"/srv/overmind-data/agent-home/.claude.json\")"), "{text}");
+        // And Keychains is never granted:
+        assert!(!read.contains("Keychains"), "{text}");
+        assert!(!write.contains("Keychains"), "{text}");
     }
 
     #[test]

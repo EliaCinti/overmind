@@ -618,6 +618,10 @@ impl From<crate::accounts::AccountError> for ApiError {
         match e {
             AccountError::NotFound => ApiError::NotFound("account"),
             AccountError::FromEnvironment => ApiError::Conflict(e.to_string()),
+            AccountError::NoActiveAccount(ref provider) => ApiError::Remediable {
+                message: e.to_string(),
+                remedy: json!({ "kind": "connect_account", "provider": provider }),
+            },
             AccountError::Invalid(why) => ApiError::Invalid(why),
             AccountError::Db(e) => ApiError::Internal(e.into()),
             AccountError::Io(e) => ApiError::Internal(e.into()),

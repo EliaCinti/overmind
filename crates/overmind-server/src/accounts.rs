@@ -90,6 +90,8 @@ pub enum AccountError {
     NotFound,
     #[error("an account from the environment is removed by removing the variable, not from here")]
     FromEnvironment,
+    #[error("no active account for provider {0}")]
+    NoActiveAccount(String),
     #[error("{0}")]
     Invalid(String),
     #[error(transparent)]
