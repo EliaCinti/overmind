@@ -669,7 +669,13 @@ async fn a_credential_an_agent_prints_never_reaches_the_record() {
 #[tokio::test]
 async fn with_no_active_account_a_hire_is_refused_with_connect_account() {
     let (_state, app, _root) = instance_with_stub("no-account-hire", "#!/bin/sh\nexit 0\n").await;
-    let (_, co, _) = send(&app, "POST", "/api/companies", Some(json!({ "name": "Co" }))).await;
+    let (_, co, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Co" })),
+    )
+    .await;
     let company = co["id"].as_str().expect("id");
     let (s, body, raw) = send(
         &app,
@@ -692,7 +698,13 @@ async fn with_no_active_account_a_start_is_refused_with_connect_account() {
         .await
         .expect("link");
     let repo = root.join("repo");
-    let (_, co, _) = send(&app, "POST", "/api/companies", Some(json!({ "name": "Co" }))).await;
+    let (_, co, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Co" })),
+    )
+    .await;
     let company = co["id"].as_str().expect("id").to_string();
     let (_, pr, _) = send(
         &app,
@@ -743,7 +755,9 @@ async fn with_no_active_account_a_start_is_refused_with_connect_account() {
     .await;
 
     // Disconnect the account so the provider is left with no active account.
-    accounts::disconnect(&state, &acc.id).await.expect("disconnect");
+    accounts::disconnect(&state, &acc.id)
+        .await
+        .expect("disconnect");
 
     let (s, body, raw) = send(
         &app,
@@ -792,7 +806,10 @@ exit 0
         if let Some((id,)) = row {
             break id;
         }
-        assert!(std::time::Instant::now() < deadline, "first run never finished");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first run never finished"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
 
@@ -826,7 +843,10 @@ exit 0
         if let Some(r) = row {
             break (r.0, r.1.unwrap_or_default(), r.2);
         }
-        assert!(std::time::Instant::now() < deadline, "resumed run never finished");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resumed run never finished"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
     assert_eq!(status, "failed");

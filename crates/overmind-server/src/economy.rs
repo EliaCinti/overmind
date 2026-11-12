@@ -203,6 +203,10 @@ pub async fn detect_for(state: &AppState) -> Economy {
     }
     match crate::accounts::for_spawn(state, crate::provider::current()).await {
         Ok(creds) => detect(&state.config, &creds).await,
+        Err(crate::accounts::AccountError::NoActiveAccount(_)) => Economy::Unknown {
+            kind: UnknownKind::NotSignedIn,
+            reason: "no active account is connected for this provider".into(),
+        },
         Err(e) => Economy::Unknown {
             kind: UnknownKind::Unreadable,
             reason: format!("the active account cannot be read: {e}"),

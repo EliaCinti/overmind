@@ -640,7 +640,7 @@ pub async fn for_spawn(
     .fetch_optional(&state.pool)
     .await?;
     let Some(row) = row else {
-        return Ok(spawn);
+        return Err(AccountError::NoActiveAccount(provider.vendor().to_string()));
     };
     let env_var = row.4.clone();
     let account = from_row(row);

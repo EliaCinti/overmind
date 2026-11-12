@@ -1247,6 +1247,25 @@ pub async fn start_task(
         }
     }
 
+    // Account gate (ADR-0051 decision 4). Without an active account for this
+    // provider, the CLI would fall back on the host's login. Refuse the start
+    // up front with a remedy that opens the accounts panel.
+    let provider = crate::provider::current();
+    if let Err(e) = crate::accounts::for_spawn(state, provider).await {
+        return Err(match e {
+            crate::accounts::AccountError::NoActiveAccount(vendor) => RunnerError::Remediable {
+                message: format!(
+                    "no active account for provider {vendor} (connect one from the accounts panel)"
+                ),
+                remedy: serde_json::json!({
+                    "kind": "connect_account",
+                    "provider": vendor,
+                }),
+            },
+            other => RunnerError::Blocked(other.to_string()),
+        });
+    }
+
     // A `code` run needs a git repo to branch a worktree from; a `knowledge`
     // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
     let workspace: Option<(String, Option<String>)> = match exec_kind {

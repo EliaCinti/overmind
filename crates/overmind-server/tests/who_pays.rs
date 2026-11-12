@@ -163,10 +163,16 @@ async fn letting_the_plan_pay_is_refused_when_nobody_is_signed_in() {
     // And says it to the interface as well as the person: this refusal has a
     // repair Overmind can offer on the spot, and matching on English prose to
     // discover that is not a contract (ADR-0038 addendum).
+    // In M34 step 4: points to connect_account instead of connect_plan.
     assert_eq!(
         body["remedy"]["kind"],
-        json!("connect_plan"),
+        json!("connect_account"),
         "the refusal carries the repair: {body}"
+    );
+    assert_eq!(
+        body["remedy"]["provider"],
+        json!("anthropic"),
+        "the refusal names the provider: {body}"
     );
     assert_eq!(
         payer(&state).await,

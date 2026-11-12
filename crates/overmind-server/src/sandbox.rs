@@ -1475,8 +1475,14 @@ probe write_cli_state write "$H/.claude/settings.json"
         assert!(!write.contains("/Users/operator"), "{text}");
 
         // The agent's own home is granted where it needs it:
-        assert!(write.contains("(subpath \"/srv/overmind-data/agent-home/.claude\")"), "{text}");
-        assert!(write.contains("(subpath \"/srv/overmind-data/agent-home/.claude.json\")"), "{text}");
+        assert!(
+            write.contains("(subpath \"/srv/overmind-data/agent-home/.claude\")"),
+            "{text}"
+        );
+        assert!(
+            write.contains("(subpath \"/srv/overmind-data/agent-home/.claude.json\")"),
+            "{text}"
+        );
         // And Keychains is never granted:
         assert!(!read.contains("Keychains"), "{text}");
         assert!(!write.contains("Keychains"), "{text}");
