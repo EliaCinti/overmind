@@ -352,7 +352,7 @@ async fn audit_kinds_and_payloads(state: &overmind_server::AppState) -> Vec<(Str
 async fn an_account_is_connected_activated_and_disconnected_without_its_secret_leaving() {
     let root = unique_root("api");
     let state = boot(&root, EnvCredentials::default()).await;
-    let app = common::claimed(overmind_server::app(state.clone()), &root).await;
+    let app = common::claimed_without_account(overmind_server::app(state.clone()), &root).await;
 
     let (s, first, raw) = send(
         &app,
@@ -423,7 +423,7 @@ async fn a_bad_account_request_is_refused() {
         EnvCredentials::default().with("ANTHROPIC_API_KEY", ENV_KEY),
     )
     .await;
-    let app = common::claimed(overmind_server::app(state.clone()), &root).await;
+    let app = common::claimed_without_account(overmind_server::app(state.clone()), &root).await;
     for body in [
         json!({ "provider": "anthropic", "kind": "key", "key": "   " }),
         json!({ "provider": "nobody", "kind": "key", "key": KEY_ONE }),
@@ -485,7 +485,9 @@ async fn instance_with_stub(
     )
     .await
     .expect("init");
-    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
+    let app =
+        common::claimed_without_account(overmind_server::app(state.clone()), &root.join("data"))
+            .await;
     (state, app, root)
 }
 

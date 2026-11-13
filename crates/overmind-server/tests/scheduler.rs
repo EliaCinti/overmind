@@ -341,11 +341,19 @@ async fn restart_recovery_resumes_orphaned_session() {
     let root = unique_root();
     std::fs::create_dir_all(&root).expect("mkdir");
     let db_url = format!("sqlite://{}", root.join("overmind.sqlite").display());
+    let script_path = root.join("stub-agent.sh");
 
     // "First server run": full org setup, then craft an orphaned session as a
     // crash mid-run would leave it (running in the DB, worktree on disk, no
     // live process).
-    let env = build_env(HAPPY_STUB, Some(db_url.clone()), |_| {}).await;
+    let env = build_env_in(
+        root.clone(),
+        script_path,
+        HAPPY_STUB,
+        Some(db_url.clone()),
+        |_| {},
+    )
+    .await;
     let agent_id = hire(&env, "Phoenix", "builder").await;
     let task_id = make_todo_task(&env, "Survives restarts").await;
 

@@ -69,8 +69,13 @@ async fn probe(sandbox: bool) -> std::collections::HashMap<String, String> {
 }
 
 async fn probe_with(sandbox: bool, stub: &str) -> std::collections::HashMap<String, String> {
-    let root = std::env::temp_dir().join(format!("overmind-sb-{}", uuid::Uuid::now_v7().simple()));
-    probe_at(sandbox, stub, root.join("data")).await
+    let root = std::path::PathBuf::from(format!(
+        "target/overmind-sb-{}",
+        uuid::Uuid::now_v7().simple()
+    ));
+    let res = probe_at(sandbox, stub, root.join("data")).await;
+    let _ = std::fs::remove_dir_all(&root);
+    res
 }
 
 async fn probe_at(
