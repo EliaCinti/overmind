@@ -33,10 +33,11 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 >
 > **Now — M34, through the accounts.** [ADR-0051](adr/0051-an-account-is-connected-not-configured.md)
 > and [the plan of 28 Oct](plans/2026-10-28-more-than-one-mind.md) turn slice 4
-> into a store of accounts and a panel to connect them. The agent's own home on
-> the native instance comes with the panel ([ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md)),
-> which closes the last hole the cage states: `~/.claude`, writable today. Then
-> slice 5 (the catalogue), Codex, Google.
+> into a store of accounts and a panel to connect them. Step 4 (Accounts panel
+> UI + native agent private home under `<data_dir>/agent-home`) is complete
+> ([ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md) decision 6),
+> closing the `~/.claude` write hole on native instances. Next is slice 5 (the
+> catalogue / models), then Codex and Google.
 >
 > **Then — M35, then M36b**, in the order ADR-0050 fixed: the check before the
 > triggers.
@@ -98,7 +99,7 @@ Small, and it touches the cage's command construction, so it wants its own chang
 - `token_path` was one fixed filename with no provider component, and `backup.rs` had the same fixed shape: credentials now live in `credentials/<provider>/<id>/secret`, and archive format 2 seals all accounts in `secrets/accounts.enc`;
 - `find_token` anchored on `sk-ant-` and `scrub_secrets` on `sk-ant`: credential extraction moved into each provider, and redaction is by value (`secrets::scrub`) registered in `secrets::register`;
 - `clock_skew_secs` hardcoded `api.anthropic.com`: now judged against the provider's own clock reference URL;
-- `adapter_paths()` read the *server's* `HOME`: now reads the agent's home where configured (`/home/agent` in the image);
+- `adapter_paths()` read the *server's* `HOME`: now reads the agent's home where configured (`/home/agent` in the image), and defaults to `<data_dir>/agent-home` on native instances (closed in M34 step 4);
 - `GET /api/claude-auth` re-ran the probe on every poll: probe runs once at link time (`accounts::link`), and polling reads cached state.
 
 Also closed from NEXT's list: a failed respawn drops the killed flow from the slot; the 300 ms sleep is taken with the lock released; abandoned flows are stopped on poll after ten minutes; the child process is reaped outside the lock; unreadable secrets return `AccountError` rather than being swallowed; `sandbox.rs:421`'s doc comment restored to `command()`.

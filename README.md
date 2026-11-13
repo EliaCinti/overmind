@@ -303,12 +303,12 @@ docker logs -f overmind              # what it is doing, who pays, the version
 # first. Offline, plain `docker compose up -d` starts the image you have.
 # (Building from source is the developer's path — see "From source".)
 
-# OR: pay with a Claude subscription — sign in from the product (the notice
-# above the first screen walks you through it), or once from the shell:
-docker compose exec --user agent overmind claude setup-token
+# OR: connect an account (subscription or API key) from the Accounts panel
+# in the web app — the notice above the page walks you through it, or click
+# Accounts in the top bar.
 ```
 
-Both at once — a key exported in your shell *and* a claude.ai login (the usual state of a developer's machine, and of Overmind run natively)? The key wins and your plan sits unused. Overmind says so at the top of every page and offers **Let the plan pay**: one click keeps the key out of the agents' environment, the CLI is asked again who pays, and the org chart reads *Covered by a Max subscription*. Refused with the reason if the key lives somewhere the environment does not reach ([ADR-0037](docs/adr/0037-who-pays-is-asked.md)).
+Both at once — a key exported in your shell *and* a subscription? You can manage both from the Accounts panel and choose which one is active per provider ([ADR-0051](docs/adr/0051-an-account-is-connected-not-configured.md)). Running natively, agents run in their own dedicated home under `<data_dir>/agent-home` and never touch your host's credentials.
 
 Open the browser, **create the owner account** — the first run offers exactly that, and asks for the setup code you just read. Then found a company and talk to its CEO. Every company gets its own brain, on by default, that already knows who the company is.
 
@@ -469,7 +469,7 @@ Every setting is optional; the defaults are the working path.
 | `OVERMIND_SANDBOX_ALLOW` | Colon-separated extra writable paths, to fit a toolchain without turning the cage off. A path that is a link is not granted: name the real place |
 | `OVERMIND_SANDBOX_READ` | Colon-separated extra paths the cage may read and never write. Since [ADR-0053](docs/adr/0053-the-cage-grants-nothing-the-host-runs.md) the cage grants nothing under `~/.config` and only the CLI's own install under `~/.local`: a toolchain that needs more names it here, or in `OVERMIND_SANDBOX_ALLOW` if it has to write. A path under a writable grant stays writable |
 | `OVERMIND_AGENT_UID` / `OVERMIND_AGENT_GID` | Unprivileged uid/gid agent work runs as (the image uses `10001`). Earlier versions advised setting your own `id -u` so `code` tasks could write mounted repos; a run now works in a clone of its own, so leave it |
-| `OVERMIND_AGENT_HOME` | The agent's own writable `HOME` (the image: `/home/agent`) |
+| `OVERMIND_AGENT_HOME` | The agent's own writable `HOME` (the image: `/home/agent`; native default: `<data_dir>/agent-home`) |
 | `OVERMIND_REPOS_DIR` | Where mounted repositories live, so a wrong workspace path gets an answer naming what is visible (the image: `/repos`) |
 | `OVERMIND_ECONOMY` | `key` or `subscription`: declare the economy instead of detecting it |
 | `OVERMIND_START_ESTIMATE_CENTS` | The flat reservation per start — the fallback while an agent's ledger has fewer than three runs of that kind (default `50`) |
