@@ -69,10 +69,11 @@ async fn probe(sandbox: bool) -> std::collections::HashMap<String, String> {
 }
 
 async fn probe_with(sandbox: bool, stub: &str) -> std::collections::HashMap<String, String> {
-    let root = std::path::PathBuf::from(format!(
+    let root = std::path::absolute(format!(
         "target/overmind-sb-{}",
         uuid::Uuid::now_v7().simple()
-    ));
+    ))
+    .expect("absolute root");
     let res = probe_at(sandbox, stub, root.join("data")).await;
     let _ = std::fs::remove_dir_all(&root);
     res
