@@ -14,6 +14,8 @@ import { Dialog } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Input } from "./ui/primitives";
 import { useT } from "../lib/i18n";
+import { cn } from "../lib/utils";
+import { notifyAccountActivated } from "../lib/events";
 
 const KNOWN_PROVIDERS = ["anthropic", "openai", "google"] as const;
 
@@ -90,7 +92,10 @@ export function AccountsDialog({
     }
     load();
     if (initialProvider) {
-      // If initialProvider is specified, we can pre-focus or start connect
+      setTimeout(() => {
+        const el = document.getElementById(`provider-section-${initialProvider}`);
+        el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }, 100);
     }
   }, [open, initialProvider]);
 
@@ -132,6 +137,7 @@ export function AccountsDialog({
           }
           await load();
           onAccountsChanged?.();
+          notifyAccountActivated(s.account?.provider ?? "anthropic");
         } else if (s.state === "failed") {
           setSignInFlow({ step: "failed", tail: s.tail });
           if (pollingRef.current) {
@@ -159,6 +165,7 @@ export function AccountsDialog({
       await api.activateAccount(account.id);
       await load();
       onAccountsChanged?.();
+      notifyAccountActivated(account.provider);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -197,6 +204,7 @@ export function AccountsDialog({
       setApiKey("");
       await load();
       onAccountsChanged?.();
+      notifyAccountActivated(provider);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -282,7 +290,11 @@ export function AccountsDialog({
               return (
                 <section
                   key={vendor}
-                  className="rounded-2xl border border-border/70 bg-card/60 p-4 shadow-sm"
+                  id={`provider-section-${vendor}`}
+                  className={cn(
+                    "rounded-2xl border border-border/70 bg-card/60 p-4 shadow-sm transition-all",
+                    initialProvider === vendor && "ring-2 ring-primary/40",
+                  )}
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-3">
                     <div className="flex items-center gap-2.5">

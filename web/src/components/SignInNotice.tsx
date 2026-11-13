@@ -18,7 +18,6 @@ export function SignInNotice({
   onOpenAccounts,
 }: {
   economy: Economy | null;
-  onSignedIn?: () => void;
   onOpenAccounts?: () => void;
 }) {
   const t = useT();
@@ -64,9 +63,6 @@ export function SignInNotice({
               <code className="mt-1 block overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-[11px]">
                 export ANTHROPIC_API_KEY=sk-ant-…
               </code>
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {t("economy.notSignedInPlanHost")}
-              </p>
             </details>
           </div>
         </div>

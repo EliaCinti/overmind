@@ -17,7 +17,6 @@ export function PayerNotice({
   onOpenAccounts,
 }: {
   economy: Economy | null;
-  onChanged?: () => void;
   onOpenAccounts?: () => void;
 }) {
   const t = useT();

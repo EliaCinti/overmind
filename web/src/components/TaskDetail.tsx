@@ -102,7 +102,7 @@ function Inner({
     kind: string;
     agent_id?: string;
     provider?: string;
-    retry: () => void;
+    retry?: () => void;
   } | null>(null);
   const [pickAgent, setPickAgent] = useState(false);
 
@@ -192,13 +192,30 @@ function Inner({
       try {
         await api.patchAgentTraits(agentId, { multimodal: true });
         onChanged();
-        retry();
+        retry?.();
       } catch (e) {
         setError(e instanceof Error ? e.message : t("task.actionFailed"));
         setBusy(false);
       }
     }
   };
+
+  // When an account remedy is active and an account becomes active, retry the start automatically
+  useEffect(() => {
+    if (!remedy || remedy.kind !== "connect_account" || !remedy.retry) return;
+    const onAccountActivated = (e: Event) => {
+      const custom = e as CustomEvent<{ provider?: string }>;
+      const provider = custom.detail?.provider;
+      if (!provider || !remedy.provider || provider.toLowerCase() === remedy.provider.toLowerCase()) {
+        const retry = remedy.retry;
+        setRemedy(null);
+        setError(null);
+        retry?.();
+      }
+    };
+    window.addEventListener("overmind:account-activated", onAccountActivated);
+    return () => window.removeEventListener("overmind:account-activated", onAccountActivated);
+  }, [remedy]);
 
   const transition = (to: TaskStatus) => act(() => api.transitionTask(task.id, to));
 
@@ -315,9 +332,13 @@ function Inner({
                   disabled={busy}
                   onClick={() => openAccountsDialog(remedy.provider ?? "anthropic")}
                 >
-                  {t("task.remedyConnectAccount", {
-                    provider: remedy.provider ?? "Anthropic",
-                  })}
+                  {remedy.retry
+                    ? t("task.remedyConnectAccount", {
+                        provider: remedy.provider ?? "Anthropic",
+                      })
+                    : t("task.remedyConnectAccountOnly", {
+                        provider: remedy.provider ?? "Anthropic",
+                      })}
                 </Button>
               )}
             </div>

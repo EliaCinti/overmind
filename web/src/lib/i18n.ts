@@ -423,8 +423,8 @@ export const en = {
     signInFailed: "Sign-in failed. The CLI reported:",
     retry: "Try again",
     clockSkewWarning: "Your computer's clock is off by about {n} min. OAuth codes will be rejected until the system clock is synchronized.",
-    openDialog: "Open accounts",
-    manageAccounts: "Manage accounts",
+    ownerRequiredTitle: "Owner role required",
+    ownerRequiredBody: "Only the company owner can manage accounts and AI provider credentials.",
   },
   economy: {
     key: "Billed to an API key",
@@ -433,15 +433,9 @@ export const en = {
     keyOverridesLoginFix:
       "An API key takes precedence over a claude.ai login. Overmind can let the plan pay instead.",
     keyCanUsePlan: "A Claude subscription can pay instead of the key.",
-    connectPlanDoneChoosing: "Signed in. Letting the plan pay…",
     payerPlanChosen: "You chose the plan; the key is kept out of the agents' environment.",
-    letPlanPay: "Let the plan pay",
     letPlanPayBody:
       "Overmind can keep ANTHROPIC_API_KEY out of the agents' environment and ask the CLI again who pays. Nothing else changes; the choice survives a restart and can be undone from the org chart.",
-    letPlanPayWorking: "Asking the CLI who pays…",
-    letPlanPayDone: "Done. The plan pays from now on.",
-    letPlanPayDoneWithPlan: "Done. The {plan} plan pays from now on.",
-    letPlanPayFailed: "Overmind could not make the plan pay:",
     keepKey: "Keep the key",
     backToKey: "Go back to whatever is detected",
     subscription: "Covered by a subscription",
@@ -455,22 +449,8 @@ export const en = {
       "The agent CLI is not signed in, so a conversation would fail instead of answering. Give it one of these, then restart Overmind:",
     notSignedInKey: "Pay with an API key: export it where Overmind starts",
     notSignedInPlan: "Pay with a Claude subscription: sign in once, a volume keeps it",
-    notSignedInPlanHost: "Running from source instead? Sign in with: claude login",
     notSignedInAction: "Open accounts panel",
     manageAccounts: "Manage accounts",
-    connectPlan: "Connect your Claude subscription",
-    connectPlanStarting: "Starting the sign-in…",
-    connectPlanOpen: "1. Open this link and authorize:",
-    connectPlanPaste: "2. Paste the code you receive:",
-    connectPlanSubmit: "Connect",
-    connectPlanExchanging: "Checking the code…",
-    connectPlanDone: "Signed in. Your subscription is paying from now on.",
-    connectPlanFailed: "The sign-in did not complete. The CLI said:",
-    connectPlanRetry: "Try again",
-    connectPlanRejected: "The CLI did not accept that code. Use the link shown now and paste a fresh code — each one works once.",
-    connectPlanRestarting: "That code was refused — asking the CLI for a fresh link…",
-    connectPlanClockSkew:
-      "This machine's clock is about {n} min off the world's (UTC against UTC — not a timezone) and every code will be refused until it is fixed. Docker Desktop: quit and reopen it, its VM wakes from sleep with a frozen clock. Linux: enable time sync (timedatectl set-ntp true). Then try again.",
     left: "{pct}% left",
     ofCap: "{used} of {cap}",
     approxOfCap: "≈{used} of {cap}",
@@ -544,6 +524,7 @@ export const en = {
     startWithAgent: "Start with agent",
     remedyGrantMultimodal: "Characterize {name} for visual work and start",
     remedyConnectAccount: "Connect {provider} account and start",
+    remedyConnectAccountOnly: "Connect {provider} account",
     moveTo: "Move to {status}",
     terminal: "Terminal state — no moves.",
     noActiveAgents: "No active agents — hire one first.",
@@ -1082,8 +1063,8 @@ export const it: Dictionary = {
     signInFailed: "Accesso non riuscito. Il CLI ha riportato:",
     retry: "Riprova",
     clockSkewWarning: "L'orologio del computer differisce di circa {n} min. I codici OAuth saranno rifiutati finché l'orologio di sistema non sarà sincronizzato.",
-    openDialog: "Apri account",
-    manageAccounts: "Gestisci account",
+    ownerRequiredTitle: "Ruolo di proprietario richiesto",
+    ownerRequiredBody: "Solo il proprietario dell'azienda può gestire gli account e le credenziali dei provider AI.",
   },
   economy: {
     key: "Addebitato su una chiave API",
@@ -1092,15 +1073,9 @@ export const it: Dictionary = {
     keyOverridesLoginFix:
       "Una chiave API ha la precedenza su un login claude.ai. Overmind può far pagare il piano al suo posto.",
     keyCanUsePlan: "Al posto della chiave può pagare un abbonamento Claude.",
-    connectPlanDoneChoosing: "Accesso eseguito. Faccio pagare il piano…",
     payerPlanChosen: "Hai scelto il piano: la chiave resta fuori dall'ambiente degli agenti.",
-    letPlanPay: "Fai pagare il piano",
     letPlanPayBody:
       "Overmind può tenere ANTHROPIC_API_KEY fuori dall'ambiente degli agenti e richiedere alla CLI chi paga. Non cambia altro; la scelta sopravvive a un riavvio e si annulla dall'organico.",
-    letPlanPayWorking: "Chiedo alla CLI chi paga…",
-    letPlanPayDone: "Fatto. Da ora paga il piano.",
-    letPlanPayDoneWithPlan: "Fatto. Da ora paga il piano {plan}.",
-    letPlanPayFailed: "Overmind non è riuscito a far pagare il piano:",
     keepKey: "Tieni la chiave",
     backToKey: "Torna a quello che viene rilevato",
     subscription: "Coperto da un abbonamento",
@@ -1114,22 +1089,8 @@ export const it: Dictionary = {
       "La CLI degli agenti non è autenticata: una conversazione fallirebbe invece di rispondere. Dalle una di queste credenziali, poi riavvia Overmind:",
     notSignedInKey: "Paga con una chiave API: esportala dove parte Overmind",
     notSignedInPlan: "Paga con un abbonamento Claude: accedi una volta, un volume lo conserva",
-    notSignedInPlanHost: "Esegui dai sorgenti? Accedi con: claude login",
     notSignedInAction: "Apri pannello account",
     manageAccounts: "Gestisci account",
-    connectPlan: "Collega il tuo abbonamento Claude",
-    connectPlanStarting: "Avvio dell'accesso…",
-    connectPlanOpen: "1. Apri questo link e autorizza:",
-    connectPlanPaste: "2. Incolla qui il codice che ricevi:",
-    connectPlanSubmit: "Collega",
-    connectPlanExchanging: "Verifica del codice…",
-    connectPlanDone: "Accesso riuscito. Da ora paga il tuo abbonamento.",
-    connectPlanFailed: "L'accesso non è andato a buon fine. La CLI ha detto:",
-    connectPlanRetry: "Riprova",
-    connectPlanRejected: "La CLI non ha accettato il codice. Usa il link mostrato adesso e incolla un codice nuovo — ognuno vale una volta sola.",
-    connectPlanRestarting: "Il codice è stato rifiutato — chiedo alla CLI un link nuovo…",
-    connectPlanClockSkew:
-      "L'orologio di questa macchina è sballato di circa {n} min rispetto al mondo (UTC contro UTC — non è il fuso orario) e ogni codice verrà rifiutato finché non viene corretto. Docker Desktop: chiudilo e riaprilo, la sua VM si sveglia dallo sleep con l'orologio fermo. Linux: attiva la sincronizzazione (timedatectl set-ntp true). Poi riprova.",
     left: "{pct}% rimasto",
     ofCap: "{used} di {cap}",
     approxOfCap: "≈{used} di {cap}",
@@ -1204,6 +1165,7 @@ export const it: Dictionary = {
     startWithAgent: "Avvia con un agente",
     remedyGrantMultimodal: "Caratterizza {name} per il visivo e avvia",
     remedyConnectAccount: "Collega account {provider} e avvia",
+    remedyConnectAccountOnly: "Collega account {provider}",
     // Not "Sposta in {status}": with "In corso" and "In revisione" that stacks
     // two prepositions — "Sposta in In corso". The arrow says the same thing.
     moveTo: "Sposta → {status}",
@@ -1348,7 +1310,7 @@ export const it: Dictionary = {
   },
 };
 
-const DICTIONARIES: Record<LanguageCode, Dictionary> = { en, it };
+export const DICTIONARIES: Record<LanguageCode, Dictionary> = { en, it };
 
 /** `t("org.tellTheIdea", { ceo: "Aria" })` */
 export type Translate = (key: TranslationKey, vars?: Record<string, string | number>) => string;
