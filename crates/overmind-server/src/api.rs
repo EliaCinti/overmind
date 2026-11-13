@@ -1081,6 +1081,7 @@ impl From<crate::ceo::CeoError> for ApiError {
         match e {
             CeoError::NotFound(what) => ApiError::NotFound(what),
             CeoError::Invalid(msg) => ApiError::Invalid(msg),
+            CeoError::Remediable { message, remedy } => ApiError::Remediable { message, remedy },
             // Over budget is a conflict with the world's current state, not a
             // malformed request — the same shape as a refused task checkout.
             CeoError::OverBudget(check) => ApiError::Conflict(format!(
@@ -1743,32 +1744,27 @@ async fn hire_agent(
     Path(company_id): Path<String>,
     Json(req): Json<HireAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // ADR-0051 decision 4: at hire, an agent cannot be hired if the provider
-    // has no active account. Refused with connect_account so the remedy opens the panel.
-    let provider = crate::provider::current();
-    if let Err(e) = crate::accounts::for_spawn(&state, provider).await {
-        if let crate::accounts::AccountError::NoActiveAccount(vendor) = e {
-            return Err(ApiError::Remediable {
-                message: format!(
-                    "no active account for provider {vendor} (connect one from the accounts panel)"
-                ),
-                remedy: json!({
-                    "kind": "connect_account",
-                    "provider": vendor,
-                }),
-            });
-        }
-        return Err(ApiError::from(e));
-    }
-
-    let mut tx = state.write_tx().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&state.pool)
         .await?;
     if company.is_none() {
         return Err(ApiError::NotFound("company"));
     }
+
+    // ADR-0051 decision 4: at hire, an agent cannot be hired if the provider
+    // has no active account. Refused with connect_account so the remedy opens the panel.
+    let provider = crate::provider::current();
+    if crate::accounts::active(&state.pool, provider.vendor())
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .is_none()
+    {
+        return Err(ApiError::from(
+            crate::accounts::AccountError::NoActiveAccount(provider.vendor().to_string()),
+        ));
+    }
+    let mut tx = state.write_tx().await?;
     let hired = hire(&mut tx, &state.config.agent_tools, &company_id, &req).await?;
     tx.commit().await?;
     state.notify(&company_id);

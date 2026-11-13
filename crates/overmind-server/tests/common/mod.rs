@@ -107,7 +107,14 @@ pub async fn claimed(app: axum::Router, data_dir: &std::path::Path) -> axum::Rou
             .to_string(),
         ))
         .expect("build account request");
-    let _ = tower::ServiceExt::oneshot(app.clone(), request).await;
+    let response = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .expect("send account request");
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "claimed() must connect an active test account"
+    );
     app
 }
 

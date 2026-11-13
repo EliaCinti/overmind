@@ -23,6 +23,11 @@ pub enum CeoError {
     NotFound(&'static str),
     #[error("{0}")]
     Invalid(String),
+    #[error("{message}")]
+    Remediable {
+        message: String,
+        remedy: serde_json::Value,
+    },
     /// The agent's monthly cap will not cover this turn (ADR-0022). Carries the
     /// numbers so the refusal can say what it is refusing on.
     #[error("monthly budget reached")]
@@ -281,6 +286,22 @@ pub async fn post_user_message(
 ) -> Result<String, CeoError> {
     if content.trim().is_empty() && attachment_ids.is_empty() {
         return Err(CeoError::Invalid("message must not be empty".into()));
+    }
+    // ADR-0051 decision 4: check active account before launching the turn
+    let provider = crate::provider::current();
+    if let Err(e) = crate::accounts::for_spawn(state, provider).await {
+        if let crate::accounts::AccountError::NoActiveAccount(vendor) = e {
+            return Err(CeoError::Remediable {
+                message: format!(
+                    "no active account for provider {vendor} (connect one from the accounts panel)"
+                ),
+                remedy: serde_json::json!({
+                    "kind": "connect_account",
+                    "provider": vendor,
+                }),
+            });
+        }
+        return Err(CeoError::Invalid(e.to_string()));
     }
     let conversation_id = get_or_create_conversation(state, company_id, agent_id).await?;
     let agent = agent_id.to_string();
@@ -1455,29 +1476,42 @@ pub(crate) async fn run_adapter(
     // not this turn's own placeholder counted against itself.
     let ceiling = check.headroom();
     // Who pays for the turn, decided once, before it starts (ADR-0051).
-    let (outcome, account_id) =
-        match crate::accounts::for_spawn(state, crate::provider::current()).await {
-            Ok(creds) => (
-                spawn_adapter(
-                    state,
-                    turn.activity_key,
-                    cwd,
-                    prompt,
-                    traits,
-                    memory_context,
-                    ceiling,
-                    &creds,
-                )
-                .await,
-                creds.account_id,
-            ),
-            Err(e) => (
-                Err(CeoError::Invalid(format!(
-                    "the active account cannot be read: {e}"
-                ))),
-                None,
-            ),
-        };
+    let (outcome, account_id) = match crate::accounts::for_spawn(state, crate::provider::current())
+        .await
+    {
+        Ok(creds) => (
+            spawn_adapter(
+                state,
+                turn.activity_key,
+                cwd,
+                prompt,
+                traits,
+                memory_context,
+                ceiling,
+                &creds,
+            )
+            .await,
+            creds.account_id,
+        ),
+        Err(crate::accounts::AccountError::NoActiveAccount(vendor)) => (
+            Err(CeoError::Remediable {
+                message: format!(
+                    "no active account for provider {vendor} (connect one from the accounts panel)"
+                ),
+                remedy: serde_json::json!({
+                    "kind": "connect_account",
+                    "provider": vendor,
+                }),
+            }),
+            None,
+        ),
+        Err(e) => (
+            Err(CeoError::Invalid(format!(
+                "the active account cannot be read: {e}"
+            ))),
+            None,
+        ),
+    };
 
     // Whatever happened, the money is spent and the hold must go: a reservation
     // that outlives its turn is a leak only a restart would clear.

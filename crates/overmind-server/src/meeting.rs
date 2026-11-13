@@ -282,6 +282,22 @@ pub async fn convene(
     if topic.is_empty() {
         return Err(CeoError::Invalid("a meeting needs a topic".into()));
     }
+    // ADR-0051 decision 4: check active account before convening
+    let provider = crate::provider::current();
+    if let Err(e) = crate::accounts::for_spawn(state, provider).await {
+        if let crate::accounts::AccountError::NoActiveAccount(vendor) = e {
+            return Err(CeoError::Remediable {
+                message: format!(
+                    "no active account for provider {vendor} (connect one from the accounts panel)"
+                ),
+                remedy: serde_json::json!({
+                    "kind": "connect_account",
+                    "provider": vendor,
+                }),
+            });
+        }
+        return Err(CeoError::Invalid(e.to_string()));
+    }
     let mut seen = std::collections::HashSet::new();
     let participants: Vec<String> = participant_ids
         .iter()
