@@ -428,7 +428,10 @@ export interface AuditEvent {
 
 /** A machine-readable repair riding on a refusal (ADR-0038 addendum): the
  *  interface offers it as a button; the user approves; Overmind acts. */
-export type Remedy = { kind: "grant_multimodal"; agent_id: string } | { kind: string };
+export type Remedy =
+  | { kind: "grant_multimodal"; agent_id: string }
+  | { kind: "connect_account"; provider: string }
+  | { kind: string; [key: string]: unknown };
 
 export class ApiError extends Error {
   status: number;
@@ -550,6 +553,82 @@ export interface StagedRestore {
   restarting: boolean;
 }
 
+/** How an account pays (ADR-0051). */
+export type AccountKind = "subscription" | "key";
+
+/** Where the secret lives. */
+export type AccountSource = "stored" | "environment";
+
+/** One account, as anybody but an agent may see it. */
+export interface Account {
+  id: string;
+  provider: string;
+  kind: AccountKind;
+  source: AccountSource;
+  /** What the provider's own probe says the account is, or "unknown". */
+  label: string;
+  active: boolean;
+  /** The last four characters of a key, or null for a subscription. */
+  last_four: string | null;
+  created_at: string;
+}
+
+export type SignInShape = "paste_back" | "key" | "unavailable";
+
+export interface ProviderKindInfo {
+  shape: SignInShape;
+  reason?: string;
+}
+
+export interface ProviderInfo {
+  provider: string;
+  kinds: {
+    subscription: ProviderKindInfo;
+    key: ProviderKindInfo;
+    [kind: string]: ProviderKindInfo;
+  };
+}
+
+export interface AccountsResponse {
+  accounts: Account[];
+  providers: ProviderInfo[];
+}
+
+export interface DisconnectAccountResponse {
+  disconnected: string;
+  /** A subscription's token stays valid until revoked at the provider's site. */
+  still_valid_at_provider: boolean;
+}
+
+export interface BeginSignInResponse {
+  shape: "paste_back" | "key";
+}
+
+export type SignInFlowState =
+  | "idle"
+  | "starting"
+  | "url_ready"
+  | "exchanging"
+  | "code_rejected"
+  | "restarting"
+  | "done"
+  | "failed";
+
+export type SignInStatus =
+  | { state: "idle" }
+  | { state: "starting"; seconds?: number; tail?: string }
+  | { state: "exchanging"; tail?: string }
+  | { state: "url_ready"; url: string; tail?: string; rejected?: string | null }
+  | { state: "code_rejected"; tail?: string; url?: string | null }
+  | { state: "restarting"; tail?: string }
+  | { state: "done"; account?: Account; economy?: Economy }
+  | { state: "failed"; tail: string };
+
+export type SignInStatusResponse = SignInStatus & {
+  provider?: string;
+  clock_skew_secs?: number | null;
+};
+
 export const api = {
   /** Server identity, and how it pays. */
   /** Backup and restore (M31, ADR-0044): the owner's verbs, both ways. */
@@ -622,6 +701,22 @@ export const api = {
   authLogin: (name: string, password: string) =>
     req<{ state: "in"; name: string }>("POST", "/auth/login", { name, password }),
   authLogout: () => req<{ state: "locked" }>("POST", "/auth/logout"),
+
+  /** The accounts Overmind holds (ADR-0051). Owner-only throughout. */
+  listAccounts: () => req<AccountsResponse>("GET", "/accounts"),
+  connectAccount: (provider: string, key: string) =>
+    req<Account>("POST", "/accounts", { provider, kind: "key", key }),
+  activateAccount: (id: string) =>
+    req<Account>("POST", `/accounts/${encodeURIComponent(id)}/activate`),
+  disconnectAccount: (id: string) =>
+    req<DisconnectAccountResponse>("DELETE", `/accounts/${encodeURIComponent(id)}`),
+
+  /** Begin connecting an account in the shape its provider says (ADR-0051). */
+  signInBegin: (provider: string, kind: AccountKind) =>
+    req<BeginSignInResponse>("POST", "/accounts/sign-in", { provider, kind }),
+  signInStatus: () => req<SignInStatusResponse>("GET", "/accounts/sign-in"),
+  signInCode: (code: string) =>
+    req<void>("POST", "/accounts/sign-in/code", { code }),
 
   /** The subscription sign-in flow, orchestrated by the server (M23). */
   claudeAuthStart: () => req<void>("POST", "/claude-auth/start"),
