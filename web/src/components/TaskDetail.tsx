@@ -19,11 +19,13 @@ import { Deliverables } from "./Deliverables";
 import { formatBytes, iconFor } from "../lib/files";
 import { useFormats, useT, type TranslationKey } from "../lib/i18n";
 import { cn } from "../lib/utils";
+import { openAccountsDialog } from "../lib/events";
 
 
 /** Why a start was refused, as the `task.stalled` packet records it, in words. */
 const REFUSAL_KEY: Record<string, TranslationKey> = {
   "remediable:grant_multimodal": "stallRefusal.grant_multimodal",
+  "remediable:connect_account": "stallRefusal.connect_account",
   invalid: "stallRefusal.invalid",
   conflict: "stallRefusal.conflict",
 };
@@ -96,9 +98,12 @@ function Inner({
   const [error, setError] = useState<string | null>(null);
   /** A refusal that arrived with its repair (ADR-0038 addendum): the button
    *  applies it and retries what was refused. */
-  const [remedy, setRemedy] = useState<{ kind: string; agent_id?: string; retry: () => void } | null>(
-    null,
-  );
+  const [remedy, setRemedy] = useState<{
+    kind: string;
+    agent_id?: string;
+    provider?: string;
+    retry: () => void;
+  } | null>(null);
   const [pickAgent, setPickAgent] = useState(false);
 
   // A knowledge task delivers documents instead of a diff (ADR-0017) — but
@@ -158,7 +163,10 @@ function Inner({
     } catch (e) {
       setError(e instanceof Error ? e.message : t("task.actionFailed"));
       if (e instanceof ApiError && e.remedy?.kind && retry) {
-        setRemedy({ ...(e.remedy as { kind: string; agent_id?: string }), retry });
+        setRemedy({
+          ...(e.remedy as { kind: string; agent_id?: string; provider?: string }),
+          retry,
+        });
       }
     } finally {
       setBusy(false);
@@ -297,6 +305,18 @@ function Inner({
                 <Button size="sm" variant="primary" disabled={busy} onClick={applyRemedy}>
                   {t("task.remedyGrantMultimodal", {
                     name: agents.find((a) => a.id === remedy.agent_id)?.name ?? t("chat.theAgent"),
+                  })}
+                </Button>
+              )}
+              {remedy?.kind === "connect_account" && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={busy}
+                  onClick={() => openAccountsDialog(remedy.provider ?? "anthropic")}
+                >
+                  {t("task.remedyConnectAccount", {
+                    provider: remedy.provider ?? "Anthropic",
                   })}
                 </Button>
               )}

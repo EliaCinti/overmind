@@ -37,6 +37,7 @@ import { Onboarding } from "./components/Onboarding";
 import { Door } from "./components/Door";
 import { InviteDialog } from "./components/InviteDialog";
 import { BackupDialog } from "./components/BackupDialog";
+import { AccountsDialog } from "./components/AccountsDialog";
 import { DeleteCompanyDialog } from "./components/DeleteCompanyDialog";
 import { MembersDialog } from "./components/MembersDialog";
 import { SignInNotice } from "./components/SignInNotice";
@@ -73,6 +74,8 @@ export default function App() {
   const [isOwner, setIsOwner] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const [accountsInitialProvider, setAccountsInitialProvider] = useState<string | undefined>();
   const [deleteCompanyOpen, setDeleteCompanyOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   /** The signed-in name (M25): the members list says "you" beside it. */
@@ -152,6 +155,17 @@ export default function App() {
     const onUnauthorized = () => setGate("locked");
     window.addEventListener("overmind:unauthorized", onUnauthorized);
     return () => window.removeEventListener("overmind:unauthorized", onUnauthorized);
+  }, []);
+
+  // Accounts dialog can be opened by remedies from anywhere in the app (ADR-0051).
+  useEffect(() => {
+    const onOpenAccounts = (e: Event) => {
+      const custom = e as CustomEvent<{ provider?: string }>;
+      setAccountsInitialProvider(custom.detail?.provider);
+      setAccountsOpen(true);
+    };
+    window.addEventListener("overmind:open-accounts", onOpenAccounts);
+    return () => window.removeEventListener("overmind:open-accounts", onOpenAccounts);
   }, []);
 
   // The door first, everything else after: the boot fetches run only once a
@@ -407,11 +421,25 @@ export default function App() {
           }}
           onInvite={isOwner ? () => setInviteOpen(true) : undefined}
           onBackup={isOwner ? () => setBackupOpen(true) : undefined}
+          onAccounts={
+            isOwner
+              ? () => {
+                  setAccountsInitialProvider(undefined);
+                  setAccountsOpen(true);
+                }
+              : undefined
+          }
           onDeleteCompany={companyId ? () => setDeleteCompanyOpen(true) : undefined}
           onMembers={companyId ? () => setMembersOpen(true) : undefined}
         />
         <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
         <BackupDialog open={backupOpen} onOpenChange={setBackupOpen} />
+        <AccountsDialog
+          open={accountsOpen}
+          onOpenChange={setAccountsOpen}
+          initialProvider={accountsInitialProvider}
+          onAccountsChanged={refreshHealth}
+        />
         {companyId && (
           <MembersDialog
             open={membersOpen}
@@ -430,8 +458,22 @@ export default function App() {
           />
         )}
 
-        <SignInNotice economy={economy} onSignedIn={refreshHealth} />
-        <PayerNotice economy={economy} onChanged={refreshHealth} />
+        <SignInNotice
+          economy={economy}
+          onSignedIn={refreshHealth}
+          onOpenAccounts={() => {
+            setAccountsInitialProvider("anthropic");
+            setAccountsOpen(true);
+          }}
+        />
+        <PayerNotice
+          economy={economy}
+          onChanged={refreshHealth}
+          onOpenAccounts={() => {
+            setAccountsInitialProvider("anthropic");
+            setAccountsOpen(true);
+          }}
+        />
         {!companyId ? (
           <Onboarding defaultLanguage={language} onDone={afterCompanyCreated} />
         ) : firstStep && ceo ? (

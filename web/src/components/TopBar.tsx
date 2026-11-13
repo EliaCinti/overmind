@@ -16,6 +16,7 @@ import {
   Trash2,
   Users,
   Archive,
+  KeyRound,
 } from "lucide-react";
 import type { Company, LanguageCode, View } from "../lib/api";
 import { api } from "../lib/api";
@@ -52,6 +53,7 @@ export function TopBar({
   onLogout,
   onInvite,
   onBackup,
+  onAccounts,
   onDeleteCompany,
   onMembers,
 }: {
@@ -81,6 +83,8 @@ export function TopBar({
   onLogout?: () => void;
   /** Backup and restore (M31): present only for the owner. */
   onBackup?: () => void;
+  /** Accounts panel (M34, ADR-0051): present only for the owner. */
+  onAccounts?: () => void;
   /** The invite surface (M25): present only for the owner. */
   onInvite?: () => void;
   /** Absent while no company is selected: nothing to delete (ADR-0034). */
@@ -203,6 +207,17 @@ export function TopBar({
         {onBackup && (
           <Button variant="ghost" size="icon" onClick={onBackup} aria-label={t("backup.title")}>
             <Archive className="h-4.5 w-4.5" />
+          </Button>
+        )}
+        {onAccounts && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onAccounts}
+            aria-label={t("accounts.title")}
+            title={t("accounts.title")}
+          >
+            <KeyRound className="h-4.5 w-4.5" />
           </Button>
         )}
         {onLogout && (
