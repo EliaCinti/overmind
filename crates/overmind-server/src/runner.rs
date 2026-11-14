@@ -1249,21 +1249,16 @@ pub async fn start_task(
 
     // Account gate (ADR-0051 decision 4). Without an active account for this
     // provider, the CLI would fall back on the host's login. Refuse the start
-    // up front with a remedy that opens the accounts panel.
-    let provider = crate::provider::current();
-    if let Err(e) = crate::accounts::for_spawn(state, provider).await {
-        return Err(match e {
-            crate::accounts::AccountError::NoActiveAccount(vendor) => RunnerError::Remediable {
-                message: format!(
-                    "no active account for provider {vendor} (connect one from the accounts panel)"
-                ),
-                remedy: serde_json::json!({
-                    "kind": "connect_account",
-                    "provider": vendor,
-                }),
-            },
-            other => RunnerError::Blocked(other.to_string()),
-        });
+    // up front with a remedy that opens the accounts panel. The row is enough
+    // here: the secret is read once, at the spawn, where a failure to read it
+    // has its own outcome.
+    let vendor = crate::provider::current().vendor();
+    if crate::accounts::active(&state.pool, vendor)
+        .await?
+        .is_none()
+    {
+        let (message, remedy) = crate::accounts::no_payer(state, &company_id, vendor).await;
+        return Err(RunnerError::Remediable { message, remedy });
     }
 
     // A `code` run needs a git repo to branch a worktree from; a `knowledge`
@@ -2263,15 +2258,9 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     let creds = match crate::accounts::for_spawn(&ctx.state, crate::provider::current()).await {
         Ok(c) => c,
         Err(crate::accounts::AccountError::NoActiveAccount(vendor)) => {
-            return Outcome::Remediable {
-                error: format!(
-                    "no active account for provider {vendor} (connect one from the accounts panel)"
-                ),
-                remedy: serde_json::json!({
-                    "kind": "connect_account",
-                    "provider": vendor,
-                }),
-            };
+            let (error, remedy) =
+                crate::accounts::no_payer(&ctx.state, &ctx.company_id, &vendor).await;
+            return Outcome::Remediable { error, remedy };
         }
         Err(e) => {
             return Outcome::Infra {

@@ -1756,13 +1756,12 @@ async fn hire_agent(
     // has no active account. Refused with connect_account so the remedy opens the panel.
     let provider = crate::provider::current();
     if crate::accounts::active(&state.pool, provider.vendor())
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?
+        .await?
         .is_none()
     {
-        return Err(ApiError::from(
-            crate::accounts::AccountError::NoActiveAccount(provider.vendor().to_string()),
-        ));
+        let (message, remedy) =
+            crate::accounts::no_payer(&state, &company_id, provider.vendor()).await;
+        return Err(ApiError::Remediable { message, remedy });
     }
     let mut tx = state.write_tx().await?;
     let hired = hire(&mut tx, &state.config.agent_tools, &company_id, &req).await?;

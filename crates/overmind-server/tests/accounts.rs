@@ -691,6 +691,35 @@ async fn with_no_active_account_a_hire_is_refused_with_connect_account() {
     assert_eq!(body["remedy"]["provider"], "anthropic", "{raw}");
 }
 
+/// The refusal is prose the server composes for a person, so it speaks the
+/// company's language (M16) -- one sentence, the same at every entry point.
+#[tokio::test]
+async fn a_refusal_for_want_of_an_account_speaks_the_companys_language() {
+    let (_state, app, _root) = instance_with_stub("no-account-lang", "#!/bin/sh\nexit 0\n").await;
+    let (_, co, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Rossi Vini", "language": "it" })),
+    )
+    .await;
+    let company = co["id"].as_str().expect("id");
+    let (s, body, raw) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company}/agents"),
+        Some(json!({ "name": "A", "archetype": "builder", "traits": { "monthly_budget_cents": 1000 } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["remedy"]["kind"], "connect_account", "{raw}");
+    let said = body["error"].as_str().expect("error");
+    assert!(
+        said.contains("Nessun account attivo per Anthropic"),
+        "{raw}"
+    );
+}
+
 /// ADR-0051 decision 4: at start, a task cannot be started if the provider has no active account.
 #[tokio::test]
 async fn with_no_active_account_a_start_is_refused_with_connect_account() {

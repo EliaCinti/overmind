@@ -174,6 +174,26 @@ pub fn run_not_resumed(code: &str) -> String {
     }
 }
 
+/// Why nothing of this provider's can run (ADR-0051 decision 4): nobody pays.
+/// "Connect or make active", because a provider can have accounts and still
+/// nobody active -- disconnecting the active one promotes nobody.
+pub fn no_active_account(code: &str, vendor: &str) -> String {
+    let name = match vendor {
+        "anthropic" => "Anthropic",
+        "openai" => "OpenAI",
+        "google" => "Google",
+        other => other,
+    };
+    match code {
+        "it" => format!(
+            "Nessun account attivo per {name}: collegane o attivane uno dal pannello degli account."
+        ),
+        _ => format!(
+            "No active account for {name}: connect or activate one from the accounts panel."
+        ),
+    }
+}
+
 /// A run whose directory the move to `OVERMIND_RUNS_DIR` left in the data dir,
 /// where the cage cannot reach it (ADR-0054): why its diff does not open. It
 /// had ended, so what it committed came back then.

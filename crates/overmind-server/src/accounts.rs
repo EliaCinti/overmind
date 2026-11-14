@@ -613,6 +613,22 @@ pub async fn list(pool: &sqlx::SqlitePool) -> Result<Vec<Account>, sqlx::Error> 
     Ok(rows.into_iter().map(from_row).collect())
 }
 
+/// The refusal every entry point gives when `vendor` has nobody to pay
+/// (ADR-0051 decision 4): the sentence, in the company's language, and the
+/// remedy that opens the accounts panel on that provider. One place, so a
+/// start, a hire, a chat turn and a meeting cannot drift apart.
+pub async fn no_payer(
+    state: &AppState,
+    company_id: &str,
+    vendor: &str,
+) -> (String, serde_json::Value) {
+    let lang = crate::i18n::company_language(state, company_id).await;
+    (
+        crate::i18n::no_active_account(&lang, vendor),
+        serde_json::json!({ "kind": "connect_account", "provider": vendor }),
+    )
+}
+
 pub async fn active(
     pool: &sqlx::SqlitePool,
     provider: &str,

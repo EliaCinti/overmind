@@ -285,20 +285,12 @@ pub async fn convene(
     // ADR-0051 decision 4: check active account before convening
     let provider = crate::provider::current();
     if crate::accounts::active(&state.pool, provider.vendor())
-        .await
-        .map_err(|e| CeoError::Invalid(e.to_string()))?
+        .await?
         .is_none()
     {
-        return Err(CeoError::Remediable {
-            message: format!(
-                "no active account for provider {vendor} (connect one from the accounts panel)",
-                vendor = provider.vendor()
-            ),
-            remedy: serde_json::json!({
-                "kind": "connect_account",
-                "provider": provider.vendor(),
-            }),
-        });
+        let (message, remedy) =
+            crate::accounts::no_payer(state, company_id, provider.vendor()).await;
+        return Err(CeoError::Remediable { message, remedy });
     }
     let mut seen = std::collections::HashSet::new();
     let participants: Vec<String> = participant_ids
