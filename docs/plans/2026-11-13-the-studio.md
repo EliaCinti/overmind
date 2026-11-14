@@ -35,9 +35,16 @@ Four milestones, each usable on its own:
 Both are in [NEXT](../NEXT.md) already. They stop being debts here.
 
 1. **A run can read the MCP token of a run beside it** (*Debts from the
-   cage*). In a studio the token is who the pointer belongs to. Fix as
-   written there: a directory private to each run, outside its run dir.
-   Test: `a_run_cannot_read_another_runs_mcp_token`.
+   cage*). In a studio the token is who the pointer belongs to. A directory
+   private to each run, as written there, separates runs only where a cage
+   separates their paths: in the image without Landlock every run is uid
+   10001, and a directory of the same uid is no boundary. The fix has to
+   hold there too, so this PR decides between a uid per run from a pool and
+   a token that never sits where another run of the same uid can read it,
+   measured in the image before written. Test:
+   `a_run_cannot_read_another_runs_mcp_token`, run natively **and** in the
+   container smoke, because the platform without Landlock is the one where
+   it matters.
 2. **Moving a task does not stop its run** (*Debts from the attempts cap*).
    Hold and close must reach the process: the handle in `state.running` and
    the cage's process group. Test: `a_cancelled_task_stops_its_run`.
@@ -67,22 +74,36 @@ studio_files(studio_id, path, rev INTEGER, sha256, size, updated_by, updated_at,
 studio_journal(studio_id, seq, at, actor_kind CHECK (actor_kind IN ('agent','person','system','outside')),
                actor_id, session_id NULL, surface, verb, target, detail TEXT,
                prev_hash, hash, PRIMARY KEY (studio_id, seq))   -- append-only by trigger, as audit_events
-studio_claims(studio_id, target, agent_id, intent, expires_at, PRIMARY KEY (studio_id, target))
+studio_objects(studio_id, sha256, size, PRIMARY KEY (studio_id, sha256))  -- content-addressed bytes
+studio_claims(studio_id, target, holder_kind CHECK (holder_kind IN ('agent','person')), holder_id,
+              intent, expires_at, PRIMARY KEY (studio_id, target))
 studio_notes(id, studio_id, target, author_kind, author_id, body, at, seen_by TEXT)
 tasks.studio_id NULL
 ```
 
-- A task with `studio_id` set runs as its `execution_kind` says, with the
-  studio's tools added to its per-run MCP config. Its agent is enrolled as a
-  member at checkout.
+- A task with `studio_id` set is a `knowledge` task in M37: its deliverable
+  is what it did in the studio, and the studio's tools are added to its
+  per-run MCP config. A `code` task in a studio waits for M39, where a
+  studio holds a repository folder. Its agent is enrolled as a member at
+  checkout.
+- **Bytes are content-addressed.** Every version a write or an edit produces
+  is stored once under `<data>/studios/<id>/objects/<sha256>`, and the
+  journal row names the hashes before and after. That is what lets slice F
+  rebuild any revision; the 4 KiB clamp applies to the socket frame, never
+  to the journal.
 - File bytes: `<data>/studios/<id>/files/`, `0700`, server only. Paths are
   relative, normalised, walked with `O_NOFOLLOW` from a directory descriptor
   (the walk `read_own_handoff` already does). Limits: 2 MiB a text file,
   2000 files a studio, both refused by name and never truncated.
-- `colour`: an index into a fixed palette of eight, the lowest one free at
+- `color`: an index into a fixed palette of eight, the lowest one free at
   joining, kept for the studio's life.
 - The journal row's hash is the audit chain's formula over
-  `(prev_hash, seq, at, actor, surface, verb, target, detail)`. The chain
+  `(studio_id, prev_hash, seq, at, actor_kind, actor_id, session_id,
+  surface, verb, target, detail)`: everything that says who did what, where,
+  so a row cannot be moved to another studio or given to another actor
+  without breaking the hash. The genesis is the hash of
+  `(studio_id, opened_at)`, written into `journal_head` when the studio is
+  created, so no two journals start from the same value. The chain
   gets `studio.opened`, `studio.reach_changed`, `studio.held`,
   `studio.released`, `studio.taken_over`, `studio.closed{journal_head, seq}`.
   `GET /api/studios/{id}/journal/verify` recomputes it and names the first
@@ -95,10 +116,15 @@ table in `auth.rs`):
 POST /api/companies/{id}/studios        {title, goal_id?}        -> studio (reach: inside)
 GET  /api/companies/{id}/studios
 GET  /api/studios/{id}                  studio, members, files index, claims
-GET  /api/studios/{id}/files/{*path}    bytes at head, or ?rev=
+GET  /api/studios/{id}/files/{*path}    bytes at head (?rev= arrives with slice F)
 GET  /api/studios/{id}/journal?after=   rows after a sequence number, max 500
 POST /api/studios/{id}/close
 ```
+
+**Closing is final from slice A.** The `closed` row is the journal's last:
+from then on every mutating call answers `{refused: "closed"}`, so nothing
+can be appended after the head the chain records. Stopping the runs still
+attached arrives in slice E; until then they are refused, not stopped.
 
 MCP, in `mcp_server.rs`: `Caller::Run` gains `studio: Option<StudioSeat>`
 (studio id, agent id, session id, reach), resolved from the same token. Tools
@@ -111,7 +137,7 @@ listed only when the seat exists:
 | `studio_read {path, from?, to?}` | text, its `rev` | no (presence only) |
 | `studio_write {path, content, base_rev?}` | create, or replace when `base_rev` is the head | yes |
 | `studio_edit {path, old, new, base_rev}` | replace one exact occurrence | yes |
-| `studio_move {from, to}` · `studio_delete {path, base_rev}` | | yes |
+| `studio_move {from, base_rev, to}` · `studio_delete {path, base_rev}` | a move is refused if `from` changed, if either path is claimed by someone else, or if `to` exists; a claim moves with its file | yes |
 | `studio_claim {target, intent, minutes?}` · `studio_release {target}` | default 5 min, max 30 | yes |
 | `studio_note {target, text}` | 500 chars, clamped at the boundary | yes |
 
@@ -145,6 +171,9 @@ token from its per-run config):
 - `a_run_outside_the_studio_does_not_see_its_tools`
 - `a_run_cannot_reach_another_companys_studio`
 - `a_path_cannot_leave_the_studio` (`..`, absolute, a planted link)
+- `a_move_respects_claims_and_never_overwrites`
+- `a_closed_studio_refuses_every_write`
+- `a_journal_row_moved_to_another_studio_breaks_verification`
 - `a_note_cannot_forge_a_turn`
 - `the_journal_is_anchored_in_the_chain_and_a_changed_row_is_named`
 - `a_studio_run_that_touched_nothing_is_not_completed`
@@ -167,8 +196,9 @@ membership checked at the upgrade and again when the studio's members change.
 {"type":"hold","agent_id":"…","by":"…"}  {"type":"closed"}
 ```
 
-- Presence is set when a call starts and when it ends; `idle` after 20 s
-  with no call. Kept in an `AppState` map like `activity`, cleared at the
+- Presence is set when a call starts and when it ends. Between calls it is
+  `thinking` while the run's stream is still producing events (ADR-0039),
+  and `idle` only after 20 s with neither a call nor a stream event. Kept in an `AppState` map like `activity`, cleared at the
   run's end. At most ten presence frames a second per actor; the server
   keeps the latest.
 - A client that sees a gap in `seq` fetches the journal after its last
@@ -195,9 +225,10 @@ socket and a store). A sixth view beside board, org, chat, meetings, memory.
   from the structured frame (M16). It sits at the anchor: a line in the open
   file, a row of the tree when the file is not open.
 - **Motion.** A spring of 200 to 350 ms between anchors. An edit is revealed
-  as typing, at most 600 ms an action. When more than three actions wait,
-  they apply at once: the view is never more than a second behind the
-  journal. Reduced motion: pointers jump, text appears.
+  as typing, at most 600 ms an action. The budget is the rule and the pacing
+  bends to it: the view is never more than a second behind the journal, so
+  when the actions waiting would take longer than that at the planned pace,
+  their typing is shortened, and past the second they apply at once. Reduced motion: pointers jump, text appears.
 - **Simultaneity, and its real cadence.** Each agent is its own run, so the
   pointers move at the same time, independently. Each one moves at the pace
   of its agent's calls, which is seconds apart while the model thinks, not
@@ -259,13 +290,22 @@ Tests (`tests/studio_floor.rs`): `the_ceos_plan_puts_three_agents_in_one_studio`
 - **Hold.** `POST /api/studios/{id}/hold {agent_id?}` and `/release`. A held
   agent's mutating calls are refused with the reason; after five minutes
   held, the run winds down with a handoff (ADR-0050) and the task returns to
-  the queue. Holding everything sets the studio `held`.
+  `todo`. **A held agent is offered no work** while it stays held: the
+  scheduler, the CEO's `start` and the autonomy offer all skip it, so the
+  task waits with the reason instead of starting a run that is refused
+  again, and no attempt of M36a's cap is spent on a pause the owner asked
+  for. Release offers it again. Holding everything sets the studio `held`.
 - **Take over.** Editing a file as a person goes through the same write path
-  with `actor_kind: person`; a claim an agent holds on that file is released
-  and the agent is told in its digest.
+  with `actor_kind: person`. Opening a file to edit takes a claim held by
+  the person (`holder_kind: person`) for as long as the editor is open, plus
+  two minutes; an agent's claim on that file is released and the agent is
+  told in its digest, and its new claim is refused by name until the
+  person's ends.
 - **Close** stops every attached run (debt 2) and then anchors the journal.
 
 Tests: `a_held_agent_changes_nothing_and_is_told_why`,
+`a_held_agents_task_is_not_started_again_until_release`,
+`an_agent_cannot_reclaim_a_file_the_person_holds`,
 `a_long_hold_winds_the_run_down_with_a_handoff`,
 `a_persons_edit_releases_the_agents_claim_and_tells_it`,
 `closing_a_studio_stops_its_runs`,
@@ -276,8 +316,9 @@ Tests: `a_held_agent_changes_nothing_and_is_told_why`,
 A timeline under the stage, drawn from the journal: scrub to any sequence
 number and the files surface shows the studio as it was, with the pointers
 where their last action before that point was. A file at a past revision is
-rebuilt by applying the journal; keep a full copy every fifty revisions so
-this stays cheap. Read-only, and labelled as the past wherever it shows.
+the object its journal row names (slice A stores every version once, by
+hash), so nothing has to be replayed to read it. `GET …/files/{*path}?rev=`
+lands here. Objects stay for the studio's life. Read-only, and labelled as the past wherever it shows.
 
 Tests: `a_file_at_a_past_revision_is_what_the_journal_says`.
 
