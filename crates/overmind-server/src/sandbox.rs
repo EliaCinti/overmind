@@ -112,15 +112,10 @@ impl Confinement {
     /// that asked about one named mechanism would answer "no cage" on a
     /// platform that has a different one.
     pub fn is_real(&self) -> bool {
-        if self.profile.is_some() || (self.agent_user.is_some() && !self.uid_refuted) {
-            return true;
-        }
+        let held = self.profile.is_some() || (self.agent_user.is_some() && !self.uid_refuted);
         #[cfg(target_os = "linux")]
-        {
-            return self.landlock.is_some();
-        }
-        #[allow(unreachable_code)]
-        false
+        let held = held || self.landlock.is_some();
+        held
     }
 }
 
