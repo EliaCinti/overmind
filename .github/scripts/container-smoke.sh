@@ -160,6 +160,10 @@ scenario() { # label [extra docker -e args…]
     # shell unable to read its own script. The *real* adapter needs nothing,
     # because it lives in /usr; a stub bind-mounted at the root does, and so
     # would anyone's custom `OVERMIND_AGENT_CMD`.
+    #
+    # With no active account an agent is refused (ADR-0051 decision 4), so the
+    # run gets one: a key in the environment is an account at boot, active
+    # because it is the provider's first. The stub never uses it.
     docker run -d --name "$NAME" \
         -p "127.0.0.1:${PORT}:7070" \
         -v "$WORK/stub:/stub:ro" \
@@ -168,6 +172,7 @@ scenario() { # label [extra docker -e args…]
         -v "$WORK/repos:/repos" \
         -e OVERMIND_AGENT_CMD='sh /stub/agent.sh' \
         -e OVERMIND_SANDBOX_ALLOW=/stub \
+        -e ANTHROPIC_API_KEY=sk-ant-api03-ci-smoke-not-a-real-key \
         "$@" \
         "$IMAGE" >/dev/null
 
