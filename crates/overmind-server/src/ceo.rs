@@ -378,15 +378,17 @@ pub async fn post_user_message(
                     break;
                 }
                 if let Some(read_at) = last_user_read {
-                    let newer: Option<(String,)> = sqlx::query_as(
+                    let newer: Result<Option<(String,)>, sqlx::Error> = sqlx::query_as(
                         "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user' AND created_at > ? LIMIT 1",
                     )
                     .bind(&convo)
                     .bind(&read_at)
                     .fetch_optional(&state2.pool)
-                    .await
-                    .unwrap_or(None);
-                    if newer.is_none() {
+                    .await;
+                    // A turn was queued; only a clean "nothing newer" lets the
+                    // loop stop. On an error, one turn too many beats a user
+                    // message nobody answers.
+                    if matches!(newer, Ok(None)) {
                         state2.end_answering(&convo);
                         break;
                     }
