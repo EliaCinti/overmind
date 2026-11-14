@@ -582,8 +582,8 @@ async fn pay_with(
     ) {
         Some((
             "there is no plan to pay: with the key out of the way the agent CLI is not signed in, \
-             so every run would fail. Connect a Claude subscription first, then choose it",
-            Some("connect_plan"),
+             so every run would fail. Connect an account first from the accounts panel, then choose it",
+            Some("connect_account"),
         ))
     } else {
         None
@@ -595,7 +595,7 @@ async fn pay_with(
         return Err(match remedy {
             Some(kind) => ApiError::Remediable {
                 message: why.into(),
-                remedy: json!({ "kind": kind }),
+                remedy: json!({ "kind": kind, "provider": crate::provider::current().vendor() }),
             },
             None => ApiError::Conflict(why.into()),
         });
@@ -618,6 +618,10 @@ impl From<crate::accounts::AccountError> for ApiError {
         match e {
             AccountError::NotFound => ApiError::NotFound("account"),
             AccountError::FromEnvironment => ApiError::Conflict(e.to_string()),
+            AccountError::NoActiveAccount(ref provider) => ApiError::Remediable {
+                message: e.to_string(),
+                remedy: json!({ "kind": "connect_account", "provider": provider }),
+            },
             AccountError::Invalid(why) => ApiError::Invalid(why),
             AccountError::Db(e) => ApiError::Internal(e.into()),
             AccountError::Io(e) => ApiError::Internal(e.into()),
@@ -1077,6 +1081,7 @@ impl From<crate::ceo::CeoError> for ApiError {
         match e {
             CeoError::NotFound(what) => ApiError::NotFound(what),
             CeoError::Invalid(msg) => ApiError::Invalid(msg),
+            CeoError::Remediable { message, remedy } => ApiError::Remediable { message, remedy },
             // Over budget is a conflict with the world's current state, not a
             // malformed request — the same shape as a refused task checkout.
             CeoError::OverBudget(check) => ApiError::Conflict(format!(
@@ -1739,14 +1744,26 @@ async fn hire_agent(
     Path(company_id): Path<String>,
     Json(req): Json<HireAgent>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut tx = state.write_tx().await?;
     let company: Option<(String,)> = sqlx::query_as("SELECT id FROM companies WHERE id = ?")
         .bind(&company_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&state.pool)
         .await?;
     if company.is_none() {
         return Err(ApiError::NotFound("company"));
     }
+
+    // ADR-0051 decision 4: at hire, an agent cannot be hired if the provider
+    // has no active account. Refused with connect_account so the remedy opens the panel.
+    let provider = crate::provider::current();
+    if crate::accounts::active(&state.pool, provider.vendor())
+        .await?
+        .is_none()
+    {
+        let (message, remedy) =
+            crate::accounts::no_payer(&state, &company_id, provider.vendor()).await;
+        return Err(ApiError::Remediable { message, remedy });
+    }
+    let mut tx = state.write_tx().await?;
     let hired = hire(&mut tx, &state.config.agent_tools, &company_id, &req).await?;
     tx.commit().await?;
     state.notify(&company_id);

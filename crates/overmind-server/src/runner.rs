@@ -1247,6 +1247,20 @@ pub async fn start_task(
         }
     }
 
+    // Account gate (ADR-0051 decision 4). Without an active account for this
+    // provider, the CLI would fall back on the host's login. Refuse the start
+    // up front with a remedy that opens the accounts panel. The row is enough
+    // here: the secret is read once, at the spawn, where a failure to read it
+    // has its own outcome.
+    let vendor = crate::provider::current().vendor();
+    if crate::accounts::active(&state.pool, vendor)
+        .await?
+        .is_none()
+    {
+        let (message, remedy) = crate::accounts::no_payer(state, &company_id, vendor).await;
+        return Err(RunnerError::Remediable { message, remedy });
+    }
+
     // A `code` run needs a git repo to branch a worktree from; a `knowledge`
     // run (ADR-0017) works in a scratch dir and needs neither goal nor workspace.
     let workspace: Option<(String, Option<String>)> = match exec_kind {
@@ -1733,6 +1747,10 @@ enum Outcome {
     Infra {
         error: String,
         release: bool,
+    },
+    Remediable {
+        error: String,
+        remedy: serde_json::Value,
     },
 }
 
@@ -2239,6 +2257,11 @@ async fn run_process(ctx: &SessionContext, resume: bool) -> Outcome {
     // records the one it was given so its cost event can say so truthfully.
     let creds = match crate::accounts::for_spawn(&ctx.state, crate::provider::current()).await {
         Ok(c) => c,
+        Err(crate::accounts::AccountError::NoActiveAccount(vendor)) => {
+            let (error, remedy) =
+                crate::accounts::no_payer(&ctx.state, &ctx.company_id, &vendor).await;
+            return Outcome::Remediable { error, remedy };
+        }
         Err(e) => {
             return Outcome::Infra {
                 error: format!("the active account cannot be read: {e}"),
@@ -2375,6 +2398,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         cause: Option<&'static str>,
         /// Stopped short of done: the run owes a handoff (ADR-0050 §4).
         bound: Option<crate::i18n::Stop>,
+        remedy: Option<serde_json::Value>,
     }
     // A run that did what its prompt asks when it will not finish in time --
     // stopped, wrote its handoff, exited cleanly -- is not finished work: the
@@ -2394,6 +2418,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             release: true,
             cause: None,
             bound: Some(crate::i18n::Stop::HandedOff),
+            remedy: None,
         },
         Outcome::Success { output } => Final {
             session_status: "completed",
@@ -2404,6 +2429,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             release: false,
             cause: None,
             bound: None,
+            remedy: None,
         },
         Outcome::AgentFailure { output, exit_code } => Final {
             session_status: "failed",
@@ -2420,6 +2446,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             task_to: "blocked",
             release: false,
             cause: Some("agent_failure"),
+            remedy: None,
         },
         Outcome::TimedOut {
             timeout_secs,
@@ -2435,6 +2462,7 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             release: true,
             cause: Some("timed_out"),
             bound: Some(crate::i18n::Stop::TimedOut(timeout_secs)),
+            remedy: None,
         },
         Outcome::Infra { error, release } => Final {
             session_status: "failed",
@@ -2445,6 +2473,18 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
             release,
             cause: Some("infra"),
             bound: None,
+            remedy: None,
+        },
+        Outcome::Remediable { error, remedy } => Final {
+            session_status: "failed",
+            output: String::new(),
+            exit_code: None,
+            last_error: Some(error),
+            task_to: "todo",
+            release: true,
+            cause: None,
+            bound: None,
+            remedy: Some(remedy),
         },
     };
 
@@ -2775,12 +2815,16 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         .bind(&ctx.task_id)
         .execute(&mut *tx)
         .await?;
+        let mut payload = json!({ "from": "in_progress", "to": "todo", "reason": last_error });
+        if let Some(remedy) = &f.remedy {
+            payload["remedy"] = remedy.clone();
+        }
         audit::append(
             &mut tx,
             Some(&ctx.company_id),
             Some(&ctx.task_id),
             event_kind::TASK_RELEASED,
-            &json!({ "from": "in_progress", "to": "todo", "reason": last_error }),
+            &payload,
         )
         .await?;
     } else {
@@ -2801,19 +2845,23 @@ async fn finalize(ctx: &SessionContext, outcome: Outcome) -> Result<(), RunnerEr
         )
         .await?;
     }
+    let mut finished_payload = json!({
+        "session_id": ctx.session_id,
+        "status": session_status,
+        "exit_code": f.exit_code,
+        "error": last_error,
+        "applied": applied,
+        "task_status": (!applied).then_some(&task_now),
+    });
+    if let Some(remedy) = &f.remedy {
+        finished_payload["remedy"] = remedy.clone();
+    }
     audit::append(
         &mut tx,
         Some(&ctx.company_id),
         Some(&ctx.task_id),
         event_kind::SESSION_FINISHED,
-        &json!({
-            "session_id": ctx.session_id,
-            "status": session_status,
-            "exit_code": f.exit_code,
-            "error": last_error,
-            "applied": applied,
-            "task_status": (!applied).then_some(&task_now),
-        }),
+        &finished_payload,
     )
     .await?;
     match &returned {

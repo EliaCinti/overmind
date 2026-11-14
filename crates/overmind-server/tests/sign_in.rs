@@ -97,7 +97,7 @@ async fn instance(root: &Path, stub: Option<PathBuf>) -> (overmind_server::AppSt
     )
     .await
     .expect("init");
-    let app = common::claimed(overmind_server::app(state.clone()), &data_dir).await;
+    let app = common::claimed_without_account(overmind_server::app(state.clone()), &data_dir).await;
     (state, app)
 }
 

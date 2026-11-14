@@ -1145,6 +1145,15 @@ async fn a_decision_says_who_made_it() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+    let (s, _, _) = send_raw(
+        &app,
+        "POST",
+        "/api/accounts",
+        Some(json!({ "provider": "anthropic", "kind": "key", "key": "sk-ant-test-key-for-door" })),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
     let (s, v, _) = send_raw(
         &app,
         "POST",

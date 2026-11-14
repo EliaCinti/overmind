@@ -20,13 +20,15 @@ use axum::http::{StatusCode, header};
 const OWNER: &str = "the owner";
 const PASSWORD: &str = "a long enough password";
 
-/// Claim `app`, and return it wrapping every later request in the session.
+/// Claim `app` without connecting any account, wrapping later requests in the session.
 ///
-/// A second server over the same database -- which is how the restart and
-/// recovery suites are written -- finds the instance already claimed and no
-/// code left to spend, because a successful claim deletes it. So this does
-/// what the person would do: claim the first time, sign in after a restart.
-pub async fn claimed(app: axum::Router, data_dir: &std::path::Path) -> axum::Router {
+/// Used by suites testing the accounts boundary itself (ADR-0051), where having
+/// no active account is the initial condition under test.
+#[allow(dead_code)]
+pub async fn claimed_without_account(
+    app: axum::Router,
+    data_dir: &std::path::Path,
+) -> axum::Router {
     let code = std::fs::read_to_string(data_dir.join("setup-code"))
         .ok()
         .map(|c| c.trim().to_string())
@@ -81,6 +83,39 @@ pub async fn claimed(app: axum::Router, data_dir: &std::path::Path) -> axum::Rou
             req
         }
     }))
+}
+
+/// Claim `app`, ensure an active account exists for the default provider, and
+/// return the router wrapping every later request in the session.
+///
+/// An instance without an active account refuses hire and start (ADR-0051 decision 4).
+/// What every suite that is *not* about the accounts boundary now needs is an instance
+/// somebody owns with an account already active, so agents can be hired and tasks started.
+#[allow(dead_code)]
+pub async fn claimed(app: axum::Router, data_dir: &std::path::Path) -> axum::Router {
+    let app = claimed_without_account(app, data_dir).await;
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/accounts")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({
+                "provider": "anthropic",
+                "kind": "key",
+                "key": "sk-ant-test-key-for-test-suites",
+            })
+            .to_string(),
+        ))
+        .expect("build account request");
+    let response = tower::ServiceExt::oneshot(app.clone(), request)
+        .await
+        .expect("send account request");
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "claimed() must connect an active test account"
+    );
+    app
 }
 
 /// Upload one file as a multipart part named `file`, the way the browser does,

@@ -19,7 +19,7 @@ import type {
 import { api } from "./lib/api";
 import { useLive } from "./lib/live";
 import { LanguageProvider } from "./components/LanguageProvider";
-import { browserLanguage } from "./lib/i18n";
+import { browserLanguage, DICTIONARIES } from "./lib/i18n";
 import { useTheme } from "./lib/theme";
 import { TopBar } from "./components/TopBar";
 import { Board } from "./components/Board";
@@ -37,6 +37,7 @@ import { Onboarding } from "./components/Onboarding";
 import { Door } from "./components/Door";
 import { InviteDialog } from "./components/InviteDialog";
 import { BackupDialog } from "./components/BackupDialog";
+import { AccountsDialog } from "./components/AccountsDialog";
 import { DeleteCompanyDialog } from "./components/DeleteCompanyDialog";
 import { MembersDialog } from "./components/MembersDialog";
 import { SignInNotice } from "./components/SignInNotice";
@@ -50,6 +51,12 @@ export default function App() {
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [companyId, setCompanyId] = useState<string | null>(null);
+  // The language belongs to the company (M16): switching company switches
+  // language, because it is that organization's working language. Before the
+  // first company exists there is nothing to read it off, so the setup screens
+  // follow the browser.
+  const language: LanguageCode =
+    companies.find((c) => c.id === companyId)?.language ?? browserLanguage();
   const [archetypes, setArchetypes] = useState<Archetype[]>([]);
   const [domains, setDomains] = useState<Domain[]>([]);
   const [models, setModels] = useState<Model[]>([]);
@@ -73,6 +80,8 @@ export default function App() {
   const [isOwner, setIsOwner] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const [accountsInitialProvider, setAccountsInitialProvider] = useState<string | undefined>();
   const [deleteCompanyOpen, setDeleteCompanyOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   /** The signed-in name (M25): the members list says "you" beside it. */
@@ -153,6 +162,41 @@ export default function App() {
     window.addEventListener("overmind:unauthorized", onUnauthorized);
     return () => window.removeEventListener("overmind:unauthorized", onUnauthorized);
   }, []);
+
+  const showOwnerRequired = useCallback(() => {
+    const dict = DICTIONARIES[language] ?? DICTIONARIES.en;
+    setToasts((current) => [
+      ...current,
+      {
+        id: `toast-${Date.now()}`,
+        kind: "owner_required",
+        title: dict.accounts.ownerRequiredTitle,
+        body: dict.accounts.ownerRequiredBody,
+        params: null,
+        agent_id: null,
+        subject_type: null,
+        subject_id: null,
+        approval_id: null,
+        read_at: null,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+  }, [language]);
+
+  // Accounts dialog can be opened by remedies from anywhere in the app (ADR-0051).
+  useEffect(() => {
+    const onOpenAccounts = (e: Event) => {
+      const custom = e as CustomEvent<{ provider?: string }>;
+      if (!isOwner) {
+        showOwnerRequired();
+        return;
+      }
+      setAccountsInitialProvider(custom.detail?.provider);
+      setAccountsOpen(true);
+    };
+    window.addEventListener("overmind:open-accounts", onOpenAccounts);
+    return () => window.removeEventListener("overmind:open-accounts", onOpenAccounts);
+  }, [isOwner, showOwnerRequired]);
 
   // The door first, everything else after: the boot fetches run only once a
   // session exists (or no owner does).
@@ -311,12 +355,6 @@ export default function App() {
 
   const bump = () => setTick((n) => n + 1);
 
-  // The language belongs to the company (M16): switching company switches
-  // language, because it is that organization's working language. Before the
-  // first company exists there is nothing to read it off, so the setup screens
-  // follow the browser.
-  const language: LanguageCode =
-    companies.find((c) => c.id === companyId)?.language ?? browserLanguage();
   useEffect(() => {
     document.documentElement.lang = language;
   }, [language]);
@@ -407,11 +445,25 @@ export default function App() {
           }}
           onInvite={isOwner ? () => setInviteOpen(true) : undefined}
           onBackup={isOwner ? () => setBackupOpen(true) : undefined}
+          onAccounts={
+            isOwner
+              ? () => {
+                  setAccountsInitialProvider(undefined);
+                  setAccountsOpen(true);
+                }
+              : undefined
+          }
           onDeleteCompany={companyId ? () => setDeleteCompanyOpen(true) : undefined}
           onMembers={companyId ? () => setMembersOpen(true) : undefined}
         />
         <InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} />
         <BackupDialog open={backupOpen} onOpenChange={setBackupOpen} />
+        <AccountsDialog
+          open={accountsOpen}
+          onOpenChange={setAccountsOpen}
+          initialProvider={accountsInitialProvider}
+          onAccountsChanged={refreshHealth}
+        />
         {companyId && (
           <MembersDialog
             open={membersOpen}
@@ -430,8 +482,28 @@ export default function App() {
           />
         )}
 
-        <SignInNotice economy={economy} onSignedIn={refreshHealth} />
-        <PayerNotice economy={economy} onChanged={refreshHealth} />
+        <SignInNotice
+          economy={economy}
+          onOpenAccounts={
+            isOwner
+              ? () => {
+                  setAccountsInitialProvider("anthropic");
+                  setAccountsOpen(true);
+                }
+              : showOwnerRequired
+          }
+        />
+        <PayerNotice
+          economy={economy}
+          onOpenAccounts={
+            isOwner
+              ? () => {
+                  setAccountsInitialProvider("anthropic");
+                  setAccountsOpen(true);
+                }
+              : showOwnerRequired
+          }
+        />
         {!companyId ? (
           <Onboarding defaultLanguage={language} onDone={afterCompanyCreated} />
         ) : firstStep && ceo ? (

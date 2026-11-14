@@ -261,9 +261,10 @@ async fn full_lifecycle_with_audit_trail() {
     let (status, report) = send(&app, "GET", "/api/audit/verify", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["valid"], json!(true), "report: {report}");
-    // Eleven, not ten: the claim that opens the instance is itself on the
-    // chain now that every suite claims one (ADR-0045).
-    assert_eq!(report["events_checked"], json!(11));
+    // Twelve: the claim that opens the instance (ADR-0045) and the initial
+    // account connection (ADR-0051) are both on the chain now that every
+    // suite claims and connects one.
+    assert_eq!(report["events_checked"], json!(12));
 }
 
 #[tokio::test]

@@ -112,15 +112,10 @@ impl Confinement {
     /// that asked about one named mechanism would answer "no cage" on a
     /// platform that has a different one.
     pub fn is_real(&self) -> bool {
-        if self.profile.is_some() || (self.agent_user.is_some() && !self.uid_refuted) {
-            return true;
-        }
+        let held = self.profile.is_some() || (self.agent_user.is_some() && !self.uid_refuted);
         #[cfg(target_os = "linux")]
-        {
-            return self.landlock.is_some();
-        }
-        #[allow(unreachable_code)]
-        false
+        let held = held || self.landlock.is_some();
+        held
     }
 }
 
@@ -129,28 +124,26 @@ impl Confinement {
 /// Shared by both mechanisms that need the answer, because two lists would
 /// eventually disagree and the disagreement would be a cage that grants
 /// different things depending on which kernel you are on.
-fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<PathBuf> {
+fn writable_paths(config: &Config, cage: &Cage<'_>, agent_home: Option<&Path>) -> Vec<PathBuf> {
     let mut writable: Vec<PathBuf> = Vec::new();
     writable.extend(path_the_agent_owns(cage.run_dir));
     writable.extend(path_the_agent_owns(&std::env::temp_dir()));
-    // Where the adapter keeps credentials and state. In the image this is the
-    // agent's own home; on a machine it is the user's, and the run would fail
-    // without it long before it failed usefully.
+    // In the container image, agent_home is configured explicitly:
     writable.extend(
         config
             .agent_home
             .iter()
             .filter_map(|p| path_the_agent_owns(p)),
     );
-    // Not the mounted repositories (ADR-0052). A `code` run works in a clone
-    // whose whole `.git` is in its run directory; granting the operator's
-    // repository let an agent plant hooks and config there, which then ran as
-    // the server at the next checkout and as the owner on the host.
-    writable.extend(
-        adapter_paths(home)
-            .iter()
-            .filter_map(|p| path_the_agent_owns(p)),
-    );
+    // The home itself is never granted wholesale — only the adapter's own
+    // corners of it: .claude and .claude.json in the agent's home.
+    if let Some(home) = agent_home {
+        writable.extend(
+            adapter_paths(Some(home))
+                .iter()
+                .filter_map(|p| path_the_agent_owns(p)),
+        );
+    }
     writable.extend(
         config
             .sandbox_allow
@@ -162,8 +155,8 @@ fn writable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<
 
 /// What a run may read and never write, beyond the system paths. One list for
 /// both mechanisms, for the reason [`writable_paths`] is one.
-fn readable_paths(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Vec<PathBuf> {
-    adapter_read_paths(home)
+fn readable_paths(config: &Config, cage: &Cage<'_>, server_home: Option<&Path>) -> Vec<PathBuf> {
+    adapter_read_paths(server_home)
         .iter()
         .chain(cage.readable)
         .chain(&config.sandbox_read)
@@ -217,14 +210,14 @@ pub fn announce(config: &Config) -> String {
     if let Some(refuted) = refuted {
         return format!("{held} — {refuted}");
     }
-    // The image's agent has a home of its own and the uid is the boundary. On a
-    // host the home is the owner's, and the line says what that leaves open.
+    // ADR-0053 / ADR-0051: on a host, the agent runs in its own home under
+    // data_dir and the ~/.claude hole is closed. A toolchain the cage refuses is
+    // fitted with OVERMIND_SANDBOX_READ or OVERMIND_SANDBOX_ALLOW.
     if agent_user(config).is_some() {
         return held;
     }
     format!(
-        "{held} — not a boundary against a hostile agent: ~/.claude stays writable, and a hook \
-         planted there runs as you (ADR-0053). A toolchain the cage refuses is fitted with \
+        "{held} — a toolchain the cage refuses is fitted with \
          OVERMIND_SANDBOX_READ or OVERMIND_SANDBOX_ALLOW"
     )
 }
@@ -415,39 +408,47 @@ fn agent_user(config: &Config) -> Option<AgentUser> {
     })
 }
 
-/// Which mechanisms hold this run.
-pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
-    let home = cage_home(config, std::env::var_os("HOME").map(PathBuf::from));
-    confinement_in(config, cage, home.as_deref())
+/// The agent's home directory.
+///
+/// On a native instance (where `OVERMIND_AGENT_HOME` is unset), this defaults to
+/// `<data_dir>/agent-home`. In the image, `OVERMIND_AGENT_HOME=/home/agent` is
+/// set explicitly. Never falls back to the server's / operator's `$HOME` (ADR-0053, M34 step 4).
+pub fn agent_home(config: &Config) -> PathBuf {
+    let base = config
+        .agent_home
+        .clone()
+        .unwrap_or_else(|| config.data_dir.join("agent-home"));
+    std::path::absolute(&base).unwrap_or(base)
 }
 
-/// Whose home the adapter's paths are granted in: the agent's, where one is
-/// configured, and only otherwise the server's.
-///
-/// In the image the server is root and the agent is `/home/agent`; reading
-/// the server's `HOME` granted `/root/.claude` to a process that never uses it
-/// while the agent's real one came in only through `agent_home`. On the native
-/// instance there is no agent home yet, and the host's is the one the CLI
-/// actually uses until it has its own (ADR-0053, M34 step 4).
-fn cage_home(config: &Config, server_home: Option<PathBuf>) -> Option<PathBuf> {
-    config.agent_home.clone().or(server_home)
+/// Which mechanisms hold this run.
+pub fn confinement(config: &Config, cage: &Cage<'_>) -> Confinement {
+    let server_home = std::env::var_os("HOME").map(PathBuf::from);
+    confinement_in(config, cage, server_home.as_deref())
+}
+
+/// Whose home the adapter's state is kept in: the agent's own home,
+/// either configured via `agent_home` or defaulting to `<data_dir>/agent-home`.
+/// Never the server's / operator's `$HOME` (ADR-0053, M34 step 4).
+pub fn cage_home(config: &Config, _server_home: Option<PathBuf>) -> Option<PathBuf> {
+    Some(agent_home(config))
 }
 
 /// [`confinement`] with the host's home as an argument, so what it grants there
 /// can be tested without changing `HOME` for a whole test process.
-fn confinement_in(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Confinement {
+fn confinement_in(config: &Config, cage: &Cage<'_>, server_home: Option<&Path>) -> Confinement {
     if !config.sandbox {
         return Confinement::default();
     }
     Confinement {
         profile: if profile_available() {
-            profile(config, cage, home)
+            profile(config, cage, server_home)
         } else {
             None
         },
         agent_user: agent_user(config),
         #[cfg(target_os = "linux")]
-        landlock: build_landlock(config, cage, home),
+        landlock: build_landlock(config, cage, server_home),
         uid_refuted: config.uid_refuted.is_some(),
     }
 }
@@ -463,7 +464,7 @@ fn confinement_in(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Conf
 fn build_landlock(
     config: &Config,
     cage: &Cage<'_>,
-    home: Option<&Path>,
+    server_home: Option<&Path>,
 ) -> Option<std::sync::Arc<crate::landlock::Ruleset>> {
     crate::landlock::abi()?;
     // Enough of the system to exist: the loader, the shells, the toolchain —
@@ -476,9 +477,10 @@ fn build_landlock(
     .iter()
     .map(Path::new)
     .collect();
-    let granted = readable_paths(config, cage, home);
+    let granted = readable_paths(config, cage, server_home);
     readable.extend(granted.iter().map(PathBuf::as_path));
-    let mut writable = writable_paths(config, cage, home);
+    let agent_home_dir = agent_home(config);
+    let mut writable = writable_paths(config, cage, Some(&agent_home_dir));
     writable.push(PathBuf::from("/dev"));
 
     match crate::landlock::build(&writable, &readable) {
@@ -539,12 +541,14 @@ fn adapter_read_paths(home: Option<&Path>) -> Vec<PathBuf> {
         return Vec::new();
     };
     vec![
-        home.join("Library/Keychains"),
-        home.join("Library/Preferences"),
         // Where the binary lives: a symlink in `bin` into `share/claude`. The
         // agent runs it and never replaces it, since the host runs it too. So
         // the CLI cannot update itself from inside a run, which is the host's
         // job (ADR-0053).
+        //
+        // Note (M34 step 4): Keychain paths (Library/Keychains, Library/Preferences)
+        // are never granted: credentials ride the environment (token or key), so
+        // the CLI bypasses the login Keychain entirely.
         home.join(".local/bin"),
         home.join(".local/share/claude"),
     ]
@@ -621,7 +625,7 @@ fn allow_stanza(operation: &str, paths: &[PathBuf]) -> String {
 }
 
 /// The profile text for one run.
-fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<String> {
+fn profile(config: &Config, cage: &Cage<'_>, server_home: Option<&Path>) -> Option<String> {
     // No real path for the run directory means no profile, and therefore no
     // cage and no `--dangerously-skip-permissions`. Not so for a run directory
     // an earlier run replaced with a link: that one keeps its cage, which grants
@@ -631,7 +635,8 @@ fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<Stri
     // One list, shared with Landlock: two would eventually disagree, and the
     // disagreement would be a cage that grants different things depending on
     // which kernel you happen to be on.
-    let mut writable = writable_paths(config, cage, home);
+    let agent_home_dir = agent_home(config);
+    let mut writable = writable_paths(config, cage, Some(&agent_home_dir));
     // Temp: compilers, package managers and the test stubs all expect it. This
     // session's TMPDIR is already in the shared list, resolved through the
     // /var -> /private symlink because sandbox rules match the real path —
@@ -640,7 +645,7 @@ fn profile(config: &Config, cage: &Cage<'_>, home: Option<&Path>) -> Option<Stri
     // spelling of the other one, and belongs only here.
     writable.push(PathBuf::from("/private/tmp"));
 
-    let allow_read = allow_stanza("file-read*", &readable_paths(config, cage, home));
+    let allow_read = allow_stanza("file-read*", &readable_paths(config, cage, server_home));
     let allow_write = allow_stanza("file*", &writable);
 
     Some(format!(
@@ -744,6 +749,7 @@ fn caged_shell(config: &Config, held: &Confinement, script: &str) -> Command {
             cmd
         }
     };
+    cmd.env("HOME", agent_home(config));
     if let Some(user) = held.agent_user {
         drop_to(&mut cmd, config, user);
     }
@@ -775,13 +781,8 @@ fn caged_shell(config: &Config, held: &Confinement, script: &str) -> Command {
 /// Ordering also rules out `pre_exec` for this: those closures run *after* the
 /// uid change, when the process is no longer privileged enough to make it.
 #[cfg(unix)]
-fn drop_to(cmd: &mut Command, config: &Config, user: AgentUser) {
+fn drop_to(cmd: &mut Command, _config: &Config, user: AgentUser) {
     cmd.uid(user.uid).gid(user.gid);
-    // The adapter CLI keeps credentials and session state in `$HOME`, and the
-    // server's home is not the agent's — it may not even be readable now.
-    if let Some(home) = &config.agent_home {
-        cmd.env("HOME", home);
-    }
 }
 
 #[cfg(not(unix))]
@@ -805,6 +806,7 @@ fn drop_to(_cmd: &mut Command, _config: &Config, _user: AgentUser) {
 /// the right place.
 pub fn as_agent(config: &Config, creds: &crate::accounts::Spawn, program: &str) -> Command {
     let mut cmd = Command::new(program);
+    cmd.env("HOME", agent_home(config));
     if let Some(user) = agent_user(config) {
         drop_to(&mut cmd, config, user);
     }
@@ -823,13 +825,11 @@ pub fn as_agent_std(
     program: &str,
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
+    cmd.env("HOME", agent_home(config));
     #[cfg(unix)]
     if let Some(user) = agent_user(config) {
         use std::os::unix::process::CommandExt;
         cmd.uid(user.uid).gid(user.gid);
-        if let Some(home) = &config.agent_home {
-            cmd.env("HOME", home);
-        }
     }
     creds.apply(&mut cmd);
     cmd
@@ -916,19 +916,32 @@ fn chown_tree(_path: &Path, _user: AgentUser) -> std::io::Result<()> {
 /// agent has to walk through to reach its own, and `0700` when they live in
 /// `OVERMIND_RUNS_DIR` (ADR-0054).
 ///
-/// Applied only where an agent uid is configured. On a user's own machine
-/// Overmind runs as that user and there is no second party to keep out;
-/// quietly re-permissioning somebody's directory is not this function's call.
+/// Where agent work runs as an unprivileged uid, the shelves have to stand
+/// where the agent cannot reach them. This creates that layout at startup and
+/// sets the ownership and modes ADR-0029 and ADR-0054 require.
+///
+/// On a native instance without an unprivileged uid, it ensures the agent's
+/// home exists under data_dir (`<data_dir>/agent-home`) with mode 0700, owned
+/// like the rest of data_dir (ADR-0053, M34 step 4).
 pub async fn lay_out_data_dir(config: &Config) -> std::io::Result<()> {
-    let Some(user) = agent_user(config) else {
-        return Ok(());
-    };
     let root = config.data_dir.clone();
     let runs = config.runs_dir().to_path_buf();
-    let home = config.agent_home.clone();
-    tokio::task::spawn_blocking(move || lay_out(&root, &runs, home.as_deref(), user))
-        .await
-        .map_err(std::io::Error::other)?
+    let home = agent_home(config);
+    let user = agent_user(config);
+    tokio::task::spawn_blocking(move || {
+        if let Some(user) = user {
+            lay_out(&root, &runs, Some(&home), user)
+        } else {
+            // On a native instance without an unprivileged uid, ensure the agent's
+            // home exists under data_dir at 0700 (ADR-0053, M34 step 4).
+            std::fs::create_dir_all(&root)?;
+            mkdir_mode(&home, 0o700)?;
+            mkdir_mode(&home.join(".claude"), 0o700)?;
+            Ok(())
+        }
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn lay_out(root: &Path, runs: &Path, home: Option<&Path>, user: AgentUser) -> std::io::Result<()> {
@@ -1094,9 +1107,9 @@ mod tests {
         }
     }
 
-    /// The profile on this machine's own home, which is what most tests ask.
+    /// The profile on this configuration's agent home, which is what most tests ask.
     fn profile(config: &Config, cage: &Cage<'_>) -> Option<String> {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let home = cage_home(config, std::env::var_os("HOME").map(PathBuf::from));
         super::profile(config, cage, home.as_deref())
     }
 
@@ -1129,8 +1142,10 @@ mod tests {
 
     /// The host runs `~/.local/bin`, so the agent may run it too and never
     /// replace it. And only the adapter's corner of `~/.local/share`, where
-    /// every other tool's data is. `~/.claude` stays writable, which is the
-    /// hole ADR-0053 states rather than closes.
+    /// every other tool's data is.
+    /// Updated in M34 step 4: the home passed here is the agent's own home,
+    /// so the agent's .claude is writable there, while the operator's home
+    /// is never granted (asserted in `the_cage_grants_nothing_under_the_owners_home`).
     #[test]
     fn the_adapters_install_is_readable_and_never_writable() {
         let home = Path::new(NO_ONES_HOME);
@@ -1151,10 +1166,9 @@ mod tests {
             "{text}"
         );
         assert!(!write.contains("/no-ones-home/.local"), "{text}");
-        assert!(
-            write.contains("(subpath \"/no-ones-home/.claude\")"),
-            "{text}"
-        );
+        // Closed in M34 step 4: the host's .claude is never writable.
+        assert!(!write.contains("/no-ones-home/.claude"), "{text}");
+        assert!(!write.contains("/no-ones-home"), "{text}");
 
         // The same answer from the lists Landlock is built from.
         let writable = writable_paths(&cfg, &cage, Some(home));
@@ -1389,10 +1403,11 @@ probe write_cli_state write "$H/.claude/settings.json"
             ("plant_cli", "DENIED"),
             ("plant_cli_install", "DENIED"),
             ("read_other_tool", "DENIED"),
-            // The adapter still works, and the hole ADR-0053 states is there.
+            // The adapter CLI install still works (ADR-0053 dec 3), and writing to
+            // the host's .claude is closed in M34 step 4 (ADR-0053 dec 6):
             ("run_cli", "REACHABLE"),
             ("read_cli_install", "REACHABLE"),
-            ("write_cli_state", "REACHABLE"),
+            ("write_cli_state", "DENIED"),
         ] {
             assert_eq!(
                 caged.get(name).map(String::as_str),
@@ -1427,13 +1442,153 @@ probe write_cli_state write "$H/.claude/settings.json"
             .nth(2)
             .expect("the credential read stanza exists");
         let write_stanza = text.split("(allow file*\n").nth(1).expect("write stanza");
-        if let Some(home) = std::env::var_os("HOME") {
-            let kc = format!("{}/Library/Keychains", home.to_string_lossy());
-            if std::path::Path::new(&kc).exists() {
-                assert!(read_stanza.contains("Library/Keychains"), "{text}");
-                assert!(!write_stanza.contains("Library/Keychains"), "{text}");
-            }
+        // Updated in M34 step 4: the agent has its own home under data_dir,
+        // so the host operator's login Keychain is never granted.
+        assert!(!read_stanza.contains("Library/Keychains"), "{text}");
+        assert!(!write_stanza.contains("Library/Keychains"), "{text}");
+    }
+
+    /// On a native instance (no OVERMIND_AGENT_HOME set), the agent's home
+    /// defaults to `<data_dir>/agent-home`, created 0700 under data_dir, and
+    /// never falls back to the server/owner's HOME (ADR-0053, M34 step 4).
+    #[test]
+    fn on_a_native_instance_the_agent_has_a_home_of_its_own() {
+        let data = PathBuf::from("/srv/overmind-data");
+        let cfg = Config {
+            data_dir: data.clone(),
+            agent_home: None, // as when OVERMIND_AGENT_HOME is unset
+            ..config(Vec::new())
+        };
+        let server_home = PathBuf::from("/Users/operator");
+        let home = cage_home(&cfg, Some(server_home));
+        assert_eq!(
+            home,
+            Some(data.join("agent-home")),
+            "agent home must be under data_dir, never the operator's HOME"
+        );
+    }
+
+    /// The cage grants nothing writable under the owner's HOME, nor Library/Keychains
+    /// readable. It grants read-only access to .local/bin and .local/share/claude where
+    /// the host's CLI is installed (ADR-0053 dec 3).
+    /// Closes the hole ADR-0053 stated and M34 step 4 closes.
+    #[test]
+    fn the_cage_grants_nothing_under_the_owners_home() {
+        let server_home = Path::new("/Users/operator");
+        let agent_home = Path::new("/srv/overmind-data/agent-home");
+        let cfg = Config {
+            agent_home: Some(agent_home.to_path_buf()),
+            ..config(Vec::new())
+        };
+        let cage = Cage::new(Path::new("/tmp/run-x"));
+        let text = super::profile(&cfg, &cage, Some(server_home)).expect("profile");
+        let (read, write) = stanzas(&text);
+
+        // Nothing under the owner's home is writable:
+        assert!(!write.contains("/Users/operator"), "{text}");
+
+        // Under the owner's home, only CLI install paths are readable:
+        assert!(
+            read.contains("(subpath \"/Users/operator/.local/bin\")"),
+            "{text}"
+        );
+        assert!(
+            read.contains("(subpath \"/Users/operator/.local/share/claude\")"),
+            "{text}"
+        );
+        assert!(!read.contains("/Users/operator/.claude"), "{text}");
+        assert!(!read.contains("Library/Keychains"), "{text}");
+        assert!(!read.contains("Library/Preferences"), "{text}");
+
+        // The agent's own home is granted where it needs it:
+        assert!(
+            write.contains("(subpath \"/srv/overmind-data/agent-home/.claude\")"),
+            "{text}"
+        );
+        assert!(
+            write.contains("(subpath \"/srv/overmind-data/agent-home/.claude.json\")"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_cli_install_is_executable_while_server_claude_is_not_writable() {
+        use std::os::unix::fs::symlink;
+        let root = std::path::absolute(format!(
+            "target/overmind-cli-exec-{}",
+            uuid::Uuid::now_v7().simple()
+        ))
+        .expect("absolute root");
+        let server_home = root.join("server-home");
+        let agent_home = root.join("agent-home");
+        let run_dir = root.join("run");
+
+        let bin_dir = server_home.join(".local/bin");
+        let share_dir = server_home.join(".local/share/claude/versions/1.0");
+        let server_claude = server_home.join(".claude");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        std::fs::create_dir_all(&share_dir).expect("share dir");
+        std::fs::create_dir_all(&server_claude).expect("server claude dir");
+        std::fs::create_dir_all(&agent_home).expect("agent home dir");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+
+        let target_bin = share_dir.join("cli");
+        std::fs::write(&target_bin, "#!/bin/sh\necho CLI_OK\n").expect("write target bin");
+        set_mode(&target_bin, 0o755).expect("chmod target bin");
+
+        let symlink_bin = bin_dir.join("cli");
+        symlink(&target_bin, &symlink_bin).expect("symlink bin");
+
+        let cfg = Config {
+            agent_home: Some(agent_home.clone()),
+            ..config(Vec::new())
+        };
+
+        let held = confinement_in(&cfg, &Cage::new(&run_dir), Some(&server_home));
+        if !held.is_real() {
+            eprintln!("no cage on this platform — skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
         }
+
+        let probe_script = r#"
+cli_res=$("$BIN" 2>&1)
+echo "CLI_OUT=$cli_res"
+if echo planted > "$SH/.claude/settings.json" 2>/dev/null; then
+    echo "SERVER_CLAUDE=WRITABLE"
+else
+    echo "SERVER_CLAUDE=DENIED"
+fi
+if echo planted > "$AH/.claude.json" 2>/dev/null; then
+    echo "AGENT_CLAUDE=WRITABLE"
+else
+    echo "AGENT_CLAUDE=DENIED"
+fi
+"#;
+        let out = caged_shell(&cfg, &held, probe_script)
+            .env("BIN", &symlink_bin)
+            .env("SH", &server_home)
+            .env("AH", &agent_home)
+            .current_dir(&run_dir)
+            .output()
+            .await
+            .expect("run caged probe");
+
+        let output_str = String::from_utf8_lossy(&out.stdout);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(
+            output_str.contains("CLI_OUT=CLI_OK"),
+            "CLI symlink in server_home must execute: {output_str}"
+        );
+        assert!(
+            output_str.contains("SERVER_CLAUDE=DENIED"),
+            "server_home/.claude must not be writable: {output_str}"
+        );
+        assert!(
+            output_str.contains("AGENT_CLAUDE=WRITABLE"),
+            "agent_home/.claude.json must be writable: {output_str}"
+        );
     }
 
     #[test]
@@ -1674,6 +1829,36 @@ probe write_cli_state write "$H/.claude/settings.json"
         assert_eq!(mode, 0o755);
     }
 
+    #[tokio::test]
+    async fn on_a_native_instance_lay_out_data_dir_creates_agent_home_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = fresh_data_dir();
+        let cfg = Config {
+            data_dir: data.clone(),
+            agent_home: None,
+            agent_uid: None,
+            ..Config::default()
+        };
+        lay_out_data_dir(&cfg).await.expect("lay out");
+        let agent_home = data.join("agent-home");
+        assert!(agent_home.is_dir(), "agent-home should exist");
+        let claude = agent_home.join(".claude");
+        assert!(claude.is_dir(), ".claude directory should exist");
+        let mode = std::fs::metadata(&agent_home)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "agent-home must be 0700");
+        let mode_claude = std::fs::metadata(&claude)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode_claude, 0o700, ".claude must be 0700");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
     #[test]
     fn runs_stay_in_the_data_dir_unless_told() {
         let data = PathBuf::from("/some/data");
@@ -1783,8 +1968,9 @@ probe write_cli_state write "$H/.claude/settings.json"
         }
     }
 
-    /// ADR-0053 decision 6: on a host, the line says what the cage leaves open
-    /// and how a toolchain it refuses is fitted.
+    /// ADR-0053 decision 6, amended by M34 step 4: the ~/.claude hole is closed,
+    /// so the startup line no longer names it; it still names the variables used
+    /// to fit a toolchain the cage refuses.
     #[test]
     fn the_startup_line_states_what_the_cage_leaves_open_on_a_host() {
         let said = announce(&Config::default());
@@ -1792,7 +1978,7 @@ probe write_cli_state write "$H/.claude/settings.json"
             eprintln!("no cage on this platform — skipping");
             return;
         }
-        assert!(said.contains("~/.claude"), "{said}");
+        assert!(!said.contains("~/.claude"), "{said}");
         assert!(said.contains("OVERMIND_SANDBOX_READ"), "{said}");
         assert!(said.contains("OVERMIND_SANDBOX_ALLOW"), "{said}");
     }
@@ -1847,15 +2033,15 @@ probe write_cli_state write "$H/.claude/settings.json"
             !writable.iter().any(|p| p.starts_with("/root")),
             "the server's home was granted: {writable:?}"
         );
-        // And where no agent home is configured -- the native instance, until
-        // it gets one (M34 step 4) -- the host's home is still the one used.
+        // On a native instance (no OVERMIND_AGENT_HOME set), the agent's home
+        // defaults to `<data_dir>/agent-home`, never the server's HOME (ADR-0053, M34 step 4).
         let native = Config {
             agent_home: None,
             ..cfg.clone()
         };
         assert_eq!(
             cage_home(&native, Some(PathBuf::from("/Users/someone"))),
-            Some(PathBuf::from("/Users/someone"))
+            Some(native.data_dir.join("agent-home"))
         );
     }
 

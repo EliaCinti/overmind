@@ -33,10 +33,11 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 >
 > **Now — M34, through the accounts.** [ADR-0051](adr/0051-an-account-is-connected-not-configured.md)
 > and [the plan of 28 Oct](plans/2026-10-28-more-than-one-mind.md) turn slice 4
-> into a store of accounts and a panel to connect them. The agent's own home on
-> the native instance comes with the panel ([ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md)),
-> which closes the last hole the cage states: `~/.claude`, writable today. Then
-> slice 5 (the catalogue), Codex, Google.
+> into a store of accounts and a panel to connect them. Step 4 (Accounts panel
+> UI + native agent private home under `<data_dir>/agent-home`) is complete
+> ([ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md) decision 6),
+> closing the `~/.claude` write hole on native instances. Next is slice 5 (the
+> catalogue / models), then Codex and Google.
 >
 > **Then — M35, then M36b**, in the order ADR-0050 fixed: the check before the
 > triggers.
@@ -98,7 +99,7 @@ Small, and it touches the cage's command construction, so it wants its own chang
 - `token_path` was one fixed filename with no provider component, and `backup.rs` had the same fixed shape: credentials now live in `credentials/<provider>/<id>/secret`, and archive format 2 seals all accounts in `secrets/accounts.enc`;
 - `find_token` anchored on `sk-ant-` and `scrub_secrets` on `sk-ant`: credential extraction moved into each provider, and redaction is by value (`secrets::scrub`) registered in `secrets::register`;
 - `clock_skew_secs` hardcoded `api.anthropic.com`: now judged against the provider's own clock reference URL;
-- `adapter_paths()` read the *server's* `HOME`: now reads the agent's home where configured (`/home/agent` in the image);
+- `adapter_paths()` read the *server's* `HOME`: now reads the agent's home where configured (`/home/agent` in the image), and defaults to `<data_dir>/agent-home` on native instances (closed in M34 step 4);
 - `GET /api/claude-auth` re-ran the probe on every poll: probe runs once at link time (`accounts::link`), and polling reads cached state.
 
 Also closed from NEXT's list: a failed respawn drops the killed flow from the slot; the 300 ms sleep is taken with the lock released; abandoned flows are stopped on poll after ten minutes; the child process is reaped outside the lock; unreadable secrets return `AccountError` rather than being swallowed; `sandbox.rs:421`'s doc comment restored to `command()`.
@@ -259,6 +260,15 @@ What [ADR-0053](adr/0053-the-cage-grants-nothing-the-host-runs.md) and its revie
 - **A run can read the MCP token of a run alongside it. Read in the code, not tried.** `AgentMcpConfig` writes `overmind-mcp-<id>.json` in the temp dir, which every run may read and write, and `0600` does not separate runs of one uid. `mcp_server.rs` takes the company from the token, so a run could use another company's memory while that run lasts. Older than ADR-0053. The fix is a directory private to each run, outside its run dir so that `git add` never sees the file.
 - **The cage allows `mach-lookup` with no filter, and whether that reaches outside it is not measured.** `launchctl print-disabled` answers from inside. If `launchctl submit` or `open` also work, a process starts outside the cage. Not tried, because it would create a real job; it needs a measurement on a throwaway account. A hard link to a denied file was tried, and the cage refuses it.
 - **A read-only grant can still be redirected, and so can a grant in a race.** `OVERMIND_SANDBOX_READ` follows links, so a path named under a writable grant can be replaced with a link to `~/.config` and read at the next build. The README advises against the overlap without forbidding it. And a process left running could swap `~/.claude` between the `lstat` and the `canonicalize` of `path_the_agent_owns`, which matters once M34 closes that hole.
+
+## Debts from the accounts panel (14 Nov 2026)
+
+Found by the review of [the accounts panel](plans/2026-11-12-the-accounts-panel.md), written down rather than widening it:
+
+- **A native run no longer finds a toolchain that finds itself through `$HOME`. Reasoned, not measured.** The agent's `HOME` is now `<data_dir>/agent-home` on a native instance too (ADR-0053 decision 6), also with the sandbox off. rustup's proxies look for `$HOME/.rustup` unless `RUSTUP_HOME` is set, so a `code` run that calls `cargo` can fail with *rustup could not choose a version*, even with `~/.rustup` and `~/.cargo` named in `OVERMIND_SANDBOX_READ` as the startup line advises. nvm, pyenv and Go's module cache resolve the same way. The image is unaffected (its home was always its own). The fix is to pass the toolchain's own variables (`RUSTUP_HOME`, `CARGO_HOME`, …) pointing at the server's install when the server's environment resolves them under its home, read-only, and to say so in the startup line. Check it on Casa before relying on a native code run.
+- **Only a task start acts on the `connect_account` remedy.** A hire, a chat turn and a meeting are refused with the same remedy, but `HireAgentDialog`, the chat and the meeting views show the sentence and drop the button. Not a dead end: with no active account the economy reads `not_signed_in`, and `SignInNotice` opens the panel from the top of every page. The fix is one place that turns an `ApiError` carrying `connect_account` into the panel, used by every caller.
+- **Two uncaged processes still read a config the agent can write. Read in the code, not measured.** The economy probe (`claude auth status --json`, `economy.rs`) and the sign-in CLI (`sign_in.rs`) run outside the cage with `HOME=<data_dir>/agent-home`, whose `.claude/settings.json` a caged agent may write. If either subcommand runs something that file names — an `apiKeyHelper`, a hook — that is a way out of the cage, as the server's user. Narrower than the hole this closes (the owner's own `~/.claude`, run at his next Claude Code session), but the startup line that admitted the old one is gone. The fix is to run both with a home of their own that no run can write, or to measure that neither reads `settings.json`, and then a threat-model line either way. Shared across companies too, as the owner's `~/.claude` was: one company's run can leave hooks for the next.
+- **Disconnecting the active account promotes nobody**, even with another account of the same provider still connected, and every run of that provider is refused until the owner makes one active. Deliberate for now (the confirmation says so since this review); promoting one automatically is a default and wants a line in ADR-0051 first.
 
 ## Frictions from the two-machine walk (27 Aug 2026, in the order they bit)
 

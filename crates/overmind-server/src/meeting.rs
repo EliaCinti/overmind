@@ -282,6 +282,16 @@ pub async fn convene(
     if topic.is_empty() {
         return Err(CeoError::Invalid("a meeting needs a topic".into()));
     }
+    // ADR-0051 decision 4: check active account before convening
+    let provider = crate::provider::current();
+    if crate::accounts::active(&state.pool, provider.vendor())
+        .await?
+        .is_none()
+    {
+        let (message, remedy) =
+            crate::accounts::no_payer(state, company_id, provider.vendor()).await;
+        return Err(CeoError::Remediable { message, remedy });
+    }
     let mut seen = std::collections::HashSet::new();
     let participants: Vec<String> = participant_ids
         .iter()

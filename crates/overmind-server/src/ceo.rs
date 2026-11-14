@@ -23,6 +23,11 @@ pub enum CeoError {
     NotFound(&'static str),
     #[error("{0}")]
     Invalid(String),
+    #[error("{message}")]
+    Remediable {
+        message: String,
+        remedy: serde_json::Value,
+    },
     /// The agent's monthly cap will not cover this turn (ADR-0022). Carries the
     /// numbers so the refusal can say what it is refusing on.
     #[error("monthly budget reached")]
@@ -282,6 +287,16 @@ pub async fn post_user_message(
     if content.trim().is_empty() && attachment_ids.is_empty() {
         return Err(CeoError::Invalid("message must not be empty".into()));
     }
+    // ADR-0051 decision 4: check active account before launching the turn
+    let provider = crate::provider::current();
+    if crate::accounts::active(&state.pool, provider.vendor())
+        .await?
+        .is_none()
+    {
+        let (message, remedy) =
+            crate::accounts::no_payer(state, company_id, provider.vendor()).await;
+        return Err(CeoError::Remediable { message, remedy });
+    }
     let conversation_id = get_or_create_conversation(state, company_id, agent_id).await?;
     let agent = agent_id.to_string();
 
@@ -341,23 +356,43 @@ pub async fn post_user_message(
         let convo = conversation_id.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) = run_agent_turn(&state2, &company, &convo, &agent).await {
-                    eprintln!("agent turn for {convo} failed: {e}");
-                    // Don't leave the user hanging: surface the failure as a message.
-                    let _ = post_system_message(
-                        &state2,
-                        &company,
-                        &convo,
-                        &format!("The agent could not respond: {e}"),
-                    )
-                    .await;
-                }
+                let last_user_read = match run_agent_turn(&state2, &company, &convo, &agent).await {
+                    Ok(at) => at,
+                    Err(e) => {
+                        eprintln!("agent turn for {convo} failed: {e}");
+                        // Don't leave the user hanging: surface the failure as a message.
+                        let _ = post_system_message(
+                            &state2,
+                            &company,
+                            &convo,
+                            &format!("The agent could not respond: {e}"),
+                        )
+                        .await;
+                        None
+                    }
+                };
                 // Another turn is owed only if a message arrived that this
-                // turn did not read: the thread ends with the user's words.
+                // turn did not read: either unread user messages exist, or
+                // end_answering says another turn was queued.
                 if !state2.end_answering(&convo) {
                     break;
                 }
-                if !last_word_is_the_users(&state2, &convo).await {
+                if let Some(read_at) = last_user_read {
+                    let newer: Result<Option<(String,)>, sqlx::Error> = sqlx::query_as(
+                        "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user' AND created_at > ? LIMIT 1",
+                    )
+                    .bind(&convo)
+                    .bind(&read_at)
+                    .fetch_optional(&state2.pool)
+                    .await;
+                    // A turn was queued; only a clean "nothing newer" lets the
+                    // loop stop. On an error, one turn too many beats a user
+                    // message nobody answers.
+                    if matches!(newer, Ok(None)) {
+                        state2.end_answering(&convo);
+                        break;
+                    }
+                } else if !last_word_is_the_users(&state2, &convo).await {
                     state2.end_answering(&convo);
                     break;
                 }
@@ -554,7 +589,7 @@ async fn run_agent_turn(
     company_id: &str,
     conversation_id: &str,
     agent_id: &str,
-) -> Result<(), CeoError> {
+) -> Result<Option<String>, CeoError> {
     run_agent_turn_inner(state, company_id, conversation_id, agent_id, None).await
 }
 
@@ -577,7 +612,9 @@ pub(crate) async fn run_digest_turn(
     let block = format!(
         "\n\nTasks that finished since your last word in this thread:\n{rows}\n\nWrite a short unprompted update for the user: what landed, and what (if anything) needs their decision next. Address them directly, in the conversation's language. Return an EMPTY tasks array — an update the user did not ask for must not open work. You MAY include \"start\": [\"<title of an open task on the board>\"] for work that should logically follow: each lands as an approval in the user's inbox, never as an autonomous start. If nothing here is worth interrupting them for, set reply to exactly \"SKIP\"."
     );
-    run_agent_turn_inner(state, company_id, conversation_id, agent_id, Some(&block)).await
+    run_agent_turn_inner(state, company_id, conversation_id, agent_id, Some(&block))
+        .await
+        .map(|_| ())
 }
 
 async fn run_agent_turn_inner(
@@ -586,7 +623,7 @@ async fn run_agent_turn_inner(
     conversation_id: &str,
     agent_id: &str,
     digest_block: Option<&str>,
-) -> Result<(), CeoError> {
+) -> Result<Option<String>, CeoError> {
     // Who is speaking, and their role.
     let who: Option<SpeakerRow> = sqlx::query_as(
         "SELECT a.name, a.title, ar.slug, a.traits, a.custom_brief, a.reports_to
@@ -668,6 +705,11 @@ async fn run_agent_turn_inner(
     .bind(&covers_until)
     .fetch_all(&state.pool)
     .await?;
+    let last_user_read_at = history
+        .iter()
+        .rev()
+        .find(|(r, _, _)| r == "user")
+        .map(|(_, _, at)| at.clone());
     let mut summary_text = summary.map(|(c, _)| c);
 
     // Compact before the turn drowns (ADR-0040): when the transcript that
@@ -954,7 +996,7 @@ async fn run_agent_turn_inner(
             );
             post_system_message(state, company_id, conversation_id, &body).await?;
             budget_exhausted_notice(state, company_id, agent_id, &name, &check).await?;
-            return Ok(());
+            return Ok(last_user_read_at);
         }
         // The same courtesy for a different cause, and the difference matters:
         // there is no cap to raise here. Nobody chose this limit and nobody can
@@ -966,7 +1008,7 @@ async fn run_agent_turn_inner(
                 crate::economy::reset_time(&window),
             );
             post_system_message(state, company_id, conversation_id, &body).await?;
-            return Ok(());
+            return Ok(last_user_read_at);
         }
         Err(e) => return Err(e),
     };
@@ -1003,7 +1045,7 @@ async fn run_agent_turn_inner(
     // posts nothing, and the watermark the scheduler advanced stands, so the
     // same completions are never asked about twice.
     if digest_block.is_some() && reply.trim() == "SKIP" {
-        return Ok(());
+        return Ok(None);
     }
     let tasks = if digest_block.is_some() {
         // Enforced, not asked: an unprompted update opens no work, whatever
@@ -1376,7 +1418,7 @@ async fn run_agent_turn_inner(
     {
         eprintln!("team proposed by {name} could not be raised: {e}");
     }
-    Ok(())
+    Ok(last_user_read_at)
 }
 
 /// Who is about to speak, and on whose budget (ADR-0022).
@@ -1471,6 +1513,11 @@ pub(crate) async fn run_adapter(
                 .await,
                 creds.account_id,
             ),
+            Err(crate::accounts::AccountError::NoActiveAccount(vendor)) => {
+                let (message, remedy) =
+                    crate::accounts::no_payer(state, turn.company_id, &vendor).await;
+                (Err(CeoError::Remediable { message, remedy }), None)
+            }
             Err(e) => (
                 Err(CeoError::Invalid(format!(
                     "the active account cannot be read: {e}"

@@ -171,16 +171,21 @@ async fn an_env_key_is_kept_away_while_a_subscription_account_is_active() {
     ));
 }
 
-/// Until the accounts panel exists (M34 step 4) an instance with no account
-/// runs on the host's own login, as it always has: nothing is injected, and
-/// nothing from the server's environment leaks through either.
+/// With no active account, `for_spawn` fails with `NoActiveAccount` (ADR-0051 decision 4).
+/// An agent is not spawned on the host's own login.
 #[tokio::test]
-async fn with_no_account_the_host_login_is_still_used_for_now() {
+async fn with_no_active_account_for_spawn_fails_with_no_active_account() {
     let root = unique_root("host");
     let state = boot(&root, EnvCredentials::default()).await;
-    let spawn = accounts::for_spawn(&state, claude()).await.expect("spawn");
-    assert_eq!(spawn.account_id, None);
-    assert_eq!(what_the_agent_sees(&spawn, "leak"), "none none");
+    match accounts::for_spawn(&state, claude()).await {
+        Ok(_) => panic!("for_spawn should fail without active account"),
+        Err(err) => {
+            assert!(
+                matches!(err, accounts::AccountError::NoActiveAccount(ref p) if p == "anthropic"),
+                "unexpected error: {err:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -347,7 +352,7 @@ async fn audit_kinds_and_payloads(state: &overmind_server::AppState) -> Vec<(Str
 async fn an_account_is_connected_activated_and_disconnected_without_its_secret_leaving() {
     let root = unique_root("api");
     let state = boot(&root, EnvCredentials::default()).await;
-    let app = common::claimed(overmind_server::app(state.clone()), &root).await;
+    let app = common::claimed_without_account(overmind_server::app(state.clone()), &root).await;
 
     let (s, first, raw) = send(
         &app,
@@ -418,7 +423,7 @@ async fn a_bad_account_request_is_refused() {
         EnvCredentials::default().with("ANTHROPIC_API_KEY", ENV_KEY),
     )
     .await;
-    let app = common::claimed(overmind_server::app(state.clone()), &root).await;
+    let app = common::claimed_without_account(overmind_server::app(state.clone()), &root).await;
     for body in [
         json!({ "provider": "anthropic", "kind": "key", "key": "   " }),
         json!({ "provider": "nobody", "kind": "key", "key": KEY_ONE }),
@@ -480,7 +485,9 @@ async fn instance_with_stub(
     )
     .await
     .expect("init");
-    let app = common::claimed(overmind_server::app(state.clone()), &root.join("data")).await;
+    let app =
+        common::claimed_without_account(overmind_server::app(state.clone()), &root.join("data"))
+            .await;
     (state, app, root)
 }
 
@@ -658,4 +665,369 @@ async fn a_credential_an_agent_prints_never_reaches_the_record() {
         !error.contains(KEY_ODD),
         "the stored error kept the key: {error}"
     );
+}
+
+/// ADR-0051 decision 4: at hire, an agent cannot be hired if the provider has no active account.
+#[tokio::test]
+async fn with_no_active_account_a_hire_is_refused_with_connect_account() {
+    let (_state, app, _root) = instance_with_stub("no-account-hire", "#!/bin/sh\nexit 0\n").await;
+    let (_, co, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Co" })),
+    )
+    .await;
+    let company = co["id"].as_str().expect("id");
+    let (s, body, raw) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company}/agents"),
+        Some(json!({ "name": "A", "archetype": "builder", "traits": { "monthly_budget_cents": 1000 } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["remedy"]["kind"], "connect_account", "{raw}");
+    assert_eq!(body["remedy"]["provider"], "anthropic", "{raw}");
+}
+
+/// The refusal is prose the server composes for a person, so it speaks the
+/// company's language (M16) -- one sentence, the same at every entry point.
+#[tokio::test]
+async fn a_refusal_for_want_of_an_account_speaks_the_companys_language() {
+    let (_state, app, _root) = instance_with_stub("no-account-lang", "#!/bin/sh\nexit 0\n").await;
+    let (_, co, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Rossi Vini", "language": "it" })),
+    )
+    .await;
+    let company = co["id"].as_str().expect("id");
+    let (s, body, raw) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company}/agents"),
+        Some(json!({ "name": "A", "archetype": "builder", "traits": { "monthly_budget_cents": 1000 } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["remedy"]["kind"], "connect_account", "{raw}");
+    let said = body["error"].as_str().expect("error");
+    assert!(
+        said.contains("Nessun account attivo per Anthropic"),
+        "{raw}"
+    );
+}
+
+/// ADR-0051 decision 4: at start, a task cannot be started if the provider has no active account.
+#[tokio::test]
+async fn with_no_active_account_a_start_is_refused_with_connect_account() {
+    let (state, app, root) = instance_with_stub("no-account-start", "#!/bin/sh\nexit 0\n").await;
+    // Link an account first to hire the agent, then disconnect it so no active account remains.
+    let acc = accounts::link(&state, "anthropic", Kind::Key, KEY_ONE, None)
+        .await
+        .expect("link");
+    let repo = root.join("repo");
+    let (_, co, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Co" })),
+    )
+    .await;
+    let company = co["id"].as_str().expect("id").to_string();
+    let (_, pr, _) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company}/projects"),
+        Some(json!({ "title": "P" })),
+    )
+    .await;
+    let project = pr["id"].as_str().expect("id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/api/projects/{project}/workspaces"),
+        Some(json!({ "name": "main", "cwd": repo.to_string_lossy() })),
+    )
+    .await;
+    let (_, goal, _) = send(
+        &app,
+        "POST",
+        &format!("/api/projects/{project}/goals"),
+        Some(json!({ "title": "G" })),
+    )
+    .await;
+    let goal = goal["id"].as_str().expect("id").to_string();
+    let (s, agent, raw) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company}/agents"),
+        Some(json!({ "name": "A", "archetype": "builder", "traits": { "monthly_budget_cents": 1000 } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{raw}");
+    let agent = agent["id"].as_str().expect("id").to_string();
+    let (_, task, _) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company}/tasks"),
+        Some(json!({ "title": "T", "goal_id": goal })),
+    )
+    .await;
+    let task = task["id"].as_str().expect("id").to_string();
+    send(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task}/transition"),
+        Some(json!({ "to": "todo" })),
+    )
+    .await;
+
+    // Disconnect the account so the provider is left with no active account.
+    accounts::disconnect(&state, &acc.id)
+        .await
+        .expect("disconnect");
+
+    let (s, body, raw) = send(
+        &app,
+        "POST",
+        &format!("/api/tasks/{task}/start"),
+        Some(json!({ "agent_id": agent })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["remedy"]["kind"], "connect_account", "{raw}");
+    assert_eq!(body["remedy"]["provider"], "anthropic", "{raw}");
+}
+
+/// What 4.1 showed about resume: an interrupted run resumed against an agent home
+/// missing the session history fails with AgentFailure (exit code 1) and records
+/// the error without crashing the server.
+#[tokio::test]
+async fn resuming_a_session_whose_adapter_history_is_missing_fails_cleanly() {
+    let (state, app, root) = instance_with_stub(
+        "missing-resume",
+        r#"#!/bin/sh
+if [ -n "$OVERMIND_RESUME_SESSION_ID" ]; then
+    echo "No conversation found with session ID: $OVERMIND_RESUME_SESSION_ID" >&2
+    exit 1
+fi
+echo '{"model":"stub","session_id":"first-run-id","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"#,
+    )
+    .await;
+    accounts::link(&state, "anthropic", Kind::Key, KEY_ONE, None)
+        .await
+        .expect("link");
+    let task = start_a_task(&app, &root).await;
+
+    // Wait for the first run to finish
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let session_id: String = loop {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM agent_task_sessions WHERE task_id = ? AND finished_at IS NOT NULL",
+        )
+        .bind(&task)
+        .fetch_optional(&state.pool)
+        .await
+        .expect("poll");
+        if let Some((id,)) = row {
+            break id;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    // Pretend the session was interrupted (status = running, finished_at = NULL, adapter_session_id = set)
+    sqlx::query("UPDATE tasks SET status = 'in_progress', run_session_id = ? WHERE id = ?")
+        .bind(&session_id)
+        .bind(&task)
+        .execute(&state.pool)
+        .await
+        .expect("mark task in progress");
+    sqlx::query("UPDATE agent_task_sessions SET status = 'running', finished_at = NULL, adapter_session_id = 'old-session-404' WHERE id = ?")
+        .bind(&session_id)
+        .execute(&state.pool)
+        .await
+        .expect("mark running");
+
+    // Resume the session
+    overmind_server::runner::resume_session(&state, &session_id)
+        .await
+        .expect("resume call succeeds");
+
+    // Wait for the resumed session to fail cleanly
+    let (status, output, error): (String, String, Option<String>) = loop {
+        let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT status, output, last_error FROM agent_task_sessions WHERE id = ? AND finished_at IS NOT NULL",
+        )
+        .bind(&session_id)
+        .fetch_optional(&state.pool)
+        .await
+        .expect("poll");
+        if let Some(r) = row {
+            break (r.0, r.1.unwrap_or_default(), r.2);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resumed run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(status, "failed");
+    assert!(
+        output.contains("No conversation found with session ID"),
+        "output was: {output:?}, last_error: {error:?}"
+    );
+}
+
+/// Review Bloccante 3: a run resumed or spawned after the account was disconnected
+/// finishes by releasing the task to 'todo' with remedy connect_account, never
+/// leaving it stuck in 'blocked'.
+#[tokio::test]
+async fn a_resumed_session_with_no_active_account_releases_task_with_connect_account_remedy() {
+    let (state, app, root) = instance_with_stub(
+        "no-account-resume",
+        r#"#!/bin/sh
+echo '{"model":"stub","session_id":"first-run-id","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"#,
+    )
+    .await;
+    let acc = accounts::link(&state, "anthropic", Kind::Key, KEY_ONE, None)
+        .await
+        .expect("link");
+    let task = start_a_task(&app, &root).await;
+
+    // Wait for the first run to finish
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let session_id: String = loop {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM agent_task_sessions WHERE task_id = ? AND finished_at IS NOT NULL",
+        )
+        .bind(&task)
+        .fetch_optional(&state.pool)
+        .await
+        .expect("poll");
+        if let Some((id,)) = row {
+            break id;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+
+    // Pretend the session was interrupted
+    sqlx::query("UPDATE tasks SET status = 'in_progress', run_session_id = ? WHERE id = ?")
+        .bind(&session_id)
+        .bind(&task)
+        .execute(&state.pool)
+        .await
+        .expect("mark task in progress");
+    sqlx::query("UPDATE agent_task_sessions SET status = 'running', finished_at = NULL, adapter_session_id = 'old-session' WHERE id = ?")
+        .bind(&session_id)
+        .execute(&state.pool)
+        .await
+        .expect("mark running");
+
+    // Disconnect the account before resume spawn
+    accounts::disconnect(&state, &acc.id)
+        .await
+        .expect("disconnect");
+
+    // Resume the session
+    overmind_server::runner::resume_session(&state, &session_id)
+        .await
+        .expect("resume call succeeds");
+
+    // Wait for resumed run to finish
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM agent_task_sessions WHERE id = ? AND finished_at IS NOT NULL",
+        )
+        .bind(&session_id)
+        .fetch_optional(&state.pool)
+        .await
+        .expect("poll");
+        if row.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resumed run never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // Task must be released to 'todo' with no assignee (not 'blocked')
+    let (task_status, assignee): (String, Option<String>) =
+        sqlx::query_as("SELECT status, assignee_agent_id FROM tasks WHERE id = ?")
+            .bind(&task)
+            .fetch_one(&state.pool)
+            .await
+            .expect("task row");
+    assert_eq!(
+        task_status, "todo",
+        "task must be released to todo, not blocked"
+    );
+    assert!(
+        assignee.is_none(),
+        "task assignee must be cleared on release"
+    );
+
+    // Audit must record task.released with connect_account remedy
+    let released_events: Vec<(String,)> = sqlx::query_as(
+        "SELECT payload FROM audit_events WHERE task_id = ? AND kind = 'task.released'",
+    )
+    .bind(&task)
+    .fetch_all(&state.pool)
+    .await
+    .expect("audit");
+    assert!(
+        !released_events.is_empty(),
+        "task.released event must exist"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(&released_events.last().expect("last released").0).expect("json");
+    assert_eq!(payload["remedy"]["kind"], "connect_account");
+    assert_eq!(payload["remedy"]["provider"], "anthropic");
+}
+
+/// Review Bloccante 4: CEO turns / messages without an active account fail
+/// with the connect_account remedy (just like hire and start).
+#[tokio::test]
+async fn ceo_turn_without_active_account_refuses_with_connect_account_remedy() {
+    let (_state, app, _root) = instance_with_stub("ceo-no-acc", "#!/bin/sh\nexit 0\n").await;
+    let (_, company, _) = send(
+        &app,
+        "POST",
+        "/api/companies",
+        Some(json!({ "name": "Co" })),
+    )
+    .await;
+    let company_id = company["id"].as_str().expect("company id");
+    let agent_id = company["ceo"]["id"].as_str().expect("ceo id");
+
+    let (s, body, raw) = send(
+        &app,
+        "POST",
+        &format!("/api/companies/{company_id}/agents/{agent_id}/conversation/messages"),
+        Some(json!({
+            "content": "Hello CEO",
+            "attachment_ids": [],
+        })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "{raw}");
+    assert_eq!(body["remedy"]["kind"], "connect_account", "{raw}");
+    assert_eq!(body["remedy"]["provider"], "anthropic", "{raw}");
 }
