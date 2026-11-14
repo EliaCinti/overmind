@@ -137,7 +137,9 @@ export function AccountsDialog({
           }
           await load();
           onAccountsChanged?.();
-          notifyAccountActivated(s.account?.provider ?? "anthropic");
+          // Only a provider's first account becomes active on its own; a refused
+          // start retried on any other would be refused again.
+          if (s.account?.active) notifyAccountActivated(s.account.provider);
         } else if (s.state === "failed") {
           setSignInFlow({ step: "failed", tail: s.tail });
           if (pollingRef.current) {
@@ -199,12 +201,12 @@ export function AccountsDialog({
     setActionBusy("key");
     setError(null);
     try {
-      await api.connectAccount(provider, apiKey.trim());
+      const linked = await api.connectAccount(provider, apiKey.trim());
       setConnecting(null);
       setApiKey("");
       await load();
       onAccountsChanged?.();
-      notifyAccountActivated(provider);
+      if (linked.active) notifyAccountActivated(provider);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -286,6 +288,12 @@ export function AccountsDialog({
 
               const subscriptionShape = providerInfo?.kinds?.subscription?.shape;
               const keyShape = providerInfo?.kinds?.key?.shape;
+              // The server always sends a shape; "unavailable" carries its reason.
+              const canConnect = subscriptionShape === "paste_back" || keyShape === "key";
+              const unavailableWhy =
+                providerInfo?.kinds?.subscription?.reason ??
+                providerInfo?.kinds?.key?.reason ??
+                "unsupported";
 
               return (
                 <section
@@ -466,13 +474,13 @@ export function AccountsDialog({
                             {t("accounts.connectKey")}
                           </Button>
                         )}
-                        {!subscriptionShape && !keyShape && (
+                        {!canConnect && (
                           <p className="text-xs text-muted-foreground">
                             {vendor === "openai"
                               ? t("accounts.unavailableCodex")
                               : vendor === "google"
                                 ? t("accounts.unavailableGoogle")
-                                : t("accounts.unavailableReason", { reason: "unsupported" })}
+                                : t("accounts.unavailableReason", { reason: unavailableWhy })}
                           </p>
                         )}
                       </div>
