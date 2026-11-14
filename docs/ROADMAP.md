@@ -514,8 +514,52 @@ The substrate is built and has been waiting since M3. `scheduler.rs` says so its
 - **Every autonomous start names its cause.** The wakeup records the event that fired it, so the chain answers *why this ran* and not only *that it ran*. A start with no recorded cause is exactly what [ADR-0046](adr/0046-a-start-the-ceo-cannot-see.md) refuses.
 - **Accept:** the owner arms one trigger, walks away, and the event it names starts the right agent on the right task without a click — the audit chain shows the causing event, the run is checked by M35's sensors, and an agent looping without progress is stopped by the count rather than by the budget.
 
+## M37 — Agents share a studio `todo`
+Decided 13 Nov 2026 in [ADR-0055](adr/0055-agents-share-a-studio.md), from the owner's ask: several agents working in one place, at once, under his eyes, each with a pointer of its own, each seeing what the others do, at one of three depths he chooses, with his hand able to stop or replace theirs. [The plan](plans/2026-11-13-the-studio.md) has the contracts: tables, tools, the wire, the tests by name.
+
+Today a run is alone in its directory, and the only sign of it is one line of activity polled every two seconds. Three facts shaped the answer. The agents have no mice, so a pointer on screen is a drawing, and it is honest only if a real action put it there. An operating system has one pointer, so "in parallel on the whole computer" has a limit to be measured rather than promised. And every level sounds like widening the cage, which is the one thing between an injected instruction and the host.
+
+So **the studio lives in the server, agents reach it over MCP with the token their run already holds, and the cage does not move at any level** — the rule of 6 Nov for the working folder, generalised. One code path sees every action, and the journal, the live view, the hold and the level check all come from it. **A level widens the studio**: `inside` (its own files, a hosted browser), `granted` (named folders, a terminal, the operator's tools), `computer` (the real desktop). A tool above the studio's reach is absent from `tools/list`, not refused.
+
+- **Before it, two debts from [NEXT](NEXT.md):** a run can read the MCP token of the run beside it, and in a studio that token is whose pointer it is; and moving a task does not stop its run, which hold and close both need.
+- **Slice A — the studio and its journal.** `studio.rs`, the tables, shared files with a revision each, the `studio_*` tools on the MCP endpoint. An edit on a region somebody changed is refused with the current text and their name; a claim refuses a second hand by name and expires. Every answer carries a bounded digest of what the others did since this agent last looked. The journal is append-only and hashed row over row, and the audit chain records its head at closing.
+- **Slice B — the live channel.** `/ws/studios/{id}`: a snapshot, then actions with the journal's number and presence frames. Presence is kept in memory and forgotten with the run. The company channel stays coarse.
+- **Slice C — the stage.** A sixth view. The files surface, a pointer per agent in a colour it keeps, its name and intent beside it, a roster that says who is doing what and follows an agent on a click. The pointers move at once, each at its own agent's pace; where the stream carries a tool call's input as it is written, the stage shows the text being typed before the call lands. Motion is paced and never more than a second behind the journal.
+- **Slice D — from the CEO's plan to the studio.** One toggle in the chat composer; the CEO's plan places a set of tasks in a studio and they start together, each by its agent's autonomy and under its own budget. Asked for unprompted, a studio is an approval. No agent can ask for more than `inside`.
+- **Slice E — the person's hand.** A pointer of your own, a note pinned where you point, hold for one agent or all, take over a file, close. A long hold winds the run down with a handoff ([ADR-0050](adr/0050-a-loop-that-converges-and-a-stop-that-is-not-a-crash.md)).
+- **Slice F — replay.** A timeline drawn from the journal: the studio as it was at any point.
+- **Accept:** the owner asks in chat for something three agents can make together; one studio opens and he sees three pointers at work and whose each is; one agent builds on a file another wrote a minute earlier with no dependency declared; he holds one, changes a paragraph, releases it, and its next action takes his change into account; he scrubs back to the first minute; the journal verifies and the chain names its head.
+
+## M38 — A browser on the studio `todo`
+The second surface of `inside` ([ADR-0055](adr/0055-agents-share-a-studio.md), [the plan](plans/2026-11-13-the-studio.md)). One Chromium per studio, started by the server, caged, with a profile that dies with the studio; shared tabs, one hand a tab, any number of tabs at once; the screencast on the stage with each pointer on the element its agent acted on; a person can take a tab.
+
+- **Measured first:** the size of Chromium in the image on both architectures; whether its own sandbox starts under Docker's default seccomp profile and under `sandbox-exec`; the screencast's frame rate and cost; the CDP client.
+- **Its own ADR**, because a browser an agent drives from the owner's machine can be pointed at Overmind's own port, the tailnet and the router. Private, loopback, link-local and CGNAT addresses are refused after resolution. What a page says is untrusted text and is delimited as such.
+- Optional in the image behind a build argument: a box without a browser does not offer one.
+- **Accept:** two agents research in two tabs while a third writes from what they find, all three watched; the owner takes a tab and logs in by hand; an agent sent to Overmind's own address is refused, by a test.
+
+## M39 — Named folders, a terminal, the operator's tools `todo`
+The level `granted` ([ADR-0055](adr/0055-agents-share-a-studio.md), [the plan](plans/2026-11-13-the-studio.md)). The operator names roots (`OVERMIND_STUDIO_ROOTS`; a mount in the image), the instance owner picks folders under them, sees the exact paths before confirming, and the raise is on the chain. It absorbs the validation rules of the working-folder design: never the home itself, `~/.claude`, `~/.config`, the data directory, a system path.
+
+- **Folders are mounts on the files surface**, written by the server on the agents' behalf, never granted in a run's cage. A change made from outside is journaled as such and reaches the agents' digests.
+- **A terminal the server holds**, its shell confined to the studio's folders by a cage of its own, with no provider credential in its environment; one hand at a time; command, exit code and a hash of the output journaled; the output scrubbed. A person can take it and type.
+- **The operator's tools** ([ADR-0036](adr/0036-tools-in-the-agents-hand.md)) appear on the stage by name, with who holds an exclusive one, and without a pointer: Overmind does not see where they act.
+- **Measured first:** the PTY inside each of the three cages; who owns what the server writes into a mounted folder; the watcher's delay.
+- **Accept:** on one project folder, two agents edit while a third runs the tests in the terminal and the owner sees command and output as they happen; he saves from his own editor and an agent takes it into account; a terminal told to read `~/.ssh` is refused, by a paired test.
+
+## M40 — The whole computer `todo`
+The level `computer` ([ADR-0055](adr/0055-agents-share-a-studio.md), [the plan](plans/2026-11-13-the-studio.md)). **Not before M35 and M36b**, a week of real use of M38 and M39, and the measurement of what `mach-lookup` lets a caged process start.
+
+The desktop is reached through **the hand**: a second native program, macOS first, that the owner starts and to which the system itself asks him to grant Accessibility and Screen Recording. The agent's process is still caged. It is not in the image, and the image says why.
+
+- **Measured first, as an analysis in `docs/analysis/`:** what the accessibility interface does on a window that is not in front, without the system pointer, and on which kinds of application. That number is how parallel this level is. Expected, to be tested: several agents at once on different applications, one at a time for what needs the real pointer.
+- **Pointers on the real screen**, drawn by the hand above everything, mirrored on the stage.
+- **The guards:** armed by the instance owner for a bounded time and ended by itself; applications excluded by default (password managers, Keychain Access, System Settings, his terminal, Overmind); named applications held behind an approval; physical input from the owner stops every hand; a global key ends the arming; nothing acts on a locked screen.
+- **The threat model says what is true:** at this level an agent that follows an injected instruction acts with the owner's session. Nothing here contains it. What stands is the arming, the exclusions, the stop, the recording and the brakes.
+- **Accept:** the owner arms a studio for fifteen minutes; three agents work in three applications at once with three pointers on his screen; he moves the mouse and all three stop; he releases them; the time ends and the tools are gone from `tools/list`; an agent sent to an excluded application is refused, by a test.
+
 ## What comes next
 The plan after 0.1 — the next milestones in order, and why that order — lives in [NEXT.md](NEXT.md). A milestone moves from there to here when it opens.
 
 ## Later / icebox
-Native Linux/Windows (today: the image) · per-company roles and member removal · plugin system · agent marketplace-style role templates
+Native Linux/Windows (today: the image) · the third level of the studio on Windows and Linux, and a virtual desktop inside the image · a proxy in front of the operator's MCP tools, so that they get a pointer on the stage · per-company roles and member removal · plugin system · agent marketplace-style role templates

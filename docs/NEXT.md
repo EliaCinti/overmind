@@ -50,6 +50,27 @@ Twenty-seven milestones: a company with a CEO you talk to, memory, a hash-chaine
 > door or the cage.
 
 
+> **13 Nov 2026 — the studio, and where it enters the order (accepted by the
+> owner).** The owner asked for agents that share one place under
+> his eyes, at three depths. It is designed in
+> [ADR-0055](adr/0055-agents-share-a-studio.md) and
+> [its plan](plans/2026-11-13-the-studio.md), and stands in the roadmap as
+> **M37 to M40**, all `todo`. Nothing above changes: M34 finishes first.
+>
+> The proposed order: **the two debts M37 stands on** (*a run can read the MCP
+> token of a run alongside it*, in *Debts from the cage*; *moving a task does
+> not stop its run*, in *Debts from the attempts cap*), each a PR of its own;
+> then **M37**, which touches `mcp_server.rs`, a new `studio.rs`, a second
+> socket and the web app, and so does not wait on M35's check; then **M35 and
+> M36b** as ADR-0050 fixed them; then **M38**, then **M39**, each after its
+> measurements. **M40 does not open before M35 and M36b are done** and M38 and
+> M39 have had a week of real use: the third level needs a run that is
+> checked and an approval that knows what cannot be undone.
+>
+> The working folder chosen at first start (designed with the owner on 6 Nov,
+> not yet planned) and M39's named folders share their rules for which paths
+> may be named. Whichever is built first writes them once.
+
 > **23 Aug:** *Tools in the agent's hand* jumped the queue as **M28** — a real need named it (a Blender company for the owner's house, ADR-0036), which is exactly the rule at the bottom of this file. The milestones below keep their names; their numbers shift by one when they open.
 
 ### A week of use *(the owner's milestone)*
